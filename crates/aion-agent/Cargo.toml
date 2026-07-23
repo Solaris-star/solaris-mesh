@@ -1,6 +1,6 @@
 [package]
 name = "aion-agent"
-description = "Agent engine, session management, output sinks, and orchestration for aionrs"
+description = "Agent engine, session management, output sinks, and orchestration for Solaris CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

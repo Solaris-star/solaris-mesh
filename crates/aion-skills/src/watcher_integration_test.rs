@@ -44,7 +44,7 @@ fn make_visible_test_dir(name: &str) -> (PathBuf, TempDirGuard) {
     } else {
         std::env::temp_dir()
     };
-    let dir = base.join(format!("aionrs_watcher_test_{name}_{id}"));
+    let dir = base.join(format!("solaris_watcher_test_{name}_{id}"));
     fs::create_dir_all(&dir).expect("failed to create test dir");
     let guard = TempDirGuard(dir.clone());
     (dir, guard)

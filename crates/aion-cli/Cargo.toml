@@ -1,6 +1,6 @@
 [package]
 name = "aion-cli"
-description = "CLI binary for aionrs — a multi-provider AI agent with tool orchestration"
+description = "Solaris CLI — a multi-provider AI agent with tool orchestration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ keywords = ["ai", "agent", "cli", "llm", "anthropic"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "aionrs"
+name = "solaris"
 path = "src/main.rs"
 
 [dependencies]

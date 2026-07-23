@@ -76,9 +76,9 @@ max_tool_call_failure_turns = 2
 ### Usage
 
 ```bash
-aionrs --profile claude-fast "Quick question"
-aionrs --profile claude-deep "Deep security audit"
-aionrs --profile dev "Create a GitHub issue"
+solaris --profile claude-fast "Quick question"
+solaris --profile claude-deep "Deep security audit"
+solaris --profile dev "Create a GitHub issue"
 ```
 
 - Supports multi-level inheritance chains
@@ -112,13 +112,13 @@ Then enable thinking from the host protocol with `set_config`, or force it for
 one startup:
 
 ```bash
-aionrs --profile deepseek-v4-pro --thinking enabled
+solaris --profile deepseek-v4-pro --thinking enabled
 ```
 
 For one-off OpenAI-compatible launches without a profile, the equivalent is:
 
 ```bash
-aionrs --json-stream \
+solaris --json-stream \
   --provider openai \
   --model deepseek-v4-pro \
   --base-url https://api.deepseek.com/v1 \
@@ -213,18 +213,18 @@ Use your Claude.ai subscription (Pro/Team/Enterprise) directly — no API key ne
 ### Login
 
 ```bash
-aionrs auth login
+solaris auth login
 ```
 
 1. Displays an authorization URL and code
 2. Open the URL in your browser and enter the code
-3. Credentials are saved alongside the global config (run `aionrs config path` to find the directory)
+3. Credentials are saved alongside the global config (run `solaris config path` to find the directory)
 4. Subsequent runs auto-load saved credentials (with auto-refresh)
 
 ### Logout
 
 ```bash
-aionrs auth logout
+solaris auth logout
 ```
 
 ### Configuring OAuth Endpoints
@@ -235,3 +235,7 @@ auth_url = "https://claude.ai/oauth"
 token_url = "https://claude.ai/oauth/token"
 client_id = "aionrs"
 ```
+
+The OAuth service identifies this client with the upstream protocol value
+`aionrs`. This value is intentionally unchanged and is not a product or binary
+name.

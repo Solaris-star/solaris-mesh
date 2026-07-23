@@ -1,6 +1,6 @@
 [package]
 name = "aion-mcp"
-description = "MCP (Model Context Protocol) client implementation for aionrs"
+description = "MCP (Model Context Protocol) client implementation for Solaris CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "aionrs",
-    about = "A multi-provider AI agent CLI with tool orchestration support",
+    name = "solaris",
+    about = "Solaris CLI, a multi-provider AI agent with tool orchestration support",
     version
 )]
 pub(crate) struct Cli {
@@ -68,7 +68,7 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) auto_approve: bool,
 
-    /// Project directory to load .aionrs.toml from (defaults to CWD)
+    /// Project directory to load .solaris.toml from (defaults to CWD)
     #[arg(long)]
     pub(crate) project_dir: Option<PathBuf>,
 

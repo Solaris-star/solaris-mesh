@@ -154,7 +154,7 @@ impl McpManager {
             protocol_version: "2025-03-26".to_string(),
             capabilities: ClientCapabilities { tools: Some(json!({})) },
             client_info: ClientInfo {
-                name: "aionrs".to_string(),
+                name: "solaris".to_string(),
                 version: "0.3.0".to_string(),
             },
         };

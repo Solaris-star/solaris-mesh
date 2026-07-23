@@ -63,11 +63,12 @@ mod tests {
     async fn execute_timeout_preserves_stdout_emitted_before_timeout() {
         let tool = ExecCommandTool::new(std::env::temp_dir());
         #[cfg(windows)]
-        let cmd = "Write-Output aion_stdout_before_timeout; Start-Sleep -Seconds 5";
+        let cmd = "echo aion_stdout_before_timeout & ping -t 127.0.0.1 >nul";
         #[cfg(not(windows))]
         let cmd = "printf 'aion_stdout_before_timeout\\n'; sleep 5";
         let input = json!({
             "cmd": cmd,
+            "shell": if cfg!(windows) { "cmd" } else { "sh" },
             "timeout": 1500
         });
 
@@ -90,11 +91,12 @@ mod tests {
     async fn execute_timeout_preserves_stderr_emitted_before_timeout() {
         let tool = ExecCommandTool::new(std::env::temp_dir());
         #[cfg(windows)]
-        let cmd = "[Console]::Error.WriteLine('aion_stderr_before_timeout'); Start-Sleep -Seconds 5";
+        let cmd = "echo aion_stderr_before_timeout 1>&2 & ping -t 127.0.0.1 >nul";
         #[cfg(not(windows))]
         let cmd = "printf 'aion_stderr_before_timeout\\n' >&2; sleep 5";
         let input = json!({
             "cmd": cmd,
+            "shell": if cfg!(windows) { "cmd" } else { "sh" },
             "timeout": 1500
         });
 
@@ -117,11 +119,12 @@ mod tests {
     async fn execute_timeout_omits_output_after_timeout() {
         let tool = ExecCommandTool::new(std::env::temp_dir());
         #[cfg(windows)]
-        let cmd = "Write-Output aion_before_timeout; Start-Sleep -Seconds 5; Write-Output aion_after_timeout";
+        let cmd = "echo aion_before_timeout & ping -n 6 127.0.0.1 >nul & echo aion_after_timeout";
         #[cfg(not(windows))]
         let cmd = "printf 'aion_before_timeout\\n'; sleep 5; printf 'aion_after_timeout\\n'";
         let input = json!({
             "cmd": cmd,
+            "shell": if cfg!(windows) { "cmd" } else { "sh" },
             "timeout": 1500
         });
 

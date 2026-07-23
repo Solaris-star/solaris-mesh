@@ -7,8 +7,10 @@ use regex::Regex;
 /// 2. Indexed arguments: `$ARGUMENTS[0]`, `$ARGUMENTS[1]`
 /// 3. Shorthand indexed: `$0`, `$1`, `$2`
 /// 4. Full arguments: `$ARGUMENTS` → entire args string
-/// 5. Skill directory: `${AIONRS_SKILL_DIR}` → `skill_root`
-/// 6. Session ID: `${AIONRS_SESSION_ID}` → `session_id`
+/// 5. Skill directory: `${SOLARIS_SKILL_DIR}` → `skill_root`
+/// 6. Session ID: `${SOLARIS_SESSION_ID}` → `session_id`
+///
+/// The legacy `AIONRS_*` placeholders remain supported as compatibility aliases.
 /// 7. Fallback: if content is unchanged and args is non-empty, append `\n\nARGUMENTS: {args}`
 ///
 /// When `args` is `None`, the content is returned unchanged (no placeholders replaced).
@@ -22,14 +24,18 @@ pub fn substitute_arguments(
     // Always apply env-var substitutions regardless of args.
     let mut result = content.to_owned();
 
-    // 5. ${AIONRS_SKILL_DIR}
+    // 5. ${SOLARIS_SKILL_DIR} and legacy alias
     if let Some(root) = skill_root {
-        result = result.replace("${AIONRS_SKILL_DIR}", root);
+        result = result
+            .replace("${SOLARIS_SKILL_DIR}", root)
+            .replace("${AIONRS_SKILL_DIR}", root);
     }
 
-    // 6. ${AIONRS_SESSION_ID}
+    // 6. ${SOLARIS_SESSION_ID} and legacy alias
     if let Some(sid) = session_id {
-        result = result.replace("${AIONRS_SESSION_ID}", sid);
+        result = result
+            .replace("${SOLARIS_SESSION_ID}", sid)
+            .replace("${AIONRS_SESSION_ID}", sid);
     }
 
     // If no args provided, return after env substitutions only.

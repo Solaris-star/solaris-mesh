@@ -7,19 +7,19 @@
 cargo build --release
 
 # Binary location
-./target/release/aionrs
+./target/release/solaris
 ```
 
 ## Command Format
 
 ```
-aionrs [OPTIONS] [PROMPT]...
+solaris [OPTIONS] [PROMPT]...
 ```
 
 - With `PROMPT`: single-shot mode — completes the task and exits
 - Without `PROMPT`: enters interactive REPL mode
 
-> For the full list of CLI parameters, run `aionrs --help`.
+> For the full list of CLI parameters, run `solaris --help`.
 
 ### Subcommands
 
@@ -28,12 +28,12 @@ subcommand runs its action and exits — it does not start the agent main flow.
 
 | Subcommand | Description |
 |------------|--------------|
-| `aionrs config init` | Generate a default global config file |
-| `aionrs config path` | Print the global config file path |
-| `aionrs auth login` | Login with Anthropic account (OAuth device flow) |
-| `aionrs auth logout` | Logout (remove saved OAuth credentials) |
-| `aionrs session list` | List saved sessions |
-| `aionrs skills path` | Print skill directory paths |
+| `solaris config init` | Generate a default global config file |
+| `solaris config path` | Print the global config file path |
+| `solaris auth login` | Login with Anthropic account (OAuth device flow) |
+| `solaris auth logout` | Logout (remove saved OAuth credentials) |
+| `solaris session list` | List saved sessions |
+| `solaris skills path` | Print skill directory paths |
 
 ### Key Parameters
 
@@ -60,24 +60,36 @@ subcommand runs its action and exits — it does not start the agent main flow.
 ### Three-Level Cascading
 
 ```
-<global config>                   (global, user-level; run `aionrs config path` to find)
+<global config>                   (global, user-level; run `solaris config path` to find)
     ↓ overridden by
-./.aionrs.toml                  (project-level, working directory)
+./.solaris.toml                  (project-level, working directory)
     ↓ overridden by
 CLI parameters / env vars        (highest priority)
 ```
 
+### Migration from AionRS
+
+On first use, Solaris CLI copies existing data to the new locations when the
+corresponding Solaris location does not exist:
+
+- `<config_dir>/aionrs/` → `<config_dir>/solaris/`
+- `.aionrs.toml` → `.solaris.toml`
+- `.aionrs/` → `.solaris/`
+
+The old files are retained for rollback. Existing Solaris files always take
+precedence and are never overwritten by migration.
+
 ### Generate Default Config
 
 ```bash
-aionrs config init
-# Creates the global config file (run `aionrs config path` to see the location)
+solaris config init
+# Creates the global config file (run `solaris config path` to see the location)
 ```
 
 ### Config File Format
 
 ```toml
-# Global config file (path varies by OS, use `aionrs config path` to find)
+# Global config file (path varies by OS, use `solaris config path` to find)
 
 [default]
 provider = "anthropic"
@@ -140,7 +152,7 @@ allow_list = ["Read", "Grep", "Glob"]
 
 [session]
 enabled = true
-directory = ".aionrs/sessions"
+directory = ".solaris/sessions"
 max_sessions = 20
 
 [compact]
@@ -154,7 +166,7 @@ max_entries = 100
 
 [plan]
 enabled = true
-plan_directory = ".aionrs/plans"
+plan_directory = ".solaris/plans"
 
 # [logging]
 # enabled = true              # enable file logging (default: false)
@@ -185,7 +197,7 @@ Precedence is `CLI > profile > project config > global config > built-in default
 2. Config file `providers.<name>.api_key`
 3. Env var `API_KEY`
 4. Env var `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (depends on provider)
-5. OAuth credentials (via `aionrs auth login`)
+5. OAuth credentials (via `solaris auth login`)
 
 > **Note**: `bedrock` and `vertex` providers use their own cloud credentials and do not require a traditional API key. See [Providers & Auth](providers.md).
 
@@ -215,24 +227,24 @@ base_url = "https://my-service.example.com/api/openai"
 ### 1. Initialize and Configure
 
 ```bash
-aionrs config init
-# Edit the config file (run `aionrs config path` to find it), add your API key
+solaris config init
+# Edit the config file (run `solaris config path` to find it), add your API key
 ```
 
 ### 2. Single-Shot Mode
 
 ```bash
-aionrs "Read and explain crates/aion-agent/src/engine.rs"
+solaris "Read and explain crates/aion-agent/src/engine.rs"
 ```
 
 ### 3. Interactive REPL
 
 ```
-$ aionrs
+$ solaris
 
 > Read the file Cargo.toml
      1  [package]
-     2  name = "aionrs"
+     2  name = "solaris"
      ...
 [turns: 1 | tokens: 1234 in / 567 out]
 
@@ -250,15 +262,15 @@ REPL commands: `/quit`, `/exit`, or empty line to exit.
 ### 4. Switching Profiles
 
 ```bash
-aionrs --profile deepseek "Fix the bug in main.rs"
-aionrs --profile ollama "Analyze code quality"
+solaris --profile deepseek "Fix the bug in main.rs"
+solaris --profile ollama "Analyze code quality"
 ```
 
 ### 5. Environment Variables
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-xxx
-aionrs "List all Rust files in this project"
+solaris "List all Rust files in this project"
 ```
 
 ---
@@ -287,20 +299,20 @@ Allow? [y]es / [n]o / [a]lways / [q]uit > y
 
 ## Session Management
 
-Sessions auto-save to `.aionrs/sessions/`.
+Sessions auto-save to `.solaris/sessions/`.
 
 ```bash
 # List saved sessions
-aionrs session list
+solaris session list
 
 # Resume the latest session
-aionrs --resume latest
+solaris --resume latest
 
 # Resume a specific session
-aionrs --resume a1b2c3
+solaris --resume a1b2c3
 
 # Create a session with a custom ID
-aionrs --session-id my-conv-123
+solaris --session-id my-conv-123
 ```
 
 - `--session-id` and `--resume` are mutually exclusive

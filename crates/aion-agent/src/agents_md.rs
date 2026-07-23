@@ -34,7 +34,7 @@ pub fn collect_agents_md(cwd: &str) -> Vec<AgentsMdFile> {
     let cwd_path = Path::new(cwd);
     let mut files = Vec::new();
 
-    // 1. Global: <config_dir>/aionrs/AGENTS.md
+    // 1. Global: <config_dir>/solaris/AGENTS.md
     if let Some(global_path) = app_config_dir().map(|d| d.join("AGENTS.md"))
         && let Some(file) = read_agents_md(&global_path, true)
     {

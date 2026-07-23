@@ -247,7 +247,7 @@ fn default_true() -> bool {
     true
 }
 fn default_session_dir() -> String {
-    ".aionrs/sessions".to_string()
+    ".solaris/sessions".to_string()
 }
 fn default_max_sessions() -> usize {
     20
@@ -327,16 +327,14 @@ pub struct CliArgs {
 impl Config {
     /// Load and merge config from all sources
     pub fn resolve(cli: &CliArgs) -> anyhow::Result<Self> {
+        let project_dir = cli.project_dir.clone().unwrap_or(std::env::current_dir()?);
+        crate::migration::migrate_legacy_data(&project_dir)?;
+
         // 1. Load global config
         let global = load_config_file(&global_config_path());
 
         // 2. Load project config (from project_dir if specified, else CWD)
-        let project_path = cli
-            .project_dir
-            .as_ref()
-            .map(|d| d.join(".aionrs.toml"))
-            .unwrap_or_else(project_config_path);
-        let project = load_config_file(&project_path);
+        let project = load_config_file(&project_dir.join(".solaris.toml"));
 
         // 3. Merge: global <- project
         let mut merged = merge_config_files(global, project);
@@ -587,7 +585,7 @@ fn resolve_api_key(cli_key: Option<&str>, config_key: Option<&str>, provider: Pr
 
     anyhow::bail!(
         "No API key found. Provide via --api-key, config file, environment variable \
-         (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY), or run 'aionrs auth login'."
+         (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY), or run 'solaris auth login'."
     )
 }
 
@@ -595,23 +593,19 @@ fn resolve_api_key(cli_key: Option<&str>, config_key: Option<&str>, provider: Pr
 
 /// Platform-aware app config root.
 ///
-/// - Linux:   `~/.config/aionrs`
-/// - macOS:   `~/Library/Application Support/aionrs`
-/// - Windows: `%APPDATA%\aionrs`
+/// - Linux:   `~/.config/solaris`
+/// - macOS:   `~/Library/Application Support/solaris`
+/// - Windows: `%APPDATA%\solaris`
 pub fn app_config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("aionrs"))
+    dirs::config_dir().map(|d| d.join("solaris"))
 }
 
 // --- Config file loading and merging ---
 
 pub fn global_config_path() -> PathBuf {
     app_config_dir()
-        .unwrap_or_else(|| PathBuf::from("aionrs"))
+        .unwrap_or_else(|| PathBuf::from("solaris"))
         .join("config.toml")
-}
-
-fn project_config_path() -> PathBuf {
-    PathBuf::from(".aionrs.toml")
 }
 
 fn load_config_file(path: &Path) -> ConfigFile {
@@ -884,7 +878,7 @@ pub fn init_config() -> anyhow::Result<()> {
     Ok(())
 }
 
-const DEFAULT_CONFIG_TEMPLATE: &str = r#"# aionrs configuration
+const DEFAULT_CONFIG_TEMPLATE: &str = r#"# Solaris CLI configuration
 
 # Default provider settings
 [default]
@@ -938,7 +932,7 @@ default = "auto"                 # auto, powershell, pwsh, cmd, bash, zsh, sh, o
 # region = "us-central1"
 # credentials_file = "/path/to/service-account.json"  # or use ADC
 
-# OAuth settings (for `aionrs auth login` with Claude.ai account)
+# OAuth settings (for `solaris auth login` with Claude.ai account)
 # [auth]
 # auth_url = "https://claude.ai/oauth"
 # token_url = "https://claude.ai/oauth/token"
@@ -1005,7 +999,7 @@ allow_list = ["Read", "Grep", "Glob"]
 # Session settings
 [session]
 enabled = true
-directory = ".aionrs/sessions"  # relative to project root
+directory = ".solaris/sessions"  # relative to project root
 max_sessions = 20                # auto-cleanup oldest
 
 # Hook system: run shell commands at tool lifecycle events
@@ -1029,7 +1023,7 @@ max_sessions = 20                # auto-cleanup oldest
 # [logging]
 # enabled = true                   # enable file logging (default: false)
 # level = "info"                   # log level filter (default: "info")
-# dir = "~/Library/Logs/aionrs"    # log directory (default: platform-specific)
+# dir = "~/Library/Logs/solaris"    # log directory (default: platform-specific)
 
 # MCP (Model Context Protocol) servers
 # [mcp.servers.filesystem]

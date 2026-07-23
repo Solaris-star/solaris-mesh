@@ -195,31 +195,47 @@ mod tests {
 
     #[test]
     #[serial(env)]
-    fn base_dir_env_override() {
-        let key = MEMORY_DIR_ENV;
-        let original = std::env::var(key).ok();
+    fn base_dir_solaris_env_override() {
+        let saved = save_memory_env();
+        set_memory_env(Some("/custom/memory"), None);
 
-        // SAFETY: #[serial(env)] ensures no concurrent env mutation.
-        unsafe { std::env::set_var(key, "/custom/memory") };
-        let result = memory_base_dir();
-        assert_eq!(result, Some(PathBuf::from("/custom/memory")));
+        assert_eq!(memory_base_dir(), Some(PathBuf::from("/custom/memory")));
 
-        restore_env(key, original);
+        restore_memory_env(saved);
+    }
+
+    #[test]
+    #[serial(env)]
+    fn base_dir_solaris_env_takes_priority_over_legacy_alias() {
+        let saved = save_memory_env();
+        set_memory_env(Some("/new/memory"), Some("/legacy/memory"));
+
+        assert_eq!(memory_base_dir(), Some(PathBuf::from("/new/memory")));
+
+        restore_memory_env(saved);
+    }
+
+    #[test]
+    #[serial(env)]
+    fn base_dir_legacy_env_remains_a_compatibility_alias() {
+        let saved = save_memory_env();
+        set_memory_env(None, Some("/legacy/memory"));
+
+        assert_eq!(memory_base_dir(), Some(PathBuf::from("/legacy/memory")));
+
+        restore_memory_env(saved);
     }
 
     #[test]
     #[serial(env)]
     fn base_dir_empty_env_falls_through() {
-        let key = MEMORY_DIR_ENV;
-        let original = std::env::var(key).ok();
+        let saved = save_memory_env();
+        set_memory_env(Some(""), Some(""));
 
-        // SAFETY: #[serial(env)] ensures no concurrent env mutation.
-        unsafe { std::env::set_var(key, "") };
         let result = memory_base_dir();
-        // Should fall through to app_config_dir
         assert_ne!(result, Some(PathBuf::from("")));
 
-        restore_env(key, original);
+        restore_memory_env(saved);
     }
 
     // -- auto_memory_dir ------------------------------------------------------
@@ -227,25 +243,38 @@ mod tests {
     #[test]
     #[serial(env)]
     fn auto_memory_dir_structure() {
-        let key = MEMORY_DIR_ENV;
-        let original = std::env::var(key).ok();
+        let saved = save_memory_env();
+        set_memory_env(Some("/base"), None);
 
-        // SAFETY: #[serial(env)] ensures no concurrent env mutation.
-        unsafe { std::env::set_var(key, "/base") };
         let dir = auto_memory_dir(Path::new("/home/user/project")).unwrap();
         assert_eq!(dir, PathBuf::from("/base/projects/-home-user-project/memory"));
 
-        restore_env(key, original);
+        restore_memory_env(saved);
     }
 
-    fn restore_env(key: &str, saved: Option<String>) {
+    fn save_memory_env() -> (Option<String>, Option<String>) {
+        (
+            std::env::var(MEMORY_DIR_ENV).ok(),
+            std::env::var(LEGACY_MEMORY_DIR_ENV).ok(),
+        )
+    }
+
+    fn set_memory_env(solaris: Option<&str>, legacy: Option<&str>) {
         // SAFETY: only called from #[serial(env)] tests.
         unsafe {
-            match saved {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
+            match solaris {
+                Some(value) => std::env::set_var(MEMORY_DIR_ENV, value),
+                None => std::env::remove_var(MEMORY_DIR_ENV),
+            }
+            match legacy {
+                Some(value) => std::env::set_var(LEGACY_MEMORY_DIR_ENV, value),
+                None => std::env::remove_var(LEGACY_MEMORY_DIR_ENV),
             }
         }
+    }
+
+    fn restore_memory_env(saved: (Option<String>, Option<String>)) {
+        set_memory_env(saved.0.as_deref(), saved.1.as_deref());
     }
 
     // -- normalize_lexical ----------------------------------------------------

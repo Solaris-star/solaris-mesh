@@ -8,7 +8,7 @@ use crate::types::{LoadedFrom, SkillMetadata, SkillSource};
 // Public manager
 // ---------------------------------------------------------------------------
 
-/// Manages runtime discovery of `.aionrs/skills/` directories found in
+/// Manages runtime discovery of `.solaris/skills/` directories found in
 /// subdirectories when the LLM operates on files.
 ///
 /// CWD-level skills are loaded at startup; this manager handles dynamically
@@ -39,7 +39,7 @@ impl RuntimeDiscovery {
         }
     }
 
-    /// Discover `.aionrs/skills/` directories by walking up from each file path to `cwd`.
+    /// Discover `.solaris/skills/` directories by walking up from each file path to `cwd`.
     ///
     /// Only discovers directories **below** `cwd` (cwd-level skills are loaded at
     /// startup). Already-checked directories are skipped to avoid redundant stat
@@ -76,7 +76,7 @@ impl RuntimeDiscovery {
                     break;
                 }
 
-                let skill_dir = current.join(".aionrs").join("skills");
+                let skill_dir = current.join(".solaris").join("skills");
 
                 if !self.checked_dirs.contains(&skill_dir) {
                     self.checked_dirs.insert(skill_dir.clone());
@@ -86,7 +86,7 @@ impl RuntimeDiscovery {
                         // grandparent) is gitignored. Aligns with TS L892 which passes
                         // `currentDir` (not skillDir) to isPathGitignored (C4).
                         let containing_dir = skill_dir
-                            .parent() // .aionrs/
+                            .parent() // .solaris/
                             .and_then(|p| p.parent()) // currentDir
                             .unwrap_or(&current);
 
@@ -170,13 +170,13 @@ impl RuntimeDiscovery {
     /// Clear dynamic skills (e.g., when reloading the skill set).
     ///
     /// `checked_dirs` is preserved to avoid redundant stat calls for directories
-    /// already known not to contain a `.aionrs/skills/` subdirectory.
+    /// already known not to contain a `.solaris/skills/` subdirectory.
     pub fn clear_dynamic_skills(&mut self) {
         self.dynamic_skills.clear();
     }
 
     /// Clear the set of directories that have already been checked for
-    /// `.aionrs/skills/` subdirectories.
+    /// `.solaris/skills/` subdirectories.
     ///
     /// Call this when a file-system watcher detects changes so that newly
     /// created directories (or directories that were previously absent) are

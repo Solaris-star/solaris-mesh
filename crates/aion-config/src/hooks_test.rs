@@ -19,7 +19,9 @@ mod tests {
     fn slow_stdout_command(message: &str) -> String {
         match default_shell().kind {
             ShellKind::PowerShell => {
-                format!("Write-Output {message}; Start-Sleep -Seconds 5")
+                format!(
+                    "[Console]::Out.WriteLine('{message}'); [Console]::Out.Flush(); while ($true) {{ [Threading.Thread]::Sleep(100) }}"
+                )
             }
             ShellKind::Cmd => format!("echo {message} & ping -n 6 127.0.0.1 > nul"),
             ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => {

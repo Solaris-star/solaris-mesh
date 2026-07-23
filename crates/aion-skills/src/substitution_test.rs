@@ -86,15 +86,27 @@ mod tests {
     }
 
     #[test]
-    fn test_aionrs_skill_dir_substitution() {
-        let result = substitute_arguments("dir=${AIONRS_SKILL_DIR}", None, &[], Some("/my/skill"), None);
+    fn test_solaris_skill_dir_substitution() {
+        let result = substitute_arguments("dir=${SOLARIS_SKILL_DIR}", None, &[], Some("/my/skill"), None);
         assert_eq!(result, "dir=/my/skill");
     }
 
     #[test]
-    fn test_aionrs_session_id_substitution() {
-        let result = substitute_arguments("sid=${AIONRS_SESSION_ID}", None, &[], None, Some("sess-123"));
+    fn test_solaris_session_id_substitution() {
+        let result = substitute_arguments("sid=${SOLARIS_SESSION_ID}", None, &[], None, Some("sess-123"));
         assert_eq!(result, "sid=sess-123");
+    }
+
+    #[test]
+    fn legacy_placeholders_remain_compatibility_aliases() {
+        let result = substitute_arguments(
+            "dir=${AIONRS_SKILL_DIR};sid=${AIONRS_SESSION_ID}",
+            None,
+            &[],
+            Some("/legacy/skill"),
+            Some("legacy-session"),
+        );
+        assert_eq!(result, "dir=/legacy/skill;sid=legacy-session");
     }
 
     #[test]
@@ -286,32 +298,32 @@ mod supplemental_tests {
     }
 
     // -----------------------------------------------------------------------
-    // TC-6.x: ${AIONRS_SKILL_DIR} substitution
+    // TC-6.x: ${SOLARIS_SKILL_DIR} substitution
     // -----------------------------------------------------------------------
 
     #[test]
     fn tc_6_1_skill_dir_replaced() {
         let r = substitute_arguments(
-            "cd ${AIONRS_SKILL_DIR}",
+            "cd ${SOLARIS_SKILL_DIR}",
             None,
             &[],
-            Some("/home/user/.aionrs/skills/my-skill"),
+            Some("/home/user/.solaris/skills/my-skill"),
             None,
         );
-        assert_eq!(r, "cd /home/user/.aionrs/skills/my-skill");
+        assert_eq!(r, "cd /home/user/.solaris/skills/my-skill");
     }
 
     #[test]
     fn tc_6_2_skill_dir_none_not_replaced() {
-        // skill_root = None → ${AIONRS_SKILL_DIR} stays unreplaced
-        let r = substitute_arguments("cd ${AIONRS_SKILL_DIR}", None, &[], None, None);
-        assert_eq!(r, "cd ${AIONRS_SKILL_DIR}");
+        // skill_root = None → ${SOLARIS_SKILL_DIR} stays unreplaced
+        let r = substitute_arguments("cd ${SOLARIS_SKILL_DIR}", None, &[], None, None);
+        assert_eq!(r, "cd ${SOLARIS_SKILL_DIR}");
     }
 
     #[test]
     fn tc_6_3_skill_dir_multiple_occurrences() {
         let r = substitute_arguments(
-            "${AIONRS_SKILL_DIR}/a and ${AIONRS_SKILL_DIR}/b",
+            "${SOLARIS_SKILL_DIR}/a and ${SOLARIS_SKILL_DIR}/b",
             None,
             &[],
             Some("/skills/foo"),
@@ -321,19 +333,19 @@ mod supplemental_tests {
     }
 
     // -----------------------------------------------------------------------
-    // TC-7.x: ${AIONRS_SESSION_ID} substitution
+    // TC-7.x: ${SOLARIS_SESSION_ID} substitution
     // -----------------------------------------------------------------------
 
     #[test]
     fn tc_7_1_session_id_replaced() {
-        let r = substitute_arguments("Session: ${AIONRS_SESSION_ID}", None, &[], None, Some("abc-123"));
+        let r = substitute_arguments("Session: ${SOLARIS_SESSION_ID}", None, &[], None, Some("abc-123"));
         assert_eq!(r, "Session: abc-123");
     }
 
     #[test]
     fn tc_7_2_session_id_none_not_replaced() {
-        let r = substitute_arguments("Session: ${AIONRS_SESSION_ID}", None, &[], None, None);
-        assert_eq!(r, "Session: ${AIONRS_SESSION_ID}");
+        let r = substitute_arguments("Session: ${SOLARIS_SESSION_ID}", None, &[], None, None);
+        assert_eq!(r, "Session: ${SOLARIS_SESSION_ID}");
     }
 
     // -----------------------------------------------------------------------
@@ -373,7 +385,7 @@ mod supplemental_tests {
     #[test]
     fn tc_9_1_multiple_placeholder_types() {
         let r = substitute_arguments(
-            "cd ${AIONRS_SKILL_DIR} && run $ARGUMENTS[0] with $ARGUMENTS",
+            "cd ${SOLARIS_SKILL_DIR} && run $ARGUMENTS[0] with $ARGUMENTS",
             Some("alpha beta"),
             &[],
             Some("/skills/foo"),
@@ -408,7 +420,7 @@ mod supplemental_tests {
     #[test]
     fn tc_15_2_skill_dir_and_arguments_same_line() {
         let r = substitute_arguments(
-            "${AIONRS_SKILL_DIR}: $ARGUMENTS",
+            "${SOLARIS_SKILL_DIR}: $ARGUMENTS",
             Some("test"),
             &[],
             Some("/root"),

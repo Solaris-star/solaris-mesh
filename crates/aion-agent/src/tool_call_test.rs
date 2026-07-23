@@ -76,7 +76,7 @@ mod tests {
         let command_b = ContentBlock::ToolUse {
             id: "call-b".into(),
             name: "ExecCommand".into(),
-            input: json!({ "cmd": "aioncore assistants update" }),
+            input: json!({ "cmd": "solariscore assistants update" }),
             extra: None,
         };
         let command_a = tool_call_failure_fingerprint(&[command_a]);
