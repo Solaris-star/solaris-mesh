@@ -28,7 +28,7 @@ pub struct SkillTool {
     cwd: PathBuf,
     /// Permission checker for skill-level deny/allow rules.
     checker: SkillPermissionChecker,
-    /// Session ID passed to prepare_inline_content for ${AIONRS_SESSION_ID} substitution.
+    /// Session ID passed to prepare_inline_content for ${SOLARIS_SESSION_ID} substitution.
     /// None if sessions are disabled or not yet initialised.
     session_id: Option<String>,
     /// Spawner for fork-mode skills. None when SkillTool is built without fork support.

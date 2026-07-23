@@ -19,20 +19,20 @@ mod tests {
     // --- user_skills_dir ---
 
     #[test]
-    fn test_user_skills_dir_contains_aionrs_skills() {
+    fn test_user_skills_dir_contains_solaris_skills() {
         if let Some(dir) = user_skills_dir() {
             let s = dir.to_string_lossy();
-            assert!(s.contains("aionrs"), "expected 'aionrs' in path: {s}");
+            assert!(s.contains("solaris"), "expected 'solaris' in path: {s}");
             assert!(s.ends_with("skills"), "expected path to end with 'skills': {s}");
         }
         // If app_config_dir() returns None (rare), that's acceptable.
     }
 
     #[test]
-    fn test_user_commands_dir_contains_aionrs_commands() {
+    fn test_user_commands_dir_contains_solaris_commands() {
         if let Some(dir) = user_commands_dir() {
             let s = dir.to_string_lossy();
-            assert!(s.contains("aionrs"));
+            assert!(s.contains("solaris"));
             assert!(s.ends_with("commands"));
         }
     }
@@ -79,10 +79,10 @@ mod tests {
         fs::create_dir(root.join(".git")).unwrap();
 
         // Create skills dirs at root and nested level
-        make_dir(root, ".aionrs/skills");
+        make_dir(root, ".solaris/skills");
         let nested = root.join("sub").join("project");
         fs::create_dir_all(&nested).unwrap();
-        make_dir(&nested, ".aionrs/skills");
+        make_dir(&nested, ".solaris/skills");
 
         let dirs = project_skills_dirs(&nested);
         // Should find both (deepest first)
@@ -96,7 +96,7 @@ mod tests {
     fn test_project_skills_dirs_skips_missing() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
-        // No .aionrs/skills/ anywhere
+        // No .solaris/skills/ anywhere
         let dirs = project_skills_dirs(tmp.path());
         assert!(dirs.is_empty());
     }
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn test_additional_skills_dirs_existing() {
         let tmp = TempDir::new().unwrap();
-        make_dir(tmp.path(), ".aionrs/skills");
+        make_dir(tmp.path(), ".solaris/skills");
         let result = additional_skills_dirs(&[tmp.path().to_path_buf()]);
         assert_eq!(result.len(), 1);
     }
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn test_additional_skills_dirs_missing_silently_skipped() {
         let tmp = TempDir::new().unwrap();
-        // No .aionrs/skills/ under tmp
+        // No .solaris/skills/ under tmp
         let result = additional_skills_dirs(&[tmp.path().to_path_buf()]);
         assert!(result.is_empty());
     }
@@ -200,7 +200,7 @@ mod supplemental_tests {
         if let Some(dir) = user_skills_dir() {
             let s = dir.to_string_lossy();
             assert!(s.ends_with("skills"), "path should end with 'skills': {s}");
-            assert!(s.contains("aionrs"), "path should contain 'aionrs': {s}");
+            assert!(s.contains("solaris"), "path should contain 'solaris': {s}");
         }
     }
 
@@ -209,7 +209,7 @@ mod supplemental_tests {
         if let Some(dir) = user_commands_dir() {
             let s = dir.to_string_lossy();
             assert!(s.ends_with("commands"), "path should end with 'commands': {s}");
-            assert!(s.contains("aionrs"), "path should contain 'aionrs': {s}");
+            assert!(s.contains("solaris"), "path should contain 'solaris': {s}");
         }
     }
 
@@ -221,9 +221,9 @@ mod supplemental_tests {
     fn tc_4_2_project_skills_dirs_nonexistent_subdir_not_returned() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
-        // No .aionrs/skills/ created
+        // No .solaris/skills/ created
         let dirs = project_skills_dirs(tmp.path());
-        assert!(dirs.is_empty(), "should be empty when .aionrs/skills/ doesn't exist");
+        assert!(dirs.is_empty(), "should be empty when .solaris/skills/ doesn't exist");
     }
 
     #[test]
@@ -231,11 +231,11 @@ mod supplemental_tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir(root.join(".git")).unwrap();
-        make_dir(root, ".aionrs/skills");
+        make_dir(root, ".solaris/skills");
 
         let inner = root.join("sub");
         fs::create_dir_all(&inner).unwrap();
-        make_dir(&inner, ".aionrs/skills");
+        make_dir(&inner, ".solaris/skills");
 
         let dirs = project_skills_dirs(&inner);
         assert_eq!(dirs.len(), 2);
@@ -251,19 +251,19 @@ mod supplemental_tests {
     fn tc_4_4_project_skills_dirs_stops_at_git_root() {
         let tmp = TempDir::new().unwrap();
         let grandparent = tmp.path();
-        // .aionrs/skills in grandparent (above git root) — should NOT be collected
-        make_dir(grandparent, ".aionrs/skills");
+        // .solaris/skills in grandparent (above git root) — should NOT be collected
+        make_dir(grandparent, ".solaris/skills");
 
         let repo = grandparent.join("repo");
         fs::create_dir_all(&repo).unwrap();
         fs::create_dir(repo.join(".git")).unwrap();
-        make_dir(&repo, ".aionrs/skills");
+        make_dir(&repo, ".solaris/skills");
 
         let sub = repo.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
         let dirs = project_skills_dirs(&sub);
-        // Only repo's .aionrs/skills should be included
+        // Only repo's .solaris/skills should be included
         assert!(
             dirs.iter().all(|d| d.starts_with(&repo)),
             "should not include dirs above git root, got: {dirs:?}"
@@ -288,11 +288,11 @@ mod supplemental_tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir(root.join(".git")).unwrap();
-        make_dir(root, ".aionrs/commands");
+        make_dir(root, ".solaris/commands");
 
         let dirs = project_commands_dirs(root);
         assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with(".aionrs/commands"));
+        assert!(dirs[0].ends_with(".solaris/commands"));
     }
 
     // -----------------------------------------------------------------------
@@ -302,17 +302,17 @@ mod supplemental_tests {
     #[test]
     fn tc_6_1_additional_skills_dirs_with_existing_subdir() {
         let tmp = TempDir::new().unwrap();
-        make_dir(tmp.path(), ".aionrs/skills");
+        make_dir(tmp.path(), ".solaris/skills");
 
         let result = additional_skills_dirs(&[tmp.path().to_path_buf()]);
         assert_eq!(result.len(), 1);
-        assert!(result[0].ends_with(".aionrs/skills"));
+        assert!(result[0].ends_with(".solaris/skills"));
     }
 
     #[test]
     fn tc_6_2_additional_skills_dirs_no_subdir_skipped() {
         let tmp = TempDir::new().unwrap();
-        // No .aionrs/skills/ subdirectory
+        // No .solaris/skills/ subdirectory
         let result = additional_skills_dirs(&[tmp.path().to_path_buf()]);
         assert!(result.is_empty());
     }
@@ -321,8 +321,8 @@ mod supplemental_tests {
     fn tc_6_4_additional_skills_dirs_multiple_add_dirs() {
         let tmp1 = TempDir::new().unwrap();
         let tmp2 = TempDir::new().unwrap();
-        make_dir(tmp1.path(), ".aionrs/skills");
-        make_dir(tmp2.path(), ".aionrs/skills");
+        make_dir(tmp1.path(), ".solaris/skills");
+        make_dir(tmp2.path(), ".solaris/skills");
 
         let result = additional_skills_dirs(&[tmp1.path().to_path_buf(), tmp2.path().to_path_buf()]);
         assert_eq!(result.len(), 2);

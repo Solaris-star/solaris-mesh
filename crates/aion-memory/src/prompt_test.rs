@@ -324,7 +324,7 @@ mod tests {
         ];
         for text in all_text {
             assert!(
-                !text.contains("~/.config/aionrs"),
+                !text.contains("~/.config/solaris"),
                 "should not hardcode platform-specific path"
             );
             assert!(!text.contains("~/.claude"), "should not contain bb brand path");

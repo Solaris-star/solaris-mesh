@@ -33,28 +33,28 @@ pub fn default_log_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         dirs::home_dir()
-            .map(|h| h.join("Library").join("Logs").join("aionrs"))
-            .unwrap_or_else(|| PathBuf::from("aionrs/logs"))
+            .map(|h| h.join("Library").join("Logs").join("solaris"))
+            .unwrap_or_else(|| PathBuf::from("solaris/logs"))
     }
     #[cfg(target_os = "linux")]
     {
         dirs::state_dir()
-            .map(|d| d.join("aionrs").join("logs"))
+            .map(|d| d.join("solaris").join("logs"))
             .unwrap_or_else(|| {
                 dirs::home_dir()
-                    .map(|h| h.join(".local").join("state").join("aionrs").join("logs"))
-                    .unwrap_or_else(|| PathBuf::from("aionrs/logs"))
+                    .map(|h| h.join(".local").join("state").join("solaris").join("logs"))
+                    .unwrap_or_else(|| PathBuf::from("solaris/logs"))
             })
     }
     #[cfg(target_os = "windows")]
     {
         dirs::data_dir()
-            .map(|d| d.join("aionrs").join("logs"))
-            .unwrap_or_else(|| PathBuf::from("aionrs/logs"))
+            .map(|d| d.join("solaris").join("logs"))
+            .unwrap_or_else(|| PathBuf::from("solaris/logs"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        PathBuf::from("aionrs/logs")
+        PathBuf::from("solaris/logs")
     }
 }
 
@@ -80,7 +80,7 @@ where
 
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_suffix("aionrs.log")
+        .filename_suffix("solaris.log")
         .build(&config.dir)
         .map_err(|e| LoggingError::AppenderInit(e.to_string()))?;
 

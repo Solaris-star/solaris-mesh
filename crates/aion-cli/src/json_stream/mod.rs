@@ -1,4 +1,4 @@
-//! JSON stream protocol entry point for host integration (e.g. AionUI).
+//! JSON stream protocol entry point for host integration (e.g. Solaris Studio).
 //!
 //! This file is a façade — module declarations and re-export only.
 //! All logic lives in the submodules:

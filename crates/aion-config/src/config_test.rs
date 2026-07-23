@@ -1073,7 +1073,7 @@ enabled = false
     #[test]
     fn test_resolve_with_project_dir_loads_project_config() {
         let tmp = tempfile::tempdir().unwrap();
-        let project_toml = tmp.path().join(".aionrs.toml");
+        let project_toml = tmp.path().join(".solaris.toml");
         std::fs::write(
             &project_toml,
             r#"
@@ -1135,7 +1135,7 @@ max_tool_call_failure_turns = 4
     fn test_config_resolve_loads_flat_provider_compat_after_domain_split() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".aionrs.toml"),
+            tmp.path().join(".solaris.toml"),
             r#"
 [default]
 provider = "openai"
@@ -1257,7 +1257,7 @@ effort_levels = ["low", "medium"]
     fn test_config_resolve_cli_thinking_preserves_explicit_unsupported_capability() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".aionrs.toml"),
+            tmp.path().join(".solaris.toml"),
             r#"
 [providers.openai.compat]
 supports_thinking = false
@@ -1345,7 +1345,7 @@ supports_thinking = false
     fn test_config_resolve_normalizes_official_openai_root_base_url() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".aionrs.toml"),
+            tmp.path().join(".solaris.toml"),
             r#"
 [providers.openai]
 base_url = "https://api.openai.com"
@@ -1403,7 +1403,7 @@ base_url = "https://api.openai.com"
     fn test_config_resolve_loads_flat_provider_max_tool_count_limits() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".aionrs.toml"),
+            tmp.path().join(".solaris.toml"),
             r#"
 [default]
 provider = "gemini"
@@ -1448,7 +1448,7 @@ max_request_body_bytes = 1048576
     fn test_openai_field_controls_alias_and_profile_override_flattened_compat() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".aionrs.toml"),
+            tmp.path().join(".solaris.toml"),
             r#"
 [default]
 provider = "nim"
@@ -1524,7 +1524,7 @@ supports_effort = true
     fn test_config_resolve_tool_wire_shape_override_from_provider_compat() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(".aionrs.toml"),
+            tmp.path().join(".solaris.toml"),
             r#"
 [default]
 provider = "openai"

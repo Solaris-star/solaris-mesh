@@ -307,7 +307,7 @@ mod supplemental_tests {
 
     #[tokio::test]
     async fn tc_13_8_full_variable_substitution_integration() {
-        let mut skill = make_skill("my-skill", "Run ${AIONRS_SKILL_DIR}/tool.sh $ARGUMENTS[0]");
+        let mut skill = make_skill("my-skill", "Run ${SOLARIS_SKILL_DIR}/tool.sh $ARGUMENTS[0]");
         skill.skill_root = Some("/my/skill".to_string());
         let tool = tool_with(vec![skill]);
         let result = tool.execute(json!({"skill": "my-skill", "args": "alpha"})).await;

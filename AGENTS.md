@@ -1,14 +1,14 @@
 # AGENTS.md
 
-Rules and conventions for AI assistants and contributors working on aionrs.
+Rules and conventions for AI assistants and contributors working on Solaris CLI.
 
 ## Overview
 
-aionrs is a **multi-provider AI agent CLI** written in Rust. It connects to
+Solaris CLI is a **multi-provider AI agent CLI** written in Rust. It connects to
 LLM providers (Anthropic, OpenAI, AWS Bedrock, Google Vertex AI), orchestrates
 built-in tools (Read, Write, Edit, Bash, Grep, Glob, Spawn), supports MCP
 servers, skills, hooks, and long-term memory. It also exposes a JSON stream
-protocol for host integration (e.g. Electron-based AionUI).
+protocol for host integration (e.g. Electron-based Solaris Studio).
 
 Tech stack: Rust 2021 edition, stable toolchain, Cargo workspace under `crates/`.
 
@@ -226,5 +226,5 @@ Key references in `docs/` (don't duplicate their content here):
 | [skills.md](docs/skills.md) | Writing skills, front matter, shell expansion, conditional activation |
 | [mcp.md](docs/mcp.md) | MCP server integration, transport types, deferred loading |
 | [advanced.md](docs/advanced.md) | Sub-agents, hooks, logging, memory, plan mode, context compression |
-| [json-stream-protocol.md](docs/json-stream-protocol.md) | JSON Lines protocol spec for host integration (e.g. AionUI) |
+| [json-stream-protocol.md](docs/json-stream-protocol.md) | JSON Lines protocol spec for host integration (e.g. Solaris Studio) |
 | [troubleshooting.md](docs/troubleshooting.md) | Common errors and solutions |

@@ -23,10 +23,10 @@ fn tc_2_1_default_base_dir_uses_platform_config() {
     // Should return Some (platform provides a config dir in CI/test envs)
     assert!(base.is_some(), "memory_base_dir should return Some on this platform");
     let base = base.unwrap();
-    // Should end with "aionrs" (the brand, not "claude")
+    // Should end with "solaris" (the brand, not "claude")
     assert!(
-        base.to_string_lossy().contains("aionrs"),
-        "base dir should use aionrs brand: {base:?}"
+        base.to_string_lossy().contains("solaris"),
+        "base dir should use solaris brand: {base:?}"
     );
 
     restore_env(saved);
@@ -290,7 +290,7 @@ fn entrypoint_name_constant_is_memory_md() {
 // -- Helpers ------------------------------------------------------------------
 
 fn env_key() -> &'static str {
-    "AIONRS_MEMORY_DIR"
+    "SOLARIS_MEMORY_DIR"
 }
 
 fn restore_env(saved: Option<String>) {

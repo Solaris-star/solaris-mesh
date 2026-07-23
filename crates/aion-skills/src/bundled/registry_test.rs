@@ -321,8 +321,8 @@ fn tc_10_17_extract_dir_path_format() {
     let path = get_bundled_skill_extract_dir("my-skill");
     let s = path.to_string_lossy();
     assert!(
-        s.contains("aionrs-bundled-skills"),
-        "path should contain aionrs-bundled-skills"
+        s.contains("solaris-bundled-skills"),
+        "path should contain solaris-bundled-skills"
     );
     assert!(s.contains("my-skill"), "path should contain skill name");
 }

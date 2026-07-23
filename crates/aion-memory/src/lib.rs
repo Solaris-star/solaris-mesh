@@ -1,4 +1,4 @@
-// Long-term memory system for aionrs.
+// Long-term memory system for Solaris CLI.
 //
 // Provides cross-session storage of user preferences, feedback,
 // project context, and external references.

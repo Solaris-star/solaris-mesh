@@ -1,4 +1,4 @@
-# aionrs justfile — run tasks with `vx just <recipe>`
+# Solaris CLI justfile — run tasks with `vx just <recipe>`
 # All commands route through `vx` (when available) so the correct tool
 # versions are used. Everything here is cross-platform: recipe bodies avoid
 # shell builtins and external Unix tools (no printf/sed), relying on just's

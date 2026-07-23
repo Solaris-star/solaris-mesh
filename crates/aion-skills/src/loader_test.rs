@@ -218,13 +218,18 @@ async fn test_load_commands_nested_flat() {
 #[tokio::test]
 async fn test_load_all_skills_bare_mode() {
     let tmp = TempDir::new().unwrap();
-    // Create .aionrs/skills/ under the add_dir
-    let skills_dir = tmp.path().join(".aionrs").join("skills");
+    // Create .solaris/skills/ under the add_dir
+    let skills_dir = tmp.path().join(".solaris").join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "my-skill/SKILL.md", "---\n---\n");
 
     let result = load_all_skills(Path::new("/nonexistent"), &[tmp.path().to_owned()], true, None).await;
-    assert_eq!(result.len(), 1);
+    let filesystem_skills: Vec<_> = result
+        .iter()
+        .filter(|skill| skill.source != SkillSource::Bundled)
+        .collect();
+    assert_eq!(filesystem_skills.len(), 1);
+    assert_eq!(filesystem_skills[0].name, "my-skill");
 }
 
 #[tokio::test]
@@ -235,7 +240,7 @@ async fn test_load_all_skills_deduplicates() {
     fs::create_dir(root.join(".git")).unwrap();
 
     // Create same skill in project dir (will appear twice due to walk)
-    let skills_dir = root.join(".aionrs").join("skills");
+    let skills_dir = root.join(".solaris").join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "my-skill/SKILL.md", "---\n---\n");
 

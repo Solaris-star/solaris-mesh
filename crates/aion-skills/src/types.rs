@@ -78,17 +78,17 @@ pub enum ExecutionContext {
 /// Where the skill file originates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSource {
-    /// `<config_dir>/aionrs/skills/`
+    /// `<config_dir>/solaris/skills/`
     User,
-    /// .aionrs/skills/ (project-level)
+    /// .solaris/skills/ (project-level)
     Project,
-    /// .aionrs/.managed/skills/
+    /// .solaris/.managed/skills/
     Managed,
     /// Built-in bundled skills
     Bundled,
     /// Loaded via MCP protocol
     Mcp,
-    /// .aionrs/commands/ (legacy compatibility)
+    /// .solaris/commands/ (legacy compatibility)
     Legacy,
 }
 

@@ -1,14 +1,14 @@
-# aionrs JSON Stream Protocol Spec
+# Solaris CLI JSON Stream Protocol Spec
 
-> This protocol defines the communication between aionrs (Rust CLI) and a host client (e.g., AionUi Electron app) via stdin/stdout JSON Lines.
+> This protocol defines the communication between Solaris CLI and a host client (e.g., Solaris Studio Electron app) via stdin/stdout JSON Lines.
 
 ## Overview
 
 ```
 ┌──────────────┐   stdin (JSON Lines)     ┌──────────────────┐
 │              │ ◄─────────────────────── │                  │
-│    aionrs    │                          │   Host Client    │
-│  (Rust CLI)  │ ──────────────────────►  │   (AionUi etc.)  │
+│ Solaris CLI  │                          │   Host Client    │
+│  (Rust CLI)  │ ──────────────────────►  │  Solaris Studio  │
 │              │   stdout (JSON Lines)    │                  │
 └──────────────┘                          └──────────────────┘
      stderr → diagnostic logs (not part of protocol)
@@ -16,7 +16,7 @@
 
 - **Transport**: stdin/stdout, one JSON object per line (JSON Lines / NDJSON)
 - **Encoding**: UTF-8
-- **Activation**: `aionrs --json-stream [other flags]`
+- **Activation**: `solaris --json-stream [other flags]`
 - **Lifecycle**: One process per conversation; process stays alive for multi-turn
 
 ## 1. Agent → Client Events (stdout)
@@ -510,7 +510,7 @@ After the first `message`, any further `add_mcp_server` commands are rejected:
 
 ```
 Client spawns:
-  aionrs --json-stream \
+  solaris --json-stream \
     --provider anthropic \
     --model claude-sonnet-4-20250514 \
     --max-tokens 8192 \
@@ -536,10 +536,10 @@ Between receiving `ready` and sending the first `message`, the client may inject
 
 ```bash
 # New session with a custom ID
-aionrs --json-stream --session-id my-conv-123 --provider openai --model gpt-4o
+solaris --json-stream --session-id my-conv-123 --provider openai --model gpt-4o
 
 # Resume an existing session
-aionrs --json-stream --resume my-conv-123 --provider openai --model gpt-4o
+solaris --json-stream --resume my-conv-123 --provider openai --model gpt-4o
 ```
 
 ### 3.2 Message Turn
@@ -643,7 +643,7 @@ For unrecoverable errors, agent emits error and exits with non-zero status:
 When spawned in `--json-stream` mode, all configuration is passed via CLI flags and environment variables:
 
 ```bash
-aionrs --json-stream \
+solaris --json-stream \
   --provider <anthropic|openai|bedrock|vertex> \
   --model <model-id> \
   --max-tokens <N> \

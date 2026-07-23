@@ -10,7 +10,7 @@ A skill is a Markdown file with a YAML front matter header.  When the agent
 invokes a skill, it:
 
 1. Resolves the skill by name from the loaded skill list
-2. Substitutes variables (`$ARGUMENTS`, `$0`, `${AIONRS_SKILL_DIR}`)
+2. Substitutes variables (`$ARGUMENTS`, `$0`, `${SOLARIS_SKILL_DIR}`)
 3. Expands any shell commands (`` !`cmd` `` syntax)
 4. Returns the processed text as the skill's output
 
@@ -21,22 +21,22 @@ wins for duplicate names):
 
 | Priority | Path | Description |
 |----------|------|-------------|
-| 1 | `.aionrs/skills/` | Project-local skills (checked-in with the repo) |
-| 2 | `<CONFIG_DIR>/aionrs/skills/` | User-global skills (see below) |
-| 3 | `.aionrs/commands/` | Legacy flat `.md` files (backward compatibility) |
+| 1 | `.solaris/skills/` | Project-local skills (checked-in with the repo) |
+| 2 | `<CONFIG_DIR>/solaris/skills/` | User-global skills (see below) |
+| 3 | `.solaris/commands/` | Legacy flat `.md` files (backward compatibility) |
 
 > **`<CONFIG_DIR>` by platform:**
 > - **macOS:** `~/Library/Application Support/`
 > - **Linux:** `~/.config/` (or `$XDG_CONFIG_HOME`)
 > - **Windows:** `C:\Users\<USER>\AppData\Roaming\`
 >
-> Run `aionrs skills path` to see the actual paths on your machine.
+> Run `solaris skills path` to see the actual paths on your machine.
 
 Each skill is either a single `SKILL.md` file inside a named subdirectory, or
 a flat `.md` file in a `commands/` directory:
 
 ```
-.aionrs/skills/
+.solaris/skills/
 ├── deploy/
 │   └── SKILL.md          # invoked as "deploy"
 ├── review-pr/
@@ -119,7 +119,7 @@ Inside the skill body, the following variables are replaced at runtime:
 |----------|---------------|
 | `$ARGUMENTS` | The full argument string passed to the skill invocation |
 | `$0` | The skill name itself |
-| `${AIONRS_SKILL_DIR}` | Absolute path to the directory containing this skill's `SKILL.md` |
+| `${SOLARIS_SKILL_DIR}` | Absolute path to the directory containing this skill's `SKILL.md` |
 
 Example:
 
@@ -131,7 +131,7 @@ description: Run tests for a specific module
 
 Run the test suite for module: $ARGUMENTS
 
-Working directory: ${AIONRS_SKILL_DIR}
+Working directory: ${SOLARIS_SKILL_DIR}
 ```
 
 ## Shell Command Expansion
@@ -201,12 +201,12 @@ preserved.  To stay within budget, keep skill descriptions concise.
 
 ## Troubleshooting
 
-Use `aionrs skills path` to see which directories are being scanned and whether
+Use `solaris skills path` to see which directories are being scanned and whether
 they exist on disk:
 
 ```
-$ aionrs skills path
-User:    ~/Library/Application Support/aionrs/skills  (exists)
-Project: /path/to/repo/.aionrs/skills                 (exists)
-Legacy:  /path/to/repo/.aionrs/commands                (not found)
+$ solaris skills path
+User:    ~/Library/Application Support/solaris/skills  (exists)
+Project: /path/to/repo/.solaris/skills                 (exists)
+Legacy:  /path/to/repo/.solaris/commands                (not found)
 ```

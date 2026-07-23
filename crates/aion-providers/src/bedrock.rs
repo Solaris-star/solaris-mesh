@@ -109,7 +109,7 @@ impl BedrockTransportState {
                 secret_access_key,
                 session_token.clone(),
                 None,
-                "aionrs",
+                "solaris",
             )),
             AwsCredentials::Profile(profile) => Self::credentials_from_sdk(Some(profile.clone())),
             AwsCredentials::Environment => Self::credentials_from_sdk(None),
@@ -146,7 +146,7 @@ impl BedrockTransportState {
                 creds.secret_access_key(),
                 creds.session_token().map(|s| s.to_string()),
                 creds.expiry(),
-                "aionrs-sdk",
+                "solaris-sdk",
             ))
         };
 

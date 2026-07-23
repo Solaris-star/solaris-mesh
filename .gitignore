@@ -28,7 +28,8 @@
 worktree/
 worktrees/
 
-# aionrs session data
+# Solaris CLI session data
+.solaris/
 .aionrs/
 
 # Debug artifacts

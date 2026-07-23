@@ -255,7 +255,7 @@ pub fn test_config() -> Config {
         },
         session: SessionConfig {
             enabled: false,
-            directory: "/tmp/aionrs-test-sessions".to_string(),
+            directory: "/tmp/solaris-test-sessions".to_string(),
             max_sessions: 5,
         },
         compact: aionrs::config::CompactConfig::default(),
