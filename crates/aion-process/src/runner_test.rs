@@ -125,7 +125,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn runner_timeout_kills_windows_job_descendant() {
-        let script = "$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 10' -PassThru -WindowStyle Hidden; Write-Output $p.Id; Wait-Process -Id $p.Id";
+        let script = "$p = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 10' -PassThru -WindowStyle Hidden; Write-Output $p.Id; Wait-Process -Id $p.Id";
         let result = CommandRunner::new(shell_command(script))
             .timeout(Duration::from_millis(5000))
             .post_process_drain(Duration::from_millis(250))
@@ -146,7 +146,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn runner_completed_command_keeps_windows_background_descendant_running() {
-        let script = "$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 10' -PassThru -WindowStyle Hidden; Write-Output $p.Id";
+        let script = "$p = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 10' -PassThru -WindowStyle Hidden; Write-Output $p.Id";
         let result = CommandRunner::new(shell_command(script))
             .run()
             .await
@@ -169,9 +169,26 @@ mod tests {
 
     #[cfg(windows)]
     fn shell_command(script: &str) -> Command {
-        let mut command = Command::new("powershell");
+        let mut command = Command::new(powershell_command());
         command.args(["-NoProfile", "-Command", script]);
         command
+    }
+
+    #[cfg(windows)]
+    fn powershell_command() -> &'static str {
+        static COMMAND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+        COMMAND.get_or_init(|| {
+            ["pwsh.exe", "powershell.exe"]
+                .into_iter()
+                .find(|candidate| {
+                    std::process::Command::new(candidate)
+                        .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
+                        .status()
+                        .is_ok_and(|status| status.success())
+                })
+                .unwrap_or_else(|| panic!("PowerShell is required to run Windows process tests"))
+        })
     }
 
     #[cfg(not(windows))]
