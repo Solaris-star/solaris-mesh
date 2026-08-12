@@ -1,6 +1,12 @@
-# Solaris CLI
+# Solaris Mesh
 
-A Rust-based LLM tool-use agent for the command line. It connects to LLM APIs, autonomously invokes local tools (file I/O, shell, search, etc.), and completes tasks end-to-end.
+A headless multi-agent collaboration runtime.
+
+Solaris Mesh provides provider-neutral agent execution, tool orchestration,
+MCP integration, skills, hooks, sessions, memory, context compression, and
+sub-agent support. The `solaris` command remains a standalone host for the
+runtime; products such as Solaris Studio can embed the library crates without
+depending on the CLI process.
 
 ## Features
 

@@ -1,14 +1,14 @@
 # AGENTS.md
 
-Rules and conventions for AI assistants and contributors working on Solaris CLI.
+Rules and conventions for AI assistants and contributors working on Solaris Mesh.
 
 ## Overview
 
-Solaris CLI is a **multi-provider AI agent CLI** written in Rust. It connects to
-LLM providers (Anthropic, OpenAI, AWS Bedrock, Google Vertex AI), orchestrates
-built-in tools (Read, Write, Edit, Bash, Grep, Glob, Spawn), supports MCP
-servers, skills, hooks, and long-term memory. It also exposes a JSON stream
-protocol for host integration (e.g. Electron-based Solaris Studio).
+Solaris Mesh is a **headless multi-agent collaboration runtime** written in
+Rust. It connects to LLM providers (Anthropic, OpenAI, AWS Bedrock, Google
+Vertex AI), orchestrates built-in tools (Read, Write, Edit, Bash, Grep, Glob,
+Spawn), supports MCP servers, skills, hooks, and long-term memory. The
+`solaris` CLI and JSON stream protocol are host interfaces over the runtime.
 
 Tech stack: Rust 2021 edition, stable toolchain, Cargo workspace under `crates/`.
 
