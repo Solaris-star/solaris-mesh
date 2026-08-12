@@ -1,0 +1,19 @@
+[package]
+name = "solaris-mesh"
+description = "Host-neutral multi-agent collaboration runtime contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["ai", "agent", "multi-agent", "runtime", "collaboration"]
+categories = ["asynchronous"]
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+workspace-hack.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio.workspace = true

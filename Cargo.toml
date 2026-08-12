@@ -13,6 +13,7 @@ members = [
     "crates/aion-memory",
     "crates/aion-agent",
     "crates/aion-cli",
+    "crates/solaris-mesh",
     "workspace-hack",
 ]
 
@@ -35,6 +36,7 @@ aion-mcp       = { path = "crates/aion-mcp" }
 aion-skills    = { path = "crates/aion-skills" }
 aion-memory    = { path = "crates/aion-memory" }
 aion-agent     = { path = "crates/aion-agent" }
+solaris-mesh   = { path = "crates/solaris-mesh" }
 
 # Async runtime
 tokio   = { version = "1", features = ["full"] }

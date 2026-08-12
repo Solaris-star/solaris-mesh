@@ -8,6 +8,9 @@ sub-agent support. The `solaris` command remains a standalone host for the
 runtime; products such as Solaris Studio can embed the library crates without
 depending on the CLI process.
 
+See [BOUNDARIES.md](BOUNDARIES.md) for the ownership rules between Mesh and
+Solaris Studio, plus the staged extraction order.
+
 ## Features
 
 - **Multi-provider** — Anthropic, OpenAI (and compatibles like DeepSeek/Ollama/Gemini), AWS Bedrock, Google Vertex AI

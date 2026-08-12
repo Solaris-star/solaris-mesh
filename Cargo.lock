@@ -3092,6 +3092,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "solaris-mesh"
+version = "0.2.8"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "workspace-hack",
+]
+
+[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
