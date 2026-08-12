@@ -15,7 +15,7 @@ set lists
 # Probe for `vx` once at load time, using just's own (cross-platform) `which`
 # rather than a shell builtin. If present, commands run through it to pin tool
 # versions; if not, this expands to empty and commands run bare.
-vx := if which("vx") == "" { "" } else { "vx" }
+vx := if which("vx") == [] { "" } else { "vx" }
 
 # Route cargo through vx when available — acts like `alias cargo = vx cargo`
 # scoped to this justfile. Recipes just write `{{ cargo }} ...`.
