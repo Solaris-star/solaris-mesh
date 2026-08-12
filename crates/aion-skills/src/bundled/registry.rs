@@ -109,14 +109,14 @@ pub fn init_bundled_skills() {
 
 /// Returns the extraction directory for a bundled skill's reference files.
 ///
-/// Path: `$TMPDIR/aionrs-bundled-skills-{pid}/{skill_name}`
+/// Path: `$TMPDIR/solaris-bundled-skills-{pid}/{skill_name}`
 /// Uses PID as a per-process nonce to prevent symlink pre-creation attacks.
 /// NOTE: This directory is not cleaned up automatically; it accumulates across
 /// process restarts until the OS purges the temp directory.
 pub fn get_bundled_skill_extract_dir(skill_name: &str) -> PathBuf {
     let pid = std::process::id();
     let tmp = std::env::temp_dir();
-    tmp.join(format!("aionrs-bundled-skills-{pid}")).join(skill_name)
+    tmp.join(format!("solaris-bundled-skills-{pid}")).join(skill_name)
 }
 
 /// Extract a bundled skill's reference files to disk.

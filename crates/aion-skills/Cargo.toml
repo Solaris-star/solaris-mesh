@@ -1,6 +1,6 @@
 [package]
 name = "aion-skills"
-description = "Skills system for aionrs: named prompt snippets with tool orchestration, permissions, hooks, and MCP integration"
+description = "Skills system for Solaris CLI: named prompt snippets with tool orchestration, permissions, hooks, and MCP integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

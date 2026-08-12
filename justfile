@@ -1,6 +1,7 @@
-# aionrs justfile — run tasks with `vx just <recipe>`
-# All commands route through `vx` (when available) so the correct tool
-# versions are used. Everything here is cross-platform: recipe bodies avoid
+# Solaris CLI justfile — run tasks with `vx just <recipe>`
+# Invoke recipes through `vx just` when pinned tool versions are required.
+# Recipes use the active environment directly. Everything here is
+# cross-platform: recipe bodies avoid
 # shell builtins and external Unix tools (no printf/sed), relying on just's
 # own functions instead, so the same justfile works on macOS, Linux & Windows.
 
@@ -8,17 +9,9 @@
 set shell := ["sh", "-cu"]
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
 
-# `which()` is used below to probe for `vx`; it is a just unstable feature.
-set unstable
-
-# Probe for `vx` once at load time, using just's own (cross-platform) `which`
-# rather than a shell builtin. If present, commands run through it to pin tool
-# versions; if not, this expands to empty and commands run bare.
-vx := if which("vx") == "" { "" } else { "vx" }
-
-# Route cargo through vx when available — acts like `alias cargo = vx cargo`
-# scoped to this justfile. Recipes just write `{{ cargo }} ...`.
-cargo := trim(vx + " cargo")
+# `vx just` activates the pinned Rust toolchain before evaluating this file.
+# Direct `just` callers use their current Cargo installation.
+cargo := "cargo"
 
 # Bold-cyan / reset ANSI codes for the colored command echo in the unix `_run`.
 # (just's `style("command")` only emits bold — no color — so we spell it out.)
@@ -27,7 +20,7 @@ NORMAL := "\u{1b}[0m"
 
 # Default: list all recipes
 default:
-    @{{ vx }} just --list
+    @just --list
 
 # Echo a command in bold cyan, then run it. Every action recipe routes through
 # this so the coloring lives in one place. The command is passed as ONE quoted

@@ -81,7 +81,7 @@ pub struct OAuthManager {
 impl OAuthManager {
     pub fn new(config: AuthConfig) -> Self {
         let credentials_path = crate::config::app_config_dir()
-            .unwrap_or_else(|| PathBuf::from("aionrs"))
+            .unwrap_or_else(|| PathBuf::from("solaris"))
             .join("auth.json");
 
         Self {
@@ -197,7 +197,7 @@ impl OAuthManager {
             return Ok(new_creds.access_token);
         }
 
-        anyhow::bail!("Token expired and no refresh token available. Run 'aionrs auth login'")
+        anyhow::bail!("Token expired and no refresh token available. Run 'solaris auth login'")
     }
 
     /// Refresh the access token
@@ -254,7 +254,7 @@ impl OAuthManager {
 
     fn load_credentials(&self) -> anyhow::Result<OAuthCredentials> {
         let json = std::fs::read_to_string(&self.credentials_path)
-            .map_err(|_| anyhow::anyhow!("No saved credentials. Run 'aionrs auth login'"))?;
+            .map_err(|_| anyhow::anyhow!("No saved credentials. Run 'solaris auth login'"))?;
         let creds: OAuthCredentials = serde_json::from_str(&json)?;
         Ok(creds)
     }

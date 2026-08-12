@@ -17,7 +17,8 @@ pub const ENTRYPOINT_NAME: &str = "MEMORY.md";
 const MAX_SANITIZED_LENGTH: usize = 200;
 
 /// Environment variable to override the memory base directory.
-const MEMORY_DIR_ENV: &str = "AIONRS_MEMORY_DIR";
+const MEMORY_DIR_ENV: &str = "SOLARIS_MEMORY_DIR";
+const LEGACY_MEMORY_DIR_ENV: &str = "AIONRS_MEMORY_DIR";
 
 // ---------------------------------------------------------------------------
 // Base directory resolution
@@ -26,16 +27,19 @@ const MEMORY_DIR_ENV: &str = "AIONRS_MEMORY_DIR";
 /// Returns the base directory for memory storage.
 ///
 /// Resolution order:
-///   1. `AIONRS_MEMORY_DIR` environment variable (explicit override)
-///   2. `app_config_dir()` from `aion-config` (platform-aware default)
+///   1. `SOLARIS_MEMORY_DIR` environment variable (explicit override)
+///   2. `AIONRS_MEMORY_DIR` compatibility alias
+///   3. `app_config_dir()` from `aion-config` (platform-aware default)
 ///
 /// Returns `None` only when both the env var is unset AND the platform
 /// cannot determine a config directory (e.g. no home directory).
 pub fn memory_base_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var(MEMORY_DIR_ENV)
-        && !dir.is_empty()
-    {
-        return Some(PathBuf::from(dir));
+    for key in [MEMORY_DIR_ENV, LEGACY_MEMORY_DIR_ENV] {
+        if let Ok(dir) = std::env::var(key)
+            && !dir.is_empty()
+        {
+            return Some(PathBuf::from(dir));
+        }
     }
     aion_config::config::app_config_dir()
 }

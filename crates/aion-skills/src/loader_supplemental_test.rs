@@ -277,8 +277,8 @@ async fn tc_11_1_bare_mode_only_loads_add_dirs() {
     let user_tmp = TempDir::new().unwrap();
     let add_tmp = TempDir::new().unwrap();
 
-    // Put a skill in add_dir's .aionrs/skills/
-    let add_skills_dir = add_tmp.path().join(".aionrs").join("skills");
+    // Put a skill in add_dir's .solaris/skills/
+    let add_skills_dir = add_tmp.path().join(".solaris").join("skills");
     fs::create_dir_all(&add_skills_dir).unwrap();
     write_skill(&add_skills_dir, "add-skill/SKILL.md", "---\n---\n");
 
@@ -291,8 +291,12 @@ async fn tc_11_1_bare_mode_only_loads_add_dirs() {
     )
     .await;
 
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].name, "add-skill");
+    let filesystem_skills: Vec<_> = result
+        .iter()
+        .filter(|skill| skill.source != SkillSource::Bundled)
+        .collect();
+    assert_eq!(filesystem_skills.len(), 1);
+    assert_eq!(filesystem_skills[0].name, "add-skill");
     // user_tmp was not consulted (no skills from there)
     let _ = user_tmp;
 }
@@ -300,7 +304,7 @@ async fn tc_11_1_bare_mode_only_loads_add_dirs() {
 #[tokio::test]
 async fn tc_11_4_nonexistent_dirs_silently_skipped() {
     let add_tmp = TempDir::new().unwrap();
-    let add_skills_dir = add_tmp.path().join(".aionrs").join("skills");
+    let add_skills_dir = add_tmp.path().join(".solaris").join("skills");
     fs::create_dir_all(&add_skills_dir).unwrap();
     write_skill(&add_skills_dir, "extra/SKILL.md", "---\n---\n");
 
@@ -321,7 +325,7 @@ async fn tc_11_4_nonexistent_dirs_silently_skipped() {
 async fn tc_11_5_empty_scenario_returns_empty_vec() {
     // All dirs nonexistent, no add_dirs
     let tmp = TempDir::new().unwrap();
-    // tmp exists but has no .aionrs/skills
+    // tmp exists but has no .solaris/skills
     let result = load_all_skills(tmp.path(), &[], false, None).await;
     // May have skills from user dir if it exists, but must not panic
     let _ = result;
@@ -333,7 +337,7 @@ async fn tc_11_6_empty_add_dirs_no_effect() {
     let root = tmp.path();
     fs::create_dir(root.join(".git")).unwrap();
 
-    let skills_dir = root.join(".aionrs").join("skills");
+    let skills_dir = root.join(".solaris").join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "proj-skill/SKILL.md", "---\n---\n");
 
@@ -348,7 +352,7 @@ async fn tc_11_6_empty_add_dirs_no_effect() {
 // -----------------------------------------------------------------------
 // TC-8.8: skill_root semantic — must be skill_dir itself (the dir containing SKILL.md),
 // not skill_dir's parent. This verifies the L-5 fix: skill_root = skill_dir,
-// matching TS skillRoot used for ${AIONRS_SKILL_DIR} substitution.
+// matching TS skillRoot used for ${SOLARIS_SKILL_DIR} substitution.
 // -----------------------------------------------------------------------
 
 #[tokio::test]
@@ -444,7 +448,7 @@ async fn tc_4_5_mcp_manager_none_returns_no_mcp_skills() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     fs::create_dir(root.join(".git")).unwrap();
-    let skills_dir = root.join(".aionrs").join("skills");
+    let skills_dir = root.join(".solaris").join("skills");
     fs::create_dir_all(&skills_dir).unwrap();
     write_skill(&skills_dir, "local-skill/SKILL.md", "---\ndescription: local\n---\n");
 

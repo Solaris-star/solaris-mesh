@@ -88,7 +88,7 @@ async fn tc_e2e_1_full_lifecycle_load_skill() {
 
 // ---------------------------------------------------------------------------
 // TC-E2E-2: Inline execution — variable substitution
-// AC-5: $ARGUMENTS, $0, ${AIONRS_SKILL_DIR} are correctly substituted
+// AC-5: $ARGUMENTS, $0, ${SOLARIS_SKILL_DIR} are correctly substituted
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -97,7 +97,7 @@ async fn tc_e2e_2_inline_variable_substitution() {
     let skill_root = tmp.join("e2e2-skill");
     let mut skill = make_skill(
         "var-skill",
-        "Arguments: $ARGUMENTS\nFirst arg: $0\nSkill dir: ${AIONRS_SKILL_DIR}",
+        "Arguments: $ARGUMENTS\nFirst arg: $0\nSkill dir: ${SOLARIS_SKILL_DIR}",
     );
     let skill_root_str = skill_root.to_str().unwrap();
     skill.skill_root = Some(skill_root_str.to_string());
@@ -114,7 +114,7 @@ async fn tc_e2e_2_inline_variable_substitution() {
     );
     assert!(
         result.contains(skill_root_str),
-        "${{AIONRS_SKILL_DIR}} should be replaced with skill root, got: {result}"
+        "${{SOLARIS_SKILL_DIR}} should be replaced with skill root, got: {result}"
     );
     // $0 (first positional arg) substitution — first token of args
     assert!(
@@ -127,8 +127,8 @@ async fn tc_e2e_2_inline_variable_substitution() {
         "$ARGUMENTS literal should not remain, got: {result}"
     );
     assert!(
-        !result.contains("${AIONRS_SKILL_DIR}"),
-        "${{AIONRS_SKILL_DIR}} literal should not remain, got: {result}"
+        !result.contains("${SOLARIS_SKILL_DIR}"),
+        "${{SOLARIS_SKILL_DIR}} literal should not remain, got: {result}"
     );
 }
 
@@ -480,7 +480,7 @@ async fn tc_e2e_10_multi_dir_dedup_first_wins() {
 
 // ---------------------------------------------------------------------------
 // TC-E2E-11: Legacy commands directory — flat .md files loaded as skills
-// AC-14: legacy command files from .aionrs/commands/ are loaded as SkillDefinition
+// AC-14: legacy command files from .solaris/commands/ are loaded as SkillDefinition
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -490,8 +490,8 @@ async fn tc_e2e_11_legacy_commands_loaded() {
     let tmp = TempDir::new().unwrap();
 
     // Create the legacy commands directory structure under a fake project root.
-    // load_all_skills looks for .aionrs/commands/ relative to cwd.
-    let commands_dir = tmp.path().join(".aionrs").join("commands");
+    // load_all_skills looks for .solaris/commands/ relative to cwd.
+    let commands_dir = tmp.path().join(".solaris").join("commands");
     fs::create_dir_all(&commands_dir).unwrap();
 
     // Flat .md file (no subdirectory, no SKILL.md) — legacy format
@@ -509,7 +509,7 @@ async fn tc_e2e_11_legacy_commands_loaded() {
     let skill = skills
         .iter()
         .find(|s| s.name == "legacy-cmd")
-        .expect("legacy-cmd should be loaded from flat .md file in .aionrs/commands/");
+        .expect("legacy-cmd should be loaded from flat .md file in .solaris/commands/");
 
     assert_eq!(skill.name, "legacy-cmd");
     assert!(

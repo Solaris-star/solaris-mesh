@@ -1,4 +1,4 @@
-// Pure, provider-neutral data types shared across all aionrs crates.
+// Pure, provider-neutral data types shared across all Solaris CLI crates.
 // No dependencies on other aion-* crates.
 
 pub mod compact;

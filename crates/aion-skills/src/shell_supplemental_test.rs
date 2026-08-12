@@ -194,10 +194,12 @@ async fn tc_4_4_command_fail_no_output_returns_err() {
 #[tokio::test]
 async fn tc_4_4b_command_fail_with_output_returns_ok() {
     // exits non-zero but still has stdout
-    let content = if cfg!(windows) {
-        "!`echo output & exit 1`"
-    } else {
-        "!`echo output; exit 1`"
+    use aion_config::shell::{ShellKind, default_shell};
+
+    let content = match default_shell().kind {
+        ShellKind::PowerShell => "!`[Console]::Out.WriteLine('output'); [Console]::Out.Flush(); exit 1`",
+        ShellKind::Cmd => "!`echo output & exit 1`",
+        ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => "!`echo output; exit 1`",
     };
     let result = run(content).await;
     assert!(

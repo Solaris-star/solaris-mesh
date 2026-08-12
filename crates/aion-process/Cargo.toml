@@ -1,6 +1,6 @@
 [package]
 name = "aion-process"
-description = "Process execution helpers for aionrs"
+description = "Process execution helpers for Solaris CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

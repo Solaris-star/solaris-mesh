@@ -1,4 +1,4 @@
-//! Top-level subcommand dispatch for the `aion` CLI binary.
+//! Top-level subcommand dispatch for the `solaris` CLI binary.
 
 use super::{cmd_auth, cmd_config, cmd_session, cmd_skills};
 use crate::cli::Commands;

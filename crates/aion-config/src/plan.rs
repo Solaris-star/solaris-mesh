@@ -32,7 +32,7 @@ fn default_true() -> bool {
 }
 
 fn default_plan_directory() -> String {
-    ".aionrs/plans".to_string()
+    ".solaris/plans".to_string()
 }
 
 #[cfg(test)]

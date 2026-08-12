@@ -61,7 +61,7 @@ command = "npx prettier --write ${TOOL_INPUT_FILE_PATH}"
 [[hooks.post_tool_use]]
 name = "audit-log"
 tool_match = ["ExecCommand"]
-command = "echo \"$(date): ${TOOL_INPUT_COMMAND}\" >> .aionrs/audit.log"
+command = "echo \"$(date): ${TOOL_INPUT_COMMAND}\" >> .solaris/audit.log"
 
 # Run lint on session end
 [[hooks.stop]]
@@ -125,11 +125,11 @@ Record real API interactions and replay them in tests — no API key or network 
 ```bash
 # Record mode
 VCR_MODE=record VCR_CASSETTE=tests/cassettes/my_test.json \
-  aionrs -k sk-ant-xxx "Read Cargo.toml"
+  solaris -k sk-ant-xxx "Read Cargo.toml"
 
 # Replay mode (in tests)
 VCR_MODE=replay VCR_CASSETTE=tests/cassettes/my_test.json \
-  aionrs "Read Cargo.toml"
+  solaris "Read Cargo.toml"
 ```
 
 ### Features
@@ -153,8 +153,8 @@ Three ways to enable logging, from highest to lowest priority:
 3. **Default**: logging is disabled unless explicitly configured
 
 ```bash
-# CLI — logs to /tmp/aionrs-logs at debug level
-aionrs --log-dir /tmp/aionrs-logs --log-level debug "Read Cargo.toml"
+# CLI — logs to /tmp/solaris-logs at debug level
+solaris --log-dir /tmp/solaris-logs --log-level debug "Read Cargo.toml"
 ```
 
 ### Configuration
@@ -180,9 +180,9 @@ When `dir` is not set, logs go to the platform-specific location:
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Logs/aionrs/` |
-| Linux | `$XDG_STATE_HOME/aionrs/logs/` or `~/.local/state/aionrs/logs/` |
-| Windows | `{data_local_dir}/aionrs/logs/` |
+| macOS | `~/Library/Logs/solaris/` |
+| Linux | `$XDG_STATE_HOME/solaris/logs/` or `~/.local/state/solaris/logs/` |
+| Windows | `{data_local_dir}/solaris/logs/` |
 
 ### Log Format
 
@@ -206,12 +206,12 @@ All events during `engine.run()` — LLM streaming, tool execution, compaction �
 
 ```bash
 # Find all events for a specific session
-grep '"session_id":"abc-123"' 2026-05-13.aionrs.log | jq .
+grep '"session_id":"abc-123"' 2026-05-13.solaris.log | jq .
 ```
 
 ### Library Integration
 
-When aionrs is used as a library (e.g. embedded in a backend server), the `create_file_layer()` API provides a composable tracing layer:
+When Solaris CLI is used as a library (e.g. embedded in a backend server), the `create_file_layer()` API provides a composable tracing layer:
 
 ```rust
 use aion_config::logging::{ResolvedLogging, create_file_layer};
@@ -226,11 +226,11 @@ let (layer, guard) = create_file_layer(&resolved)?;
 // Compose with your existing subscriber
 tracing_subscriber::registry()
     .with(your_app_layer)
-    .with(layer)  // aionrs logs → separate aionrs.log file
+    .with(layer)  // Solaris CLI logs → separate solaris.log file
     .init();
 ```
 
-The host application owns the global subscriber; aionrs library crates only emit tracing events and never initialize a subscriber themselves.
+The host application owns the global subscriber; Solaris CLI library crates only emit tracing events and never initialize a subscriber themselves.
 
 ---
 
@@ -238,7 +238,7 @@ The host application owns the global subscriber; aionrs library crates only emit
 
 AGENTS.md files provide project-specific instructions that are automatically injected into the system prompt. Files are discovered hierarchically and merged from remote to near:
 
-1. **Global**: `<config_dir>/aionrs/AGENTS.md` — user-level instructions for all projects
+1. **Global**: `<config_dir>/solaris/AGENTS.md` — user-level instructions for all projects
 2. **Project hierarchy**: Walk up from cwd to the git root (or home directory), collecting every `AGENTS.md` found along the way
 
 Files closer to the working directory appear later in the prompt and take precedence (via LLM recency bias). Each file is annotated with its absolute path for traceability.
@@ -266,7 +266,7 @@ my-workspace/
         └── AGENTS.md  ← server-specific rules
 ```
 
-Running aion in `packages/server/` produces a system prompt containing both files, workspace first, then server.
+Running Solaris CLI in `packages/server/` produces a system prompt containing both files, workspace first, then server.
 
 ---
 
@@ -288,7 +288,7 @@ Persistent, file-based memory that allows the agent to retain project-specific k
 Memory files live in a per-project directory under the global config:
 
 ```
-<config_dir>/aionrs/projects/<sanitized-project-path>/memory/
+<config_dir>/solaris/projects/<sanitized-project-path>/memory/
 ├── MEMORY.md              # Index (auto-loaded into prompt, max 200 lines)
 ├── user_role.md
 ├── feedback_testing.md
@@ -314,7 +314,7 @@ Memory is enabled by default with no configuration required. The memory director
 Override the base directory via environment variable:
 
 ```bash
-export AIONRS_MEMORY_DIR=/custom/path
+export SOLARIS_MEMORY_DIR=/custom/path
 ```
 
 ### How It Works
@@ -341,7 +341,7 @@ A read-only exploration mode where the agent focuses on understanding the codeba
 ```toml
 [plan]
 enabled = true                    # Register Plan Mode tools (default: true)
-plan_directory = ".aionrs/plans"  # Where plan files are saved
+plan_directory = ".solaris/plans"  # Where plan files are saved
 ```
 
 ### Workflow Phases

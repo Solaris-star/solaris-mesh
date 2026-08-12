@@ -1,6 +1,12 @@
-# aionrs
+# Solaris Mesh
 
-A Rust-based LLM tool-use agent for the command line. It connects to LLM APIs, autonomously invokes local tools (file I/O, shell, search, etc.), and completes tasks end-to-end.
+A headless multi-agent collaboration runtime.
+
+Solaris Mesh provides provider-neutral agent execution, tool orchestration,
+MCP integration, skills, hooks, sessions, memory, context compression, and
+sub-agent support. The `solaris` command remains a standalone host for the
+runtime; products such as Solaris Studio can embed the library crates without
+depending on the CLI process.
 
 ## Features
 
@@ -31,17 +37,17 @@ A Rust-based LLM tool-use agent for the command line. It connects to LLM APIs, a
 cargo build --release
 
 # Generate default config, then add your API key
-./target/release/aionrs config init
-# Edit the generated config (run `aionrs config path` to find it)
+./target/release/solaris config init
+# Edit the generated config (run `solaris config path` to find it)
 
 # Single-shot mode
-aionrs "Read Cargo.toml and explain the dependencies"
+solaris "Read Cargo.toml and explain the dependencies"
 
 # Interactive REPL
-aionrs
+solaris
 
 # Full CLI reference
-aionrs --help
+solaris --help
 ```
 
 ## Runtime Limits
@@ -76,9 +82,9 @@ max_tool_call_failure_turns = 2
 CLI override:
 
 ```bash
-aionrs --max-turns 10 "Run the task"
-aionrs --max-tool-call-malformed-turns 2 "Run the task"
-aionrs --max-tool-call-failure-turns 2 "Run the task"
+solaris --max-turns 10 "Run the task"
+solaris --max-tool-call-malformed-turns 2 "Run the task"
+solaris --max-tool-call-failure-turns 2 "Run the task"
 ```
 
 ## Architecture

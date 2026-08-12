@@ -17,9 +17,9 @@ mod discovery_supplemental_tests {
     // Helpers
     // ---------------------------------------------------------------------------
 
-    /// Create a `.aionrs/skills/` directory inside `parent`.
+    /// Create a `.solaris/skills/` directory inside `parent`.
     fn create_skill_dir(parent: &Path) -> PathBuf {
-        let dir = parent.join(".aionrs").join("skills");
+        let dir = parent.join(".solaris").join("skills");
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -54,13 +54,13 @@ mod discovery_supplemental_tests {
     // TC-22: discover_dirs_finds_skill_dir_in_subdir
     // ---------------------------------------------------------------------------
 
-    // TC-22: discovers `.aionrs/skills/` inside a direct subdirectory of cwd.
+    // TC-22: discovers `.solaris/skills/` inside a direct subdirectory of cwd.
     #[tokio::test]
-    async fn tc22_discover_dirs_finds_aionrs_skills_in_subdir() {
+    async fn tc22_discover_dirs_finds_solaris_skills_in_subdir() {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap().to_string();
 
-        // Create /tmp/proj/module/.aionrs/skills/
+        // Create /tmp/proj/module/.solaris/skills/
         let module = tmp.path().join("module");
         fs::create_dir_all(&module).unwrap();
         create_skill_dir(&module);
@@ -72,14 +72,14 @@ mod discovery_supplemental_tests {
         let found = mgr.discover_dirs_for_paths(&[file_path.to_str().unwrap()], &cwd).await;
 
         assert_eq!(found.len(), 1);
-        assert!(found[0].ends_with(".aionrs/skills"));
+        assert!(found[0].ends_with(".solaris/skills"));
     }
 
     // ---------------------------------------------------------------------------
     // TC-23: cwd-level skill dir not re-discovered
     // ---------------------------------------------------------------------------
 
-    // TC-23: `.aionrs/skills/` at cwd level is not returned (loaded at startup).
+    // TC-23: `.solaris/skills/` at cwd level is not returned (loaded at startup).
     #[tokio::test]
     async fn tc23_discover_dirs_does_not_return_cwd_level() {
         let tmp = TempDir::new().unwrap();
@@ -130,14 +130,14 @@ mod discovery_supplemental_tests {
     // TC-25: miss dirs are also recorded in checked_dirs
     // ---------------------------------------------------------------------------
 
-    // TC-25: directories without `.aionrs/skills/` are still recorded to avoid
+    // TC-25: directories without `.solaris/skills/` are still recorded to avoid
     // repeated stat calls.
     #[tokio::test]
     async fn tc25_discover_dirs_records_miss_dirs_in_checked() {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap().to_string();
 
-        // `b` does NOT have .aionrs/skills/
+        // `b` does NOT have .solaris/skills/
         let subdir = tmp.path().join("b");
         fs::create_dir_all(&subdir).unwrap();
         let file_path = subdir.join("bar.rs");

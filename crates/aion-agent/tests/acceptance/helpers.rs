@@ -81,7 +81,7 @@ pub fn openai_config(api_key: &str) -> Config {
         },
         session: SessionConfig {
             enabled: false,
-            directory: "/tmp/aionrs-acceptance".to_string(),
+            directory: "/tmp/solaris-acceptance".to_string(),
             max_sessions: 1,
         },
         compact: aion_config::compact::CompactConfig::default(),
@@ -119,7 +119,7 @@ pub fn bedrock_config() -> Config {
         },
         session: SessionConfig {
             enabled: false,
-            directory: "/tmp/aionrs-acceptance".to_string(),
+            directory: "/tmp/solaris-acceptance".to_string(),
             max_sessions: 1,
         },
         compact: aion_config::compact::CompactConfig::default(),
