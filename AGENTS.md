@@ -18,6 +18,7 @@ Dependencies flow **downward** — never introduce circular or upward references
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
+| Bottom | `solaris-mesh` | Host-neutral identity, topology, task graph, mailbox, and runtime command/event contracts |
 | Bottom | `aion-types` | Shared provider-neutral data types (LLM, message, tool) — zero internal deps |
 | Bottom | `aion-compact` | Context compression algorithms (folding, sanitization, tokenization) |
 | Mid | `aion-config` | Configuration, ProviderCompat, auth, hooks, logging (`create_file_layer`), **cross-platform shell helpers** |
@@ -33,6 +34,10 @@ Dependencies flow **downward** — never introduce circular or upward references
 When adding new functionality, place it in the **lowest crate where it
 semantically belongs**. Don't create a new crate just for one shared function.
 Run `cargo metadata` to verify dependency changes fit the graph.
+
+Multi-agent collaboration contracts belong in `solaris-mesh`. Studio HTTP,
+database, WebSocket, and UI types must not be added to that crate. Follow
+[`BOUNDARIES.md`](BOUNDARIES.md) when moving an existing Studio behavior.
 
 ## Build & Test
 
