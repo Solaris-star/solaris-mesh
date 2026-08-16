@@ -233,9 +233,9 @@ solaris auth logout
 [auth]
 auth_url = "https://claude.ai/oauth"
 token_url = "https://claude.ai/oauth/token"
-client_id = "aionrs"
+client_id = "solaris-mesh"
 ```
 
 The OAuth service identifies this client with the upstream protocol value
-`aionrs`. This value is intentionally unchanged and is not a product or binary
+`solaris-mesh`. This value is intentionally unchanged and is not a product or binary
 name.

@@ -30,7 +30,7 @@ worktrees/
 
 # Solaris CLI session data
 .solaris/
-.aionrs/
+.solaris-mesh/
 
 # Debug artifacts
 *.pdb

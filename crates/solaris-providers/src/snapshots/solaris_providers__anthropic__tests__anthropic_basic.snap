@@ -1,0 +1,22 @@
+---
+source: crates/solaris-providers/src/anthropic_test.rs
+assertion_line: 69
+expression: "p.build_request_body(&r).expect(\"request body projection should succeed\")"
+---
+{
+  "max_tokens": 8192,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Hello",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": true,
+  "system": "You are a test assistant."
+}

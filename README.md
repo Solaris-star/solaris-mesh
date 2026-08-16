@@ -148,3 +148,17 @@ Provider defaults: **Anthropic/Vertex** — alternation, merge, auto tool ID; **
 ## License
 
 Apache-2.0
+
+## Solaris Mesh Runtime Architecture
+
+Solaris Mesh is a plugin-first, multi-agent-native Agent Runtime. The current runtime is built around Agent Core, Scheduler, Collaboration Runtime, Plugin System, and CLI. TUI and ACP Adapter support are integration areas whose availability depends on the deployed build.
+
+- **Agent Core**: current agent execution loop, tools, sessions, and provider integration.
+- **Scheduler**: task queue and resource-aware scheduling for spawned agent tasks. `SOLARIS_MAX_ACTIVE_AGENTS` optionally limits active agents; when unset, the default is derived from system available parallelism. Queued tasks wait until resources are available.
+- **Collaboration Runtime**: current scheduling entry point for coordinating queued agent work.
+- **Plugin System**: tools, skills, and MCP-related extension points provide plugin-style capabilities.
+- **CLI**: the `solaris` command-line host.
+- **TUI**: planned host-facing terminal interface beyond the current CLI surfaces.
+- **ACP Adapter**: planned integration boundary for external agent clients.
+
+Solaris Studio is the first-party Mesh Host. Claude Code, Codex CLI, and Gemini CLI are ACP Adapter integration targets; this does not imply that every adapter is present in the current build.

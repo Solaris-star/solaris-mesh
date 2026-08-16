@@ -18,17 +18,17 @@ Dependencies flow **downward** — never introduce circular or upward references
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
-| Bottom | `aion-types` | Shared provider-neutral data types (LLM, message, tool) — zero internal deps |
-| Bottom | `aion-compact` | Context compression algorithms (folding, sanitization, tokenization) |
-| Mid | `aion-config` | Configuration, ProviderCompat, auth, hooks, logging (`create_file_layer`), **cross-platform shell helpers** |
-| Mid | `aion-protocol` | JSON stream protocol (events, commands, approval manager) for host integration |
-| Mid | `aion-providers` | LLM provider implementations (Anthropic, OpenAI, Bedrock, Vertex) |
-| Mid | `aion-tools` | Built-in agent tools (Read, Write, Edit, Bash, Grep, Glob, Spawn) |
-| Mid | `aion-mcp` | MCP (Model Context Protocol) client |
-| Mid | `aion-skills` | Skills system (prompt snippets, hooks, permissions, shell expansion) |
-| Mid | `aion-memory` | Long-term cross-session memory (user prefs, feedback, project context) |
-| Top | `aion-agent` | Agent engine, session management, orchestration |
-| Top | `aion-cli` | CLI binary entry point |
+| Bottom | `solaris-types` | Shared provider-neutral data types (LLM, message, tool) — zero internal deps |
+| Bottom | `solaris-compact` | Context compression algorithms (folding, sanitization, tokenization) |
+| Mid | `solaris-config` | Configuration, ProviderCompat, auth, hooks, logging (`create_file_layer`), **cross-platform shell helpers** |
+| Mid | `solaris-protocol` | JSON stream protocol (events, commands, approval manager) for host integration |
+| Mid | `solaris-providers` | LLM provider implementations (Anthropic, OpenAI, Bedrock, Vertex) |
+| Mid | `solaris-tools` | Built-in agent tools (Read, Write, Edit, Bash, Grep, Glob, Spawn) |
+| Mid | `solaris-mcp` | MCP (Model Context Protocol) client |
+| Mid | `solaris-skills` | Skills system (prompt snippets, hooks, permissions, shell expansion) |
+| Mid | `solaris-memory` | Long-term cross-session memory (user prefs, feedback, project context) |
+| Top | `solaris-agent` | Agent engine, session management, orchestration |
+| Top | `solaris-cli` | CLI binary entry point |
 
 When adding new functionality, place it in the **lowest crate where it
 semantically belongs**. Don't create a new crate just for one shared function.
@@ -101,8 +101,8 @@ against this section. Do not rely on tests or review to catch style drift.
 
 ### Agent Integration
 
-- AionCLI is the built-in SDK/library integration path. Do not model it as an
-  external agent subprocess when changing Aion host integration code.
+- SolarisCLI is the built-in SDK/library integration path. Do not model it as an
+  external agent subprocess when changing Solaris host integration code.
 - For Claude Code, Codex, or other external agent integrations, first review
   the ACP protocol, subprocess lifecycle, logging, and security boundaries.
 
@@ -191,7 +191,7 @@ verified by CI alone.
 
 ### Shell Execution
 
-- All shell invocations must go through `aion_config::shell` module
+- All shell invocations must go through `solaris_config::shell` module
   (`shell_command()` or `shell_command_builder()`).
 - Never call `Command::new("sh")`, `Command::new("bash")`, or
   `Command::new("cmd")` directly — these are platform-specific.

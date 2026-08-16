@@ -171,7 +171,7 @@ The `level` field accepts standard tracing filter directives:
 |-------|--------|
 | `"info"` | Info and above for all targets |
 | `"debug"` | Debug and above for all targets |
-| `"aion_providers=debug,info"` | Debug for providers, info for everything else |
+| `"solaris_providers=debug,info"` | Debug for providers, info for everything else |
 
 ### Default Log Directory
 
@@ -188,14 +188,14 @@ When `dir` is not set, logs go to the platform-specific location:
 Each line is a JSON object with structured fields:
 
 ```json
-{"timestamp":"2026-05-13T12:12:52.431Z","level":"INFO","fields":{"message":"mcp server connected","server":"sentry","tools":20},"target":"aion_mcp","spans":[{"name":"agent_run","session_id":"abc-123","msg_id":"msg-456"}]}
+{"timestamp":"2026-05-13T12:12:52.431Z","level":"INFO","fields":{"message":"mcp server connected","server":"sentry","tools":20},"target":"solaris_mcp","spans":[{"name":"agent_run","session_id":"abc-123","msg_id":"msg-456"}]}
 ```
 
 Key fields:
 
 | Field | Description |
 |-------|-------------|
-| `target` | Source crate (`aion_agent`, `aion_providers`, `aion_mcp`, etc.) |
+| `target` | Source crate (`solaris_agent`, `solaris_providers`, `solaris_mcp`, etc.) |
 | `spans[].session_id` | Session ID for correlating events within a conversation |
 | `spans[].msg_id` | Message ID for correlating events within a single turn |
 
@@ -213,11 +213,11 @@ grep '"session_id":"abc-123"' 2026-05-13.solaris.log | jq .
 When Solaris CLI is used as a library (e.g. embedded in a backend server), the `create_file_layer()` API provides a composable tracing layer:
 
 ```rust
-use aion_config::logging::{ResolvedLogging, create_file_layer};
+use solaris_config::logging::{ResolvedLogging, create_file_layer};
 
 let resolved = ResolvedLogging {
     enabled: true,
-    level: "aion_agent=debug,aion_providers=debug".to_string(),
+    level: "solaris_agent=debug,solaris_providers=debug".to_string(),
     dir: log_dir.to_path_buf(),
 };
 let (layer, guard) = create_file_layer(&resolved)?;

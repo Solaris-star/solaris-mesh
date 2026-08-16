@@ -7,16 +7,16 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use aionrs::confirm::ToolConfirmer;
-use aionrs::protocol::events::ToolCategory;
-use aionrs::config::{Config, ProviderType, ToolsConfig, SessionConfig};
-use aionrs::hooks::HooksConfig;
-use aionrs::mcp::config::McpConfig;
-use aionrs::provider::{LlmProvider, ProviderError};
-use aionrs::tools::Tool;
-use aionrs::types::llm::{LlmEvent, LlmRequest};
-use aionrs::types::message::{StopReason, TokenUsage};
-use aionrs::types::tool::ToolResult;
+use solaris-mesh::confirm::ToolConfirmer;
+use solaris-mesh::protocol::events::ToolCategory;
+use solaris-mesh::config::{Config, ProviderType, ToolsConfig, SessionConfig};
+use solaris-mesh::hooks::HooksConfig;
+use solaris-mesh::mcp::config::McpConfig;
+use solaris-mesh::provider::{LlmProvider, ProviderError};
+use solaris-mesh::tools::Tool;
+use solaris-mesh::types::llm::{LlmEvent, LlmRequest};
+use solaris-mesh::types::message::{StopReason, TokenUsage};
+use solaris-mesh::types::tool::ToolResult;
 
 // ---------------------------------------------------------------------------
 // MockLlmProvider — deterministic LLM for engine / spawn tests
@@ -247,19 +247,19 @@ pub fn test_config() -> Config {
         system_prompt: Some("You are a test assistant.".to_string()),
         thinking: None,
         prompt_caching: false,
-        compat: aionrs::provider::compat::ProviderCompat::anthropic_defaults(),
+        compat: solaris-mesh::provider::compat::ProviderCompat::anthropic_defaults(),
         tools: ToolsConfig {
             auto_approve: true,
             allow_list: vec![],
-            skills: aionrs::config::SkillsPermissionConfig::default(),
+            skills: solaris-mesh::config::SkillsPermissionConfig::default(),
         },
         session: SessionConfig {
             enabled: false,
             directory: "/tmp/solaris-test-sessions".to_string(),
             max_sessions: 5,
         },
-        compact: aionrs::config::CompactConfig::default(),
-        plan: aionrs::config::PlanConfig::default(),
+        compact: solaris-mesh::config::CompactConfig::default(),
+        plan: solaris-mesh::config::PlanConfig::default(),
         hooks: HooksConfig::default(),
         bedrock: None,
         vertex: None,

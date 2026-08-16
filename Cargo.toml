@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/aion-types",
-    "crates/aion-protocol",
-    "crates/aion-compact",
-    "crates/aion-process",
-    "crates/aion-config",
-    "crates/aion-providers",
-    "crates/aion-tools",
-    "crates/aion-mcp",
-    "crates/aion-skills",
-    "crates/aion-memory",
-    "crates/aion-agent",
-    "crates/aion-cli",
+    "crates/solaris-types",
+    "crates/solaris-protocol",
+    "crates/solaris-compact",
+    "crates/solaris-process",
+    "crates/solaris-config",
+    "crates/solaris-providers",
+    "crates/solaris-tools",
+    "crates/solaris-mcp",
+    "crates/solaris-skills",
+    "crates/solaris-memory",
+    "crates/solaris-agent",
+    "crates/solaris-cli",
     "workspace-hack",
 ]
 
@@ -24,17 +24,17 @@ repository = "https://github.com/Solaris-star/solaris-rs"
 
 [workspace.dependencies]
 # Internal crates
-aion-types     = { path = "crates/aion-types" }
-aion-protocol  = { path = "crates/aion-protocol" }
-aion-compact   = { path = "crates/aion-compact" }
-aion-process   = { path = "crates/aion-process" }
-aion-config    = { path = "crates/aion-config" }
-aion-providers = { path = "crates/aion-providers" }
-aion-tools     = { path = "crates/aion-tools" }
-aion-mcp       = { path = "crates/aion-mcp" }
-aion-skills    = { path = "crates/aion-skills" }
-aion-memory    = { path = "crates/aion-memory" }
-aion-agent     = { path = "crates/aion-agent" }
+solaris-types     = { path = "crates/solaris-types" }
+solaris-protocol  = { path = "crates/solaris-protocol" }
+solaris-compact   = { path = "crates/solaris-compact" }
+solaris-process   = { path = "crates/solaris-process" }
+solaris-config    = { path = "crates/solaris-config" }
+solaris-providers = { path = "crates/solaris-providers" }
+solaris-tools     = { path = "crates/solaris-tools" }
+solaris-mcp       = { path = "crates/solaris-mcp" }
+solaris-skills    = { path = "crates/solaris-skills" }
+solaris-memory    = { path = "crates/solaris-memory" }
+solaris-agent     = { path = "crates/solaris-agent" }
 
 # Async runtime
 tokio   = { version = "1", features = ["full"] }

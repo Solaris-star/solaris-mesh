@@ -1,9 +1,9 @@
 mod common;
 
-use aionrs::hooks::{HookDef, HookEngine, HooksConfig};
-use aionrs::tools::orchestration::execute_tool_calls;
-use aionrs::tools::registry::ToolRegistry;
-use aionrs::types::message::ContentBlock;
+use solaris-mesh::hooks::{HookDef, HookEngine, HooksConfig};
+use solaris-mesh::tools::orchestration::execute_tool_calls;
+use solaris-mesh::tools::registry::ToolRegistry;
+use solaris-mesh::types::message::ContentBlock;
 use common::{auto_approve_confirmer, MockTool};
 use serde_json::json;
 

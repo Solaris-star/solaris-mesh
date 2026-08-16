@@ -11,12 +11,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aionrs::context::{SystemPromptCache, build_system_prompt};
-use aionrs::skills::loader::load_all_skills;
-use aionrs::skills::permissions::SkillPermissionChecker;
-use aionrs::skills::types::SkillMetadata;
-use aionrs::tools::skill::SkillTool;
-use aionrs::tools::Tool;
+use solaris-mesh::context::{SystemPromptCache, build_system_prompt};
+use solaris-mesh::skills::loader::load_all_skills;
+use solaris-mesh::skills::permissions::SkillPermissionChecker;
+use solaris-mesh::skills::types::SkillMetadata;
+use solaris-mesh::tools::skill::SkillTool;
+use solaris-mesh::tools::Tool;
 use serde_json::json;
 use tempfile::TempDir;
 

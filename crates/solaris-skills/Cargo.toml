@@ -1,0 +1,39 @@
+[package]
+name = "solaris-skills"
+description = "Skills system for Solaris CLI: named prompt snippets with tool orchestration, permissions, hooks, and MCP integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+solaris-types.workspace   = true
+solaris-config.workspace  = true
+solaris-mcp.workspace     = true
+solaris-process.workspace = true
+
+tracing.workspace      = true
+serde.workspace        = true
+serde_json.workspace   = true
+serde_yaml.workspace   = true
+tokio.workspace        = true
+futures.workspace      = true
+async-trait.workspace  = true
+anyhow.workspace       = true
+thiserror.workspace    = true
+glob.workspace         = true
+dirs.workspace         = true
+regex.workspace        = true
+notify.workspace       = true
+unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+solaris-mcp = { workspace = true, features = ["test-utils"] }
+tempfile.workspace   = true
+rstest.workspace     = true
+serial_test.workspace = true

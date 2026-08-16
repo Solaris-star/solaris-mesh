@@ -3,12 +3,12 @@
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use aionrs::provider::anthropic::AnthropicProvider;
-use aionrs::provider::compat::ProviderCompat;
-use aionrs::provider::debug::DebugConfig;
-use aionrs::provider::{LlmProvider, ProviderError};
-use aionrs::types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
-use aionrs::types::message::{ContentBlock, Message, Role, StopReason};
+use solaris-mesh::provider::anthropic::AnthropicProvider;
+use solaris-mesh::provider::compat::ProviderCompat;
+use solaris-mesh::provider::debug::DebugConfig;
+use solaris-mesh::provider::{LlmProvider, ProviderError};
+use solaris-mesh::types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
+use solaris-mesh::types::message::{ContentBlock, Message, Role, StopReason};
 
 // ---------------------------------------------------------------------------
 // Helpers

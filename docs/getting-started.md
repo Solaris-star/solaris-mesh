@@ -51,7 +51,7 @@ subcommand runs its action and exits — it does not start the agent main flow.
 | `--json-stream` | JSON Lines mode for host integration |
 | `--resume <id>` | Resume a previous session |
 | `--log-dir <path>` | Enable file logging to the given directory |
-| `--log-level <filter>` | Log level filter (e.g. `debug`, `info`, `aion_providers=debug`) |
+| `--log-level <filter>` | Log level filter (e.g. `debug`, `info`, `solaris_providers=debug`) |
 
 ---
 
@@ -67,14 +67,14 @@ subcommand runs its action and exits — it does not start the agent main flow.
 CLI parameters / env vars        (highest priority)
 ```
 
-### Migration from AionRS
+### Migration from SolarisRS
 
 On first use, Solaris CLI copies existing data to the new locations when the
 corresponding Solaris location does not exist:
 
-- `<config_dir>/aionrs/` → `<config_dir>/solaris/`
-- `.aionrs.toml` → `.solaris.toml`
-- `.aionrs/` → `.solaris/`
+- `<config_dir>/solaris-mesh/` → `<config_dir>/solaris/`
+- `.solaris-mesh.toml` → `.solaris.toml`
+- `.solaris-mesh/` → `.solaris/`
 
 The old files are retained for rollback. Existing Solaris files always take
 precedence and are never overwritten by migration.
@@ -234,7 +234,7 @@ solaris config init
 ### 2. Single-Shot Mode
 
 ```bash
-solaris "Read and explain crates/aion-agent/src/engine.rs"
+solaris "Read and explain crates/solaris-agent/src/engine.rs"
 ```
 
 ### 3. Interactive REPL

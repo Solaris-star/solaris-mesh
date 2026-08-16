@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use aionrs::engine::AgentEngine;
-use aionrs::output::OutputSink;
-use aionrs::output::terminal::TerminalSink;
-use aionrs::protocol::{ToolApprovalManager, ToolApprovalResult};
-use aionrs::protocol::writer::ProtocolWriter;
-use aionrs::tools::registry::ToolRegistry;
-use aionrs::types::llm::LlmEvent;
-use aionrs::types::message::{StopReason, TokenUsage};
+use solaris-mesh::engine::AgentEngine;
+use solaris-mesh::output::OutputSink;
+use solaris-mesh::output::terminal::TerminalSink;
+use solaris-mesh::protocol::{ToolApprovalManager, ToolApprovalResult};
+use solaris-mesh::protocol::writer::ProtocolWriter;
+use solaris-mesh::tools::registry::ToolRegistry;
+use solaris-mesh::types::llm::LlmEvent;
+use solaris-mesh::types::message::{StopReason, TokenUsage};
 
 use common::{ExecMockTool, MockLlmProvider, test_config};
 

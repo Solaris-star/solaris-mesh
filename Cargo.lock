@@ -12,251 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aion-agent"
-version = "0.2.3"
-dependencies = [
- "aion-compact",
- "aion-config",
- "aion-mcp",
- "aion-memory",
- "aion-protocol",
- "aion-providers",
- "aion-skills",
- "aion-tools",
- "aion-types",
- "anyhow",
- "async-trait",
- "chrono",
- "crossterm",
- "dirs",
- "futures",
- "glob",
- "is-terminal",
- "mockall",
- "rstest",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-test",
- "tracing",
- "uuid",
- "wiremock",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-cli"
-version = "0.2.3"
-dependencies = [
- "aion-agent",
- "aion-compact",
- "aion-config",
- "aion-mcp",
- "aion-memory",
- "aion-protocol",
- "aion-providers",
- "aion-skills",
- "aion-tools",
- "anyhow",
- "clap",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-compact"
-version = "0.2.3"
-dependencies = [
- "regex",
- "serde",
- "serde_json",
- "tracing",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-config"
-version = "0.2.3"
-dependencies = [
- "aion-compact",
- "aion-process",
- "aion-types",
- "anyhow",
- "chrono",
- "dirs",
- "glob",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-test",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "which",
- "wiremock",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-mcp"
-version = "0.2.3"
-dependencies = [
- "aion-config",
- "aion-protocol",
- "aion-tools",
- "aion-types",
- "anyhow",
- "async-trait",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-memory"
-version = "0.2.3"
-dependencies = [
- "aion-config",
- "chrono",
- "rstest",
- "serde",
- "serde_yaml",
- "serial_test",
- "tempfile",
- "thiserror",
- "tracing",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-process"
-version = "0.2.3"
-dependencies = [
- "libc",
- "tokio",
- "windows-sys 0.61.2",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-protocol"
-version = "0.2.3"
-dependencies = [
- "aion-types",
- "rstest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-providers"
-version = "0.2.3"
-dependencies = [
- "aion-config",
- "aion-types",
- "anyhow",
- "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-sts",
- "aws-sigv4",
- "base64",
- "chrono",
- "dirs",
- "futures",
- "insta",
- "jsonwebtoken",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-test",
- "tracing",
- "url",
- "wiremock",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-skills"
-version = "0.2.3"
-dependencies = [
- "aion-config",
- "aion-mcp",
- "aion-process",
- "aion-types",
- "anyhow",
- "async-trait",
- "dirs",
- "futures",
- "glob",
- "libc",
- "notify",
- "regex",
- "rstest",
- "serde",
- "serde_json",
- "serde_yaml",
- "serial_test",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "unicode-width",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-tools"
-version = "0.2.3"
-dependencies = [
- "aion-config",
- "aion-process",
- "aion-protocol",
- "aion-types",
- "anyhow",
- "async-trait",
- "futures",
- "glob",
- "lru",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "workspace-hack",
-]
-
-[[package]]
-name = "aion-types"
-version = "0.2.3"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "workspace-hack",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3083,6 +2838,251 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "solaris-agent"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "futures",
+ "glob",
+ "is-terminal",
+ "mockall",
+ "rstest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "solaris-compact",
+ "solaris-config",
+ "solaris-mcp",
+ "solaris-memory",
+ "solaris-protocol",
+ "solaris-providers",
+ "solaris-skills",
+ "solaris-tools",
+ "solaris-types",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
+ "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-cli"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "clap",
+ "solaris-agent",
+ "solaris-compact",
+ "solaris-config",
+ "solaris-mcp",
+ "solaris-memory",
+ "solaris-protocol",
+ "solaris-providers",
+ "solaris-skills",
+ "solaris-tools",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-compact"
+version = "0.2.3"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-config"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "glob",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "solaris-compact",
+ "solaris-process",
+ "solaris-types",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "which",
+ "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-mcp"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "solaris-config",
+ "solaris-protocol",
+ "solaris-tools",
+ "solaris-types",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-memory"
+version = "0.2.3"
+dependencies = [
+ "chrono",
+ "rstest",
+ "serde",
+ "serde_yaml",
+ "serial_test",
+ "solaris-config",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-process"
+version = "0.2.3"
+dependencies = [
+ "libc",
+ "tokio",
+ "windows-sys 0.61.2",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-protocol"
+version = "0.2.3"
+dependencies = [
+ "rstest",
+ "serde",
+ "serde_json",
+ "solaris-types",
+ "tokio",
+ "tracing",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-providers"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-sts",
+ "aws-sigv4",
+ "base64",
+ "chrono",
+ "dirs",
+ "futures",
+ "insta",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "solaris-config",
+ "solaris-types",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "url",
+ "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-skills"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dirs",
+ "futures",
+ "glob",
+ "libc",
+ "notify",
+ "regex",
+ "rstest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "serial_test",
+ "solaris-config",
+ "solaris-mcp",
+ "solaris-process",
+ "solaris-types",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "unicode-width",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-tools"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "glob",
+ "lru",
+ "serde",
+ "serde_json",
+ "solaris-config",
+ "solaris-process",
+ "solaris-protocol",
+ "solaris-types",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "workspace-hack",
+]
+
+[[package]]
+name = "solaris-types"
+version = "0.2.3"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "workspace-hack",
 ]
 
 [[package]]

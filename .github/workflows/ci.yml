@@ -111,9 +111,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }} -p aion-cli
+            cross build --release --target ${{ matrix.target }} -p solaris-cli
           else
-            vx cargo build --release --target ${{ matrix.target }} -p aion-cli
+            vx cargo build --release --target ${{ matrix.target }} -p solaris-cli
           fi
 
   # ── Annotate PR / commit with test results ────────────────────────────

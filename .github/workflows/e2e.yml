@@ -18,20 +18,20 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/aion-providers/**"
-      - "crates/aion-agent/**"
-      - "crates/aion-config/**"
-      - "crates/aion-types/**"
-      - "crates/aion-skills/**"
+      - "crates/solaris-providers/**"
+      - "crates/solaris-agent/**"
+      - "crates/solaris-config/**"
+      - "crates/solaris-types/**"
+      - "crates/solaris-skills/**"
       - ".github/workflows/e2e.yml"
   pull_request:
     branches: [main]
     paths:
-      - "crates/aion-providers/**"
-      - "crates/aion-agent/**"
-      - "crates/aion-config/**"
-      - "crates/aion-types/**"
-      - "crates/aion-skills/**"
+      - "crates/solaris-providers/**"
+      - "crates/solaris-agent/**"
+      - "crates/solaris-config/**"
+      - "crates/solaris-types/**"
+      - "crates/solaris-skills/**"
       - ".github/workflows/e2e.yml"
 
 permissions:
@@ -104,7 +104,7 @@ jobs:
           OPENAI_API_KEY:    ${{ matrix.provider == 'openai'    && secrets.OPENAI_API_KEY    || '' }}
         run: |
           vx cargo nextest run \
-            -p aion-agent \
+            -p solaris-agent \
             --profile e2e \
             --test e2e \
             -E '${{ matrix.filter }}' \

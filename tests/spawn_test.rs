@@ -2,9 +2,9 @@ mod common;
 
 use std::sync::Arc;
 
-use aionrs::agent::spawner::{AgentSpawner, SubAgentConfig};
-use aionrs::types::llm::LlmEvent;
-use aionrs::types::message::{StopReason, TokenUsage};
+use solaris-mesh::agent::spawner::{AgentSpawner, SubAgentConfig};
+use solaris-mesh::types::llm::LlmEvent;
+use solaris-mesh::types::message::{StopReason, TokenUsage};
 use common::{MockLlmProvider, test_config};
 
 // ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ async fn test_spawn_shares_provider() {
     ]));
 
     // Both sub-agents share the same underlying provider via Arc.
-    let provider_dyn: Arc<dyn aionrs::provider::LlmProvider> = provider;
+    let provider_dyn: Arc<dyn solaris-mesh::provider::LlmProvider> = provider;
     let spawner = AgentSpawner::new(Arc::clone(&provider_dyn), test_config());
 
     let result1 = spawner.spawn_one(make_sub_config("seq-1")).await;

@@ -1,0 +1,31 @@
+[package]
+name = "solaris-cli"
+description = "Solaris CLI — a multi-provider AI agent with tool orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["ai", "agent", "cli", "llm", "anthropic"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "solaris"
+path = "src/main.rs"
+
+[dependencies]
+solaris-agent.workspace    = true
+solaris-compact.workspace  = true
+solaris-config.workspace   = true
+solaris-memory.workspace   = true
+solaris-providers.workspace = true
+solaris-tools.workspace    = true
+solaris-mcp.workspace      = true
+solaris-protocol.workspace = true
+solaris-skills.workspace   = true
+
+tokio.workspace              = true
+anyhow.workspace             = true
+clap.workspace               = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+workspace-hack.workspace = true

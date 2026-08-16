@@ -2,13 +2,13 @@ mod common;
 
 use std::sync::Arc;
 
-use aionrs::engine::{AgentEngine, AgentError};
-use aionrs::output::terminal::TerminalSink;
-use aionrs::output::OutputSink;
-use aionrs::session::SessionManager;
-use aionrs::tools::registry::ToolRegistry;
-use aionrs::types::llm::LlmEvent;
-use aionrs::types::message::{StopReason, TokenUsage};
+use solaris-mesh::engine::{AgentEngine, AgentError};
+use solaris-mesh::output::terminal::TerminalSink;
+use solaris-mesh::output::OutputSink;
+use solaris-mesh::session::SessionManager;
+use solaris-mesh::tools::registry::ToolRegistry;
+use solaris-mesh::types::llm::LlmEvent;
+use solaris-mesh::types::message::{StopReason, TokenUsage};
 use serde_json::json;
 use tempfile::tempdir;
 
