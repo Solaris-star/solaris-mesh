@@ -936,7 +936,7 @@ default = "auto"                 # auto, powershell, pwsh, cmd, bash, zsh, sh, o
 # [auth]
 # auth_url = "https://claude.ai/oauth"
 # token_url = "https://claude.ai/oauth/token"
-# client_id = "solarisrs"
+# client_id = "solaris-mesh"
 
 # Named profiles for quick switching (--profile <name>)
 # [profiles.deepseek]

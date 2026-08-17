@@ -1,4 +1,4 @@
-//! One-time migration from the upstream AionRS data locations to Solaris CLI.
+//! One-time compatibility migration from legacy upstream AionRS data locations to Solaris Mesh.
 
 use std::fs;
 use std::io;

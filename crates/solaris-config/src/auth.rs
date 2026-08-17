@@ -69,7 +69,7 @@ fn default_token_url() -> String {
 }
 
 fn default_client_id() -> String {
-    "solarisrs".to_string()
+    "solaris-mesh".to_string()
 }
 
 pub struct OAuthManager {
