@@ -90,7 +90,6 @@ fn sub_agent_result_from_engine(name: String, agent_id: AgentId, result: AgentRe
         text: result.text,
         usage: result.usage,
         turns: result.turns,
-        failure_class: result.failure_class,
         is_error: status != AgentOutcomeStatus::Completed,
     }
 }
@@ -357,7 +356,6 @@ impl Drop for SpawnExecutionGuard {
                 text: "child Agent cancelled because its owning operation was dropped".to_owned(),
                 usage: TokenUsage::default(),
                 turns: 0,
-                failure_class: Some(TaskFailureClass::Cancelled),
                 is_error: true,
             };
             if self
@@ -1335,7 +1333,6 @@ impl AgentSpawner {
             return failed_collaboration_summary(original_tasks, error);
         }
         let strategy = resolve_collaboration_strategy(&request, &self.collaboration_strategy());
-        let max_tasks = self.max_tasks_per_run.clamp(1, 256) as usize;
         let reviewer_required = strategy == solaris_types::workflow::CollaborationStrategy::IndependentReviewer;
 
         if strategy == solaris_types::workflow::CollaborationStrategy::Single {
@@ -1410,43 +1407,43 @@ impl AgentSpawner {
             max_message_bytes: solaris_types::workflow::CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
         });
 
-        let records = tasks_for_run
-            .iter()
-            .map(|task| {
-                let id = task.id.as_deref().unwrap_or_default();
-                let task_id = task_ids.get(id).expect("task ids were validated above");
-                let depends_on = task
-                    .depends_on
-                    .iter()
-                    .filter_map(|dependency| task_ids.get(dependency).cloned())
-                    .collect();
-                TaskRecord {
-                    run_id: self.run_id.clone(),
-                    task_id: task_id.clone(),
-                    revision: 0,
-                    task_key: Some(format!("collaboration:{id}")),
-                    team_id: collaboration.as_ref().map(|value| value.team_id.clone()),
-                    workflow_id: None,
-                    node_id: None,
-                    role: Some(task.role.clone().unwrap_or_else(|| task.name.clone())),
-                    depends_on,
-                    content: task.expected_output.clone(),
-                    expected_write_scope: Vec::new(),
-                    owner_agent_id: None,
-                    state: TaskState::Queued,
-                    outcome_ref: None,
-                    failure_class: None,
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut batch = Vec::with_capacity(tasks_for_run.len());
+        for task in &tasks_for_run {
+            let id = task.id.as_deref().unwrap_or_default();
+            let task_id = task_ids.get(id).expect("task ids were validated above");
+            let depends_on = task
+                .depends_on
+                .iter()
+                .filter_map(|dependency| task_ids.get(dependency).cloned())
+                .collect();
+            batch.push(TaskRecord {
+                run_id: self.run_id.clone(),
+                task_id: task_id.clone(),
+                revision: 0,
+                task_key: Some(format!("collaboration:{id}")),
+                team_id: collaboration.as_ref().map(|value| value.team_id.clone()),
+                workflow_id: None,
+                node_id: None,
+                role: Some(task.role.clone().unwrap_or_else(|| task.name.clone())),
+                depends_on,
+                content: task.expected_output.clone(),
+                expected_write_scope: Vec::new(),
+                owner_agent_id: None,
+                state: TaskState::Queued,
+                outcome_ref: None,
+                failure_class: None,
+            });
+        }
+        // Durable Run-level admission: the quota check and the task_created
+        // appends happen under the Run mutation line as one atomic step, so
+        // sequential spawns, concurrent races, restarts, and idempotent
+        // replays can neither bypass nor double-count the limit.
+        let max_tasks = self.max_tasks_per_run.clamp(1, 256) as usize;
         if let Err(error) = self
             .lifecycle_runtime
-            .register_runtime_tasks_admitted(&self.run_id, records, max_tasks)
+            .admit_collaboration_tasks(&self.run_id, max_tasks, batch)
         {
-            return failed_collaboration_summary(
-                original_tasks.clone(),
-                format!("failed to admit collaboration tasks: {error}"),
-            );
+            return failed_collaboration_summary(original_tasks.clone(), error.to_string());
         }
 
         let mut pending: HashSet<String> = task_ids.keys().cloned().collect();
@@ -1645,7 +1642,7 @@ impl AgentSpawner {
                             .agent_outcome_by_identity(&self.run_id, &operation_id, &existing_agent)
                 {
                     let retryable_reattach = strategy == solaris_types::workflow::CollaborationStrategy::Supervisor
-                        && outcome.failure_class == Some(TaskFailureClass::Retryable)
+                        && outcome.status == AgentOutcomeStatus::Failed
                         && self
                             .lifecycle_runtime
                             .tasks()
@@ -1659,11 +1656,8 @@ impl AgentSpawner {
                         pending.remove(id);
                         let (state, failure_class) = match outcome.status {
                             AgentOutcomeStatus::Completed => (TaskState::Completed, None),
-                            AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, Some(TaskFailureClass::Cancelled)),
-                            AgentOutcomeStatus::Failed => (
-                                TaskState::Failed,
-                                Some(outcome.failure_class.unwrap_or(TaskFailureClass::NonRetryable)),
-                            ),
+                            AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, None),
+                            AgentOutcomeStatus::Failed => (TaskState::Failed, Some(TaskFailureClass::Retryable)),
                             AgentOutcomeStatus::OutcomeUnknown => {
                                 has_unknown = true;
                                 needs_manual.push(id.clone());
@@ -1869,11 +1863,8 @@ impl AgentSpawner {
                     Ok(outcome) => {
                         let (state, failure_class) = match outcome.status {
                             AgentOutcomeStatus::Completed => (TaskState::Completed, None),
-                            AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, Some(TaskFailureClass::Cancelled)),
-                            AgentOutcomeStatus::Failed => (
-                                TaskState::Failed,
-                                Some(outcome.failure_class.unwrap_or(TaskFailureClass::NonRetryable)),
-                            ),
+                            AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, None),
+                            AgentOutcomeStatus::Failed => (TaskState::Failed, Some(TaskFailureClass::Retryable)),
                             AgentOutcomeStatus::OutcomeUnknown => {
                                 has_unknown = true;
                                 needs_manual.push(id.clone());
@@ -2079,7 +2070,7 @@ impl AgentSpawner {
             output_tokens: usage.output_tokens,
             tool_calls: usage.tool_calls,
             useful_call_rate: usage.useful_call_rate,
-            duplicate_call_rate: usage.duplicate_call_rate,
+            duplicate_call_rate: None,
             outcome_unknown: has_unknown,
             needs_manual_verification: needs_manual,
         }

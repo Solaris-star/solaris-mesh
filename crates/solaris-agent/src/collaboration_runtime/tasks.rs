@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::json;
@@ -16,6 +16,15 @@ pub(crate) struct TaskSettlement {
     pub state: TaskState,
     pub outcome_ref: Option<String>,
     pub failure_class: Option<TaskFailureClass>,
+}
+
+/// Failure of the durable Run-level collaboration task admission.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TaskAdmissionError {
+    #[error("Run accepts at most {limit} collaboration tasks, including the independent reviewer")]
+    OverLimit { limit: usize },
+    #[error(transparent)]
+    Runtime(#[from] std::io::Error),
 }
 
 impl<T> CollaborationRuntime<T> {
@@ -71,49 +80,133 @@ impl<T> CollaborationRuntime<T> {
         self.register_runtime_task(run_id, task)
     }
 
-    pub fn register_runtime_tasks_admitted(
+    pub fn register_runtime_task(&self, run_id: &RunId, task: TaskRecord) -> std::io::Result<bool> {
+        self.validate_runtime_task(run_id, &task)?;
+        let line = self.mutation.line_for(run_id);
+        let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
+        let durable_created = self.durable_task_created_map_locked(run_id)?;
+        if let Some(created) = durable_created.get(&task.task_id) {
+            if created != &task {
+                return Err(std::io::Error::other(format!(
+                    "runtime task {} was durably created with different metadata",
+                    task.task_id
+                )));
+            }
+            if self.tasks.get(&task.task_id).is_none() {
+                self.tasks.upsert(created.clone());
+            }
+            return Ok(false);
+        }
+        if let Some(existing) = self.tasks.get(&task.task_id) {
+            return if existing == task {
+                Ok(false)
+            } else {
+                Err(std::io::Error::other(format!(
+                    "runtime task {} already exists with different metadata",
+                    task.task_id
+                )))
+            };
+        }
+        self.persist_new_task_created_locked(run_id, task)?;
+        Ok(true)
+    }
+
+    /// Durably admit and register a batch of collaboration tasks against the
+    /// Run-level `max_tasks_per_run` quota.
+    ///
+    /// The check and the registration happen under the Run's mutation line so
+    /// they are one indivisible step: the quota is computed from the durable
+    /// `task_created` records already in the ledger plus the batch's unique
+    /// tasks that are not yet durable. Replaying a batch whose tasks are
+    /// already durably created never double-counts the quota, and a recovered
+    /// Run continues to see every previously admitted task. The caller is
+    /// responsible for excluding quota-free paths (such as the Single
+    /// strategy) and for including the automatic independent reviewer as a
+    /// normal task.
+    pub(crate) fn admit_collaboration_tasks(
         &self,
         run_id: &RunId,
+        max_tasks_per_run: usize,
         tasks: Vec<TaskRecord>,
-        max_tasks: usize,
-    ) -> std::io::Result<Vec<bool>> {
-        if tasks.iter().any(|task| task.run_id != *run_id) {
-            return Err(std::io::Error::other("runtime task belongs to a different run"));
+    ) -> Result<(), TaskAdmissionError> {
+        for task in &tasks {
+            self.validate_runtime_task(run_id, task)?;
         }
         let line = self.mutation.line_for(run_id);
         let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
-        let durable_ids = self
-            .ledger
-            .records_for_run(run_id)?
-            .into_iter()
-            .filter(|record| record.record_type == "task_created")
-            .filter_map(|record| serde_json::from_value::<TaskRecord>(record.payload).ok())
-            .map(|task| task.task_id)
-            .collect::<BTreeSet<_>>();
-        let new_ids = tasks
-            .iter()
-            .map(|task| task.task_id.clone())
-            .filter(|task_id| !durable_ids.contains(task_id))
-            .collect::<BTreeSet<_>>();
-        let projected = durable_ids.len().saturating_add(new_ids.len());
-        if projected > max_tasks {
-            return Err(std::io::Error::other(format!(
-                "Run accepts at most {max_tasks} collaboration tasks"
-            )));
+        let durable_created = self.durable_task_created_map_locked(run_id)?;
+        let prefix = format!("collaboration:{run_id}:");
+        let existing = durable_created
+            .values()
+            .filter(|task| task.task_id.as_str().starts_with(&prefix))
+            .count();
+
+        let mut admitted = Vec::new();
+        let mut seen = HashSet::new();
+        let mut replayed = 0usize;
+        for task in tasks {
+            if let Some(created) = durable_created.get(&task.task_id) {
+                if created != &task {
+                    return Err(std::io::Error::other(format!(
+                        "runtime task {} was durably created with different metadata",
+                        task.task_id
+                    ))
+                    .into());
+                }
+                if self.tasks.get(&task.task_id).is_none() {
+                    self.tasks.upsert(created.clone());
+                }
+                replayed += 1;
+                continue;
+            }
+            if !seen.insert(task.task_id.clone()) {
+                return Err(std::io::Error::other(format!(
+                    "collaboration batch contains duplicate task {}",
+                    task.task_id
+                ))
+                .into());
+            }
+            if let Some(existing) = self.tasks.get(&task.task_id)
+                && existing != task
+            {
+                return Err(std::io::Error::other(format!(
+                    "runtime task {} already exists with different metadata",
+                    task.task_id
+                ))
+                .into());
+            }
+            admitted.push(task);
         }
-        tasks
-            .into_iter()
-            .map(|task| self.register_runtime_task_locked(run_id, task))
-            .collect()
+
+        let total = existing + admitted.len();
+        if total > max_tasks_per_run {
+            tracing::debug!(
+                run_id = %run_id,
+                existing,
+                admitted = admitted.len(),
+                limit = max_tasks_per_run,
+                "rejecting collaboration batch that exceeds the Run task quota"
+            );
+            return Err(TaskAdmissionError::OverLimit {
+                limit: max_tasks_per_run,
+            });
+        }
+
+        for task in admitted {
+            self.persist_new_task_created_locked(run_id, task)?;
+        }
+        tracing::debug!(
+            run_id = %run_id,
+            existing,
+            replayed,
+            admitted = seen.len(),
+            limit = max_tasks_per_run,
+            "durable collaboration task admission"
+        );
+        Ok(())
     }
 
-    pub fn register_runtime_task(&self, run_id: &RunId, task: TaskRecord) -> std::io::Result<bool> {
-        let line = self.mutation.line_for(run_id);
-        let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
-        self.register_runtime_task_locked(run_id, task)
-    }
-
-    fn register_runtime_task_locked(&self, run_id: &RunId, task: TaskRecord) -> std::io::Result<bool> {
+    fn validate_runtime_task(&self, run_id: &RunId, task: &TaskRecord) -> std::io::Result<()> {
         if task.run_id != *run_id {
             return Err(std::io::Error::other("runtime task belongs to a different run"));
         }
@@ -131,35 +224,40 @@ impl<T> CollaborationRuntime<T> {
                 ));
             }
         }
-        let durable_created = self
-            .ledger
-            .records_for_run(run_id)?
-            .into_iter()
-            .filter(|record| record.record_type == "task_created")
-            .filter_map(|record| serde_json::from_value::<TaskRecord>(record.payload).ok())
-            .find(|record| record.task_id == task.task_id);
-        if let Some(created) = durable_created {
-            if created != task {
-                return Err(std::io::Error::other(format!(
-                    "runtime task {} was durably created with different metadata",
-                    task.task_id
-                )));
+        Ok(())
+    }
+
+    /// Builds the set of durably created tasks for a Run from its
+    /// `task_created` ledger records. The caller must hold the Run's mutation
+    /// line so the snapshot cannot race with a concurrent registration.
+    fn durable_task_created_map_locked(&self, run_id: &RunId) -> std::io::Result<HashMap<TaskId, TaskRecord>> {
+        let mut map = HashMap::new();
+        for record in self.ledger.records_for_run(run_id)? {
+            if record.record_type != "task_created" {
+                continue;
             }
-            if self.tasks.get(&task.task_id).is_none() {
-                self.tasks.upsert(created);
-            }
-            return Ok(false);
-        }
-        if let Some(existing) = self.tasks.get(&task.task_id) {
-            return if existing == task {
-                Ok(false)
-            } else {
-                Err(std::io::Error::other(format!(
-                    "runtime task {} already exists with different metadata",
-                    task.task_id
-                )))
+            let Ok(task) = serde_json::from_value::<TaskRecord>(record.payload) else {
+                continue;
             };
+            match map.get(&task.task_id) {
+                Some(previous) if previous != &task => {
+                    return Err(std::io::Error::other(format!(
+                        "runtime task {} is bound to multiple durable task_created records",
+                        task.task_id
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    map.insert(task.task_id.clone(), task);
+                }
+            }
         }
+        Ok(map)
+    }
+
+    /// Appends a `task_created` record and projects it. The caller must hold
+    /// the Run's mutation line and have confirmed the task is not yet durable.
+    fn persist_new_task_created_locked(&self, run_id: &RunId, task: TaskRecord) -> std::io::Result<()> {
         let owner = task.owner_agent_id.clone();
         let record = self.ledger.append(
             run_id,
@@ -174,7 +272,7 @@ impl<T> CollaborationRuntime<T> {
             "task_created",
             serde_json::to_value(&task).unwrap_or_default(),
         );
-        Ok(true)
+        Ok(())
     }
 
     pub(crate) fn settle_collaboration_task(

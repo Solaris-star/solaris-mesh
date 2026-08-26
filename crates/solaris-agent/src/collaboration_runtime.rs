@@ -985,3 +985,7 @@ mod collaboration_task_cas_test;
 #[cfg(test)]
 #[path = "collaboration_runtime_restore_test.rs"]
 mod collaboration_runtime_restore_test;
+
+#[cfg(test)]
+#[path = "collaboration_task_admission_test.rs"]
+mod collaboration_task_admission_test;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use solaris_types::identity::{AgentId, TeamId};
+use solaris_types::workflow::CollaborationStrategy;
 
 use crate::runtime_ledger::RuntimeLedger;
 
@@ -707,4 +708,191 @@ async fn stale_root_session_fence_rejects_spawn_before_provider_execution() {
     assert!(result.is_error);
     assert!(result.text.contains("session lease"), "{}", result.text);
     replacement.release_active_session().unwrap();
+}
+
+struct DoneProvider;
+
+#[async_trait::async_trait]
+impl solaris_providers::LlmProvider for DoneProvider {
+    async fn stream(
+        &self,
+        _request: &solaris_types::llm::LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<solaris_types::llm::LlmEvent>, solaris_providers::ProviderError> {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(solaris_types::llm::LlmEvent::TextDelta("done".to_owned()))
+            .await
+            .unwrap();
+        sender
+            .send(solaris_types::llm::LlmEvent::Done {
+                stop_reason: solaris_types::message::StopReason::EndTurn,
+                usage: solaris_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        Ok(receiver)
+    }
+}
+
+fn spawner_with_task_limit(provider: Arc<dyn solaris_providers::LlmProvider>, limit: u32) -> AgentSpawner {
+    let mut config = solaris_config::config::Config::resolve(&solaris_config::config::CliArgs {
+        provider: Some("anthropic".into()),
+        api_key: Some("test".into()),
+        base_url: None,
+        model: Some("test-model".into()),
+        max_tokens: None,
+        thinking: None,
+        thinking_budget: None,
+        max_turns: None,
+        max_tool_call_malformed_turns: None,
+        max_tool_call_failure_turns: None,
+        system_prompt: None,
+        profile: None,
+        auto_approve: true,
+        project_dir: None,
+    })
+    .unwrap();
+    config.session.enabled = false;
+    config.multi_agent.max_tasks_per_run = limit;
+    AgentSpawner::new(provider, config, std::env::temp_dir())
+}
+
+fn collaboration_input(id: &str) -> CollaborationTaskInput {
+    CollaborationTaskInput {
+        id: Some(id.to_owned()),
+        name: id.to_owned(),
+        prompt: format!("perform {id}"),
+        role: Some("worker".to_owned()),
+        depends_on: Vec::new(),
+        expected_output: None,
+        resource_budget: None,
+    }
+}
+
+fn fixed_request(strategy: CollaborationStrategy, ids: &[&str]) -> ParsedSpawnRequest {
+    ParsedSpawnRequest {
+        strategy: solaris_types::workflow::CollaborationSelection::Fixed(strategy),
+        tasks: ids.iter().map(|id| collaboration_input(id)).collect(),
+    }
+}
+
+fn durable_task_created_count(spawner: &AgentSpawner) -> usize {
+    spawner
+        .lifecycle_runtime()
+        .ledger()
+        .records_for_run(spawner.run_id())
+        .unwrap()
+        .iter()
+        .filter(|record| record.record_type == "task_created")
+        .count()
+}
+
+#[tokio::test]
+async fn over_limit_batch_is_rejected_before_any_provider_call() {
+    // NeverCalledProvider panics if invoked, so a passing assertion proves the
+    // admission gate rejected the batch before reaching the provider.
+    let spawner = spawner_with_task_limit(Arc::new(NeverCalledProvider), 1);
+    let result = spawner
+        .spawn_collaboration(fixed_request(CollaborationStrategy::IndependentReviewer, &["primary"]))
+        .await;
+
+    assert_eq!(result.status, CollaborationRunStatus::Failed);
+    assert!(result.summary.contains("at most 1"), "{}", result.summary);
+    assert_eq!(durable_task_created_count(&spawner), 0);
+    assert!(spawner.lifecycle_runtime().tasks().snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn independent_reviewer_counts_toward_the_run_limit() {
+    // Two primaries plus the automatic reviewer is exactly three tasks.
+    // A limit of three admits the batch; a limit of two rejects it. The only
+    // difference between the two runs is the quota, so the reviewer must be
+    // the task that tips the second run over its limit.
+    let admitted = spawner_with_task_limit(Arc::new(DoneProvider), 3);
+    let ok = admitted
+        .spawn_collaboration(fixed_request(
+            CollaborationStrategy::IndependentReviewer,
+            &["primary-a", "primary-b"],
+        ))
+        .await;
+    assert_eq!(ok.status, CollaborationRunStatus::Completed);
+    assert_eq!(ok.tasks.len(), 3);
+    assert_eq!(durable_task_created_count(&admitted), 3);
+
+    let rejected = spawner_with_task_limit(Arc::new(NeverCalledProvider), 2);
+    let failed = rejected
+        .spawn_collaboration(fixed_request(
+            CollaborationStrategy::IndependentReviewer,
+            &["primary-a", "primary-b"],
+        ))
+        .await;
+    assert_eq!(failed.status, CollaborationRunStatus::Failed);
+    assert!(failed.summary.contains("at most 2"), "{}", failed.summary);
+    assert_eq!(durable_task_created_count(&rejected), 0);
+}
+
+#[tokio::test]
+async fn sequential_spawns_accumulate_and_then_hit_the_run_limit() {
+    let spawner = spawner_with_task_limit(Arc::new(DoneProvider), 2);
+
+    let first = spawner
+        .spawn_collaboration(fixed_request(CollaborationStrategy::Supervisor, &["task-a"]))
+        .await;
+    assert_eq!(first.status, CollaborationRunStatus::Completed);
+    assert_eq!(durable_task_created_count(&spawner), 1);
+
+    let second = spawner
+        .spawn_collaboration(fixed_request(CollaborationStrategy::Supervisor, &["task-b"]))
+        .await;
+    assert_eq!(second.status, CollaborationRunStatus::Completed);
+    assert_eq!(durable_task_created_count(&spawner), 2);
+
+    let third = spawner
+        .spawn_collaboration(fixed_request(CollaborationStrategy::Supervisor, &["task-c"]))
+        .await;
+    assert_eq!(third.status, CollaborationRunStatus::Failed);
+    assert!(third.summary.contains("at most 2"), "{}", third.summary);
+    assert_eq!(durable_task_created_count(&spawner), 2);
+}
+
+#[tokio::test]
+async fn single_strategy_occupies_no_quota_even_at_limit_one() {
+    let spawner = spawner_with_task_limit(Arc::new(NeverCalledProvider), 1);
+    let result = spawner
+        .spawn_collaboration(fixed_request(CollaborationStrategy::Single, &["solo"]))
+        .await;
+
+    assert_eq!(result.status, CollaborationRunStatus::Failed);
+    assert!(result.summary.contains("did not create a Child Agent"));
+    assert_eq!(durable_task_created_count(&spawner), 0);
+    assert!(spawner.lifecycle_runtime().tasks().snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn replayed_batch_after_restart_does_not_double_count_the_limit() {
+    let spawner = spawner_with_task_limit(Arc::new(DoneProvider), 2);
+    let request = fixed_request(CollaborationStrategy::Supervisor, &["stable-task"]);
+
+    let first = spawner.spawn_collaboration(request.clone()).await;
+    assert_eq!(first.status, CollaborationRunStatus::Completed);
+    assert_eq!(durable_task_created_count(&spawner), 1);
+
+    // Replaying the same logical task is idempotent and consumes no new quota,
+    // leaving room for one genuinely new task.
+    let replay = spawner.spawn_collaboration(request.clone()).await;
+    assert_eq!(replay.status, CollaborationRunStatus::Completed);
+    assert_eq!(durable_task_created_count(&spawner), 1);
+
+    let added = spawner
+        .spawn_collaboration(fixed_request(CollaborationStrategy::Supervisor, &["new-task"]))
+        .await;
+    assert_eq!(added.status, CollaborationRunStatus::Completed);
+    assert_eq!(durable_task_created_count(&spawner), 2);
+
+    let rejected = spawner
+        .spawn_collaboration(fixed_request(CollaborationStrategy::Supervisor, &["overflow"]))
+        .await;
+    assert_eq!(rejected.status, CollaborationRunStatus::Failed);
+    assert!(rejected.summary.contains("at most 2"), "{}", rejected.summary);
+    assert_eq!(durable_task_created_count(&spawner), 2);
 }
