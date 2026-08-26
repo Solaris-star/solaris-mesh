@@ -205,21 +205,24 @@ fn execute_dedicated_turn(mut work: DedicatedTurnWork) -> Result<crate::engine::
                 result = tokio::time::timeout(Duration::from_millis(limit_ms), run) => {
                     match result {
                         Ok(result) => result.map_err(agent_error),
-                        Err(_) => Err(AgentConversationError::non_retryable(format!(
-                            "Agent role wall-time budget exhausted after {limit_ms} ms"
-                        ))),
+                        Err(_) => Err(AgentConversationError {
+                            failure_class: TaskFailureClass::NonRetryable,
+                            message: format!("Agent role wall-time budget exhausted after {limit_ms} ms"),
+                        }),
                     }
                 }
-                _ = work.notify.notified() => Err(AgentConversationError::non_retryable(
-                    "Agent conversation turn was cancelled"
-                )),
+                _ = work.notify.notified() => Err(AgentConversationError {
+                    failure_class: TaskFailureClass::Cancelled,
+                    message: "Agent conversation turn was cancelled".to_owned(),
+                }),
             }
         } else {
             tokio::select! {
                 result = run => result.map_err(agent_error),
-                _ = work.notify.notified() => Err(AgentConversationError::non_retryable(
-                    "Agent conversation turn was cancelled"
-                )),
+                _ = work.notify.notified() => Err(AgentConversationError {
+                    failure_class: TaskFailureClass::Cancelled,
+                    message: "Agent conversation turn was cancelled".to_owned(),
+                }),
             }
         }
     });
@@ -562,8 +565,13 @@ pub(super) fn failure_class_name(class: TaskFailureClass) -> &'static str {
     match class {
         TaskFailureClass::Retryable => "retryable",
         TaskFailureClass::NonRetryable => "non_retryable",
+        TaskFailureClass::PermissionDenied => "permission_denied",
+        TaskFailureClass::MaxTurns => "max_turns",
+        TaskFailureClass::NonConvergent => "non_convergent",
+        TaskFailureClass::Cancelled => "cancelled",
         TaskFailureClass::OutcomeUnknown => "outcome_unknown",
         TaskFailureClass::ReconciliationRequired => "reconciliation_required",
+        TaskFailureClass::SideEffectUnknown => "side_effect_unknown",
     }
 }
 
@@ -572,8 +580,13 @@ pub(super) fn blocks_following_turns(outcome: &AgentTurnOutcome) -> bool {
         outcome.failure_class,
         Some(
             TaskFailureClass::NonRetryable
+                | TaskFailureClass::PermissionDenied
+                | TaskFailureClass::MaxTurns
+                | TaskFailureClass::NonConvergent
+                | TaskFailureClass::Cancelled
                 | TaskFailureClass::OutcomeUnknown
                 | TaskFailureClass::ReconciliationRequired
+                | TaskFailureClass::SideEffectUnknown
         )
     )
 }
@@ -693,16 +706,16 @@ fn spawn_detached_session_release(engine: AgentEngine, registry: Arc<SessionClea
 }
 
 pub(super) fn agent_error(error: AgentError) -> AgentConversationError {
-    match error {
-        AgentError::ReconciliationRequired { .. } => AgentConversationError::reconciliation_required(error.to_string()),
-        AgentError::UserAborted => AgentConversationError::non_retryable(error.to_string()),
-        AgentError::ResourceBudgetExceeded(_) | AgentError::ContextTooLong { .. } => {
-            AgentConversationError::non_retryable(error.to_string())
-        }
-        AgentError::ApiError(_)
-        | AgentError::ToolCallMalformed { .. }
-        | AgentError::ToolCallFailures { .. }
-        | AgentError::Provider(_) => AgentConversationError::outcome_unknown(error.to_string()),
+    let failure_class = match &error {
+        AgentError::ReconciliationRequired { .. } => TaskFailureClass::ReconciliationRequired,
+        AgentError::UserAborted => TaskFailureClass::Cancelled,
+        AgentError::ToolCallMalformed { .. } | AgentError::ToolCallFailures { .. } => TaskFailureClass::NonConvergent,
+        AgentError::Provider(_) | AgentError::ApiError(_) => TaskFailureClass::OutcomeUnknown,
+        AgentError::ResourceBudgetExceeded(_) | AgentError::ContextTooLong { .. } => TaskFailureClass::NonRetryable,
+    };
+    AgentConversationError {
+        failure_class,
+        message: error.to_string(),
     }
 }
 
@@ -715,13 +728,13 @@ pub(super) fn failure_outcome(
     let status = match error.failure_class {
         TaskFailureClass::OutcomeUnknown => AgentOutcomeStatus::OutcomeUnknown,
         TaskFailureClass::ReconciliationRequired => AgentOutcomeStatus::ReconciliationRequired,
-        TaskFailureClass::Retryable | TaskFailureClass::NonRetryable => {
-            if error.message.contains("cancelled") {
-                AgentOutcomeStatus::Cancelled
-            } else {
-                AgentOutcomeStatus::Failed
-            }
-        }
+        TaskFailureClass::Cancelled => AgentOutcomeStatus::Cancelled,
+        TaskFailureClass::Retryable
+        | TaskFailureClass::NonRetryable
+        | TaskFailureClass::PermissionDenied
+        | TaskFailureClass::MaxTurns
+        | TaskFailureClass::NonConvergent
+        | TaskFailureClass::SideEffectUnknown => AgentOutcomeStatus::Failed,
     };
     AgentTurnOutcome {
         schema_version: CONVERSATION_SCHEMA_VERSION,

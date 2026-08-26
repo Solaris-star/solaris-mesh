@@ -25,9 +25,31 @@ fn task_failure_class_has_stable_wire_names() {
     for (class, wire) in [
         (TaskFailureClass::Retryable, "retryable"),
         (TaskFailureClass::NonRetryable, "non_retryable"),
+        (TaskFailureClass::PermissionDenied, "permission_denied"),
+        (TaskFailureClass::MaxTurns, "max_turns"),
+        (TaskFailureClass::NonConvergent, "non_convergent"),
+        (TaskFailureClass::Cancelled, "cancelled"),
         (TaskFailureClass::OutcomeUnknown, "outcome_unknown"),
         (TaskFailureClass::ReconciliationRequired, "reconciliation_required"),
+        (TaskFailureClass::SideEffectUnknown, "side_effect_unknown"),
     ] {
         assert_eq!(serde_json::to_value(class).unwrap(), json!(wire));
+    }
+}
+
+#[test]
+fn only_retryable_failure_class_allows_automatic_retry() {
+    for class in [
+        TaskFailureClass::Retryable,
+        TaskFailureClass::NonRetryable,
+        TaskFailureClass::PermissionDenied,
+        TaskFailureClass::MaxTurns,
+        TaskFailureClass::NonConvergent,
+        TaskFailureClass::Cancelled,
+        TaskFailureClass::OutcomeUnknown,
+        TaskFailureClass::ReconciliationRequired,
+        TaskFailureClass::SideEffectUnknown,
+    ] {
+        assert_eq!(class.is_retryable(), class == TaskFailureClass::Retryable);
     }
 }

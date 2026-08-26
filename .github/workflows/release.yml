@@ -150,7 +150,8 @@ jobs:
           chmod 0555 "${helper_dir}/${{ matrix.helper_name }}"
           chmod 0444 "${helper_dir}/${helper_manifest}"
           tar -C target/${{ matrix.target }}/release -czf "dist/${ARCHIVE}" \
-            ${{ matrix.binary_name }} ${{ matrix.helper_name }} "${helper_manifest}"
+            ${{ matrix.binary_name }} ${{ matrix.helper_name }} "${helper_manifest}" \
+            -C "${GITHUB_WORKSPACE}" solaris-extension.json
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Smoke test packaged binaries (Unix)
@@ -169,6 +170,15 @@ jobs:
           test -x "dist/smoke/${{ matrix.binary_name }}"
           test -x "dist/smoke/${{ matrix.helper_name }}"
           test -f "dist/smoke/${{ matrix.helper_name }}.sha256"
+          test -f "dist/smoke/solaris-extension.json"
+          python - <<'PY'
+          import json
+          with open('dist/smoke/solaris-extension.json', encoding='utf-8') as handle:
+              manifest = json.load(handle)
+          adapter = manifest['contributes']['acpAdapters'][0]
+          assert adapter['cliCommand'] == 'solaris'
+          assert adapter['acpArgs'] == ['acp']
+          PY
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             helper_mode="$(stat -f '%Lp' "dist/smoke/${{ matrix.helper_name }}")"
             manifest_mode="$(stat -f '%Lp' "dist/smoke/${{ matrix.helper_name }}.sha256")"
@@ -209,8 +219,10 @@ jobs:
           $installerEntry = "target/${{ matrix.target }}/release/install-solaris.cmd"
           $helperDigest = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText($helperManifest, "sha256:${helperDigest}`n", [Text.UTF8Encoding]::new($false))
+          $extensionManifest = "target/${{ matrix.target }}/release/solaris-extension.json"
           Copy-Item -LiteralPath packaging/windows/install-solaris.ps1 -Destination $installer
           Copy-Item -LiteralPath packaging/windows/install-solaris.cmd -Destination $installerEntry
+          Copy-Item -LiteralPath solaris-extension.json -Destination $extensionManifest
           $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
           & icacls.exe $helper /inheritance:r /grant:r "*${currentSid}:(RX)" '*S-1-5-18:(RX)' '*S-1-5-32-544:(RX)'
           if ($LASTEXITCODE -ne 0) { throw "failed to tighten sandbox helper DACL" }
@@ -236,7 +248,8 @@ jobs:
             $helper,
             $helperManifest,
             $installer,
-            $installerEntry
+            $installerEntry,
+            $extensionManifest
           )
           Compress-Archive -Path $files -DestinationPath "dist/${archive}" -Force
           "ARCHIVE=${archive}" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -259,17 +272,29 @@ jobs:
           }
           $installer = "$smoke/install-solaris.ps1"
           $installerEntry = "$smoke/install-solaris.cmd"
+          $extensionManifest = "$smoke/solaris-extension.json"
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf) -or
-              -not (Test-Path -LiteralPath $installerEntry -PathType Leaf)) {
-            throw "release archive is missing the Windows installer"
+              -not (Test-Path -LiteralPath $installerEntry -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $extensionManifest -PathType Leaf)) {
+            throw "release archive is missing the Windows installer or Solaris extension manifest"
+          }
+          $extension = Get-Content -LiteralPath $extensionManifest -Raw | ConvertFrom-Json
+          $adapter = @($extension.contributes.acpAdapters)[0]
+          if ($adapter.cliCommand -ne 'solaris' -or @($adapter.acpArgs).Count -ne 1 -or $adapter.acpArgs[0] -ne 'acp') {
+            throw "Solaris extension manifest does not launch solaris acp"
           }
           $helperDigest = (Get-FileHash -LiteralPath "$smoke/${{ matrix.helper_name }}" -Algorithm SHA256).Hash.ToLowerInvariant()
           if ((Get-Content -LiteralPath $manifest -Raw).Trim() -ne "sha256:${helperDigest}") {
             throw "sandbox helper manifest does not match the packaged helper"
           }
-          & $installerEntry
+          & $installerEntry -InstallDirectory "$smoke/installed"
           if ($LASTEXITCODE -ne 0) {
             throw "Windows package installer failed with exit code $LASTEXITCODE"
+          }
+          foreach ($name in @('${{ matrix.binary_name }}', '${{ matrix.helper_name }}', '${{ matrix.helper_name }}.sha256', 'solaris-extension.json')) {
+            if (-not (Test-Path -LiteralPath "$smoke/installed/$name" -PathType Leaf)) {
+              throw "installed package is missing $name"
+            }
           }
           $writeMask = [Security.AccessControl.FileSystemRights]::WriteData `
             -bor [Security.AccessControl.FileSystemRights]::AppendData `

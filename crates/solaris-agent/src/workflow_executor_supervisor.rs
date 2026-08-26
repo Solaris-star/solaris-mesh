@@ -741,8 +741,13 @@ impl AgentWorkflowExecutor {
                     (None, Some(error.failure_class))
                 }
             },
-            AgentOutcomeStatus::Cancelled => (None, None),
-            status => (None, Some(failure_class_from_status(status))),
+            AgentOutcomeStatus::Cancelled => (None, Some(TaskFailureClass::Cancelled)),
+            AgentOutcomeStatus::Failed => (
+                None,
+                Some(result.failure_class.unwrap_or(TaskFailureClass::NonRetryable)),
+            ),
+            AgentOutcomeStatus::OutcomeUnknown => (None, Some(TaskFailureClass::OutcomeUnknown)),
+            AgentOutcomeStatus::ReconciliationRequired => (None, Some(TaskFailureClass::ReconciliationRequired)),
         };
         SupervisorWorkerOutcomeBody {
             result,
@@ -954,6 +959,7 @@ fn sub_agent_result_from_outcome(outcome: AgentOutcome) -> SubAgentResult {
         text,
         usage: outcome.usage,
         turns: outcome.turns,
+        failure_class: outcome.failure_class,
         is_error: outcome.status != AgentOutcomeStatus::Completed,
     }
 }
@@ -965,7 +971,7 @@ fn require_completed_turn(outcome: &AgentTurnOutcome) -> Result<(), WorkflowNode
     Err(workflow_error(
         outcome
             .failure_class
-            .unwrap_or_else(|| failure_class_from_status(outcome.status)),
+            .unwrap_or_else(|| conservative_failure_class(outcome.status)),
         outcome
             .error
             .clone()
@@ -973,11 +979,10 @@ fn require_completed_turn(outcome: &AgentTurnOutcome) -> Result<(), WorkflowNode
     ))
 }
 
-fn failure_class_from_status(status: AgentOutcomeStatus) -> TaskFailureClass {
+fn conservative_failure_class(status: AgentOutcomeStatus) -> TaskFailureClass {
     match status {
-        AgentOutcomeStatus::Completed => TaskFailureClass::NonRetryable,
-        AgentOutcomeStatus::Failed => TaskFailureClass::Retryable,
-        AgentOutcomeStatus::Cancelled => TaskFailureClass::NonRetryable,
+        AgentOutcomeStatus::Completed | AgentOutcomeStatus::Failed => TaskFailureClass::NonRetryable,
+        AgentOutcomeStatus::Cancelled => TaskFailureClass::Cancelled,
         AgentOutcomeStatus::OutcomeUnknown => TaskFailureClass::OutcomeUnknown,
         AgentOutcomeStatus::ReconciliationRequired => TaskFailureClass::ReconciliationRequired,
     }
@@ -988,11 +993,8 @@ fn workflow_error_from_conversation(error: AgentConversationError) -> WorkflowNo
 }
 
 fn workflow_error(failure_class: TaskFailureClass, message: impl Into<String>) -> WorkflowNodeError {
-    let message = message.into();
-    match failure_class {
-        TaskFailureClass::Retryable => WorkflowNodeError::retryable(message),
-        TaskFailureClass::NonRetryable => WorkflowNodeError::non_retryable(message),
-        TaskFailureClass::OutcomeUnknown => WorkflowNodeError::outcome_unknown(message),
-        TaskFailureClass::ReconciliationRequired => WorkflowNodeError::reconciliation_required(message),
+    WorkflowNodeError {
+        failure_class,
+        message: message.into(),
     }
 }

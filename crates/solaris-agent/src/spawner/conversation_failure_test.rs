@@ -97,7 +97,7 @@ async fn max_turns_failure_replays_exactly_and_closes_failed() {
 
     let first = harness.service.run_turn(&handle, original_turn.clone()).await.unwrap();
     assert_eq!(first.status, AgentOutcomeStatus::Failed);
-    assert_eq!(first.failure_class, Some(TaskFailureClass::NonRetryable));
+    assert_eq!(first.failure_class, Some(TaskFailureClass::MaxTurns));
     assert!(first.error.as_deref().is_some_and(|error| error.contains("turn limit")));
     assert_eq!(harness.provider.calls(), 0);
 
@@ -133,7 +133,7 @@ async fn fallback_failure_replays_exactly_and_closes_failed() {
 
     let first = harness.service.run_turn(&handle, original_turn.clone()).await.unwrap();
     assert_eq!(first.status, AgentOutcomeStatus::Failed);
-    assert_eq!(first.failure_class, Some(TaskFailureClass::NonRetryable));
+    assert_eq!(first.failure_class, Some(TaskFailureClass::NonConvergent));
     assert!(
         first
             .error
@@ -338,8 +338,13 @@ async fn durable_outcome_status_failure_and_error_combinations_are_exact() {
         None,
         Some(TaskFailureClass::Retryable),
         Some(TaskFailureClass::NonRetryable),
+        Some(TaskFailureClass::PermissionDenied),
+        Some(TaskFailureClass::MaxTurns),
+        Some(TaskFailureClass::NonConvergent),
+        Some(TaskFailureClass::Cancelled),
         Some(TaskFailureClass::OutcomeUnknown),
         Some(TaskFailureClass::ReconciliationRequired),
+        Some(TaskFailureClass::SideEffectUnknown),
     ];
     let errors = [None, Some("failure"), Some("")];
 
@@ -354,9 +359,16 @@ async fn durable_outcome_status_failure_and_error_combinations_are_exact() {
                     (AgentOutcomeStatus::Completed, None) => error.is_none(),
                     (
                         AgentOutcomeStatus::Failed,
-                        Some(TaskFailureClass::Retryable | TaskFailureClass::NonRetryable),
+                        Some(
+                            TaskFailureClass::Retryable
+                                | TaskFailureClass::NonRetryable
+                                | TaskFailureClass::PermissionDenied
+                                | TaskFailureClass::MaxTurns
+                                | TaskFailureClass::NonConvergent
+                                | TaskFailureClass::SideEffectUnknown,
+                        ),
                     )
-                    | (AgentOutcomeStatus::Cancelled, Some(TaskFailureClass::NonRetryable))
+                    | (AgentOutcomeStatus::Cancelled, Some(TaskFailureClass::Cancelled))
                     | (AgentOutcomeStatus::OutcomeUnknown, Some(TaskFailureClass::OutcomeUnknown))
                     | (AgentOutcomeStatus::ReconciliationRequired, Some(TaskFailureClass::ReconciliationRequired)) => {
                         error.is_some_and(|message| !message.is_empty())
@@ -375,8 +387,13 @@ async fn durable_outcome_status_failure_and_error_combinations_are_exact() {
                             failure_class,
                             Some(
                                 TaskFailureClass::NonRetryable
+                                    | TaskFailureClass::PermissionDenied
+                                    | TaskFailureClass::MaxTurns
+                                    | TaskFailureClass::NonConvergent
+                                    | TaskFailureClass::Cancelled
                                     | TaskFailureClass::OutcomeUnknown
                                     | TaskFailureClass::ReconciliationRequired
+                                    | TaskFailureClass::SideEffectUnknown
                             )
                         )
                     );

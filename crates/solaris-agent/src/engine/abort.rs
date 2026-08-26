@@ -32,7 +32,7 @@ impl AgentEngine {
             .collect::<Vec<_>>();
         if let Some(context) = &self.execution_context {
             context
-                .record_tool_calls_once(call_id, &statuses)
+                .record_tool_calls_with_inputs_once(call_id, tool_calls, &statuses)
                 .map_err(AgentError::ResourceBudgetExceeded)?;
         }
         let result_blocks = tool_calls
@@ -102,7 +102,8 @@ impl AgentEngine {
             Ok(call_id) => {
                 let statuses = vec![status; pending_tool_calls.len()];
                 if let Some(context) = &self.execution_context
-                    && let Err(error) = context.record_tool_calls_once(&call_id, &statuses)
+                    && let Err(error) =
+                        context.record_tool_calls_with_inputs_once(&call_id, &pending_tool_calls, &statuses)
                 {
                     error!(target: "solaris_agent", error = %error, "failed to persist aborted tool-call statistics");
                 }

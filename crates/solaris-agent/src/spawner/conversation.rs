@@ -189,7 +189,12 @@ impl AgentConversationService {
                 lease_result?;
                 if matches!(
                     error.failure_class,
-                    TaskFailureClass::Retryable | TaskFailureClass::NonRetryable
+                    TaskFailureClass::Retryable
+                        | TaskFailureClass::NonRetryable
+                        | TaskFailureClass::PermissionDenied
+                        | TaskFailureClass::MaxTurns
+                        | TaskFailureClass::NonConvergent
+                        | TaskFailureClass::Cancelled
                 ) {
                     let abandoned = store
                         .abandon_open(&durable_identity, &self.service_id, epoch, revision)
@@ -971,7 +976,11 @@ impl AgentConversationService {
             output_projection: None,
             usage: result.usage,
             turns: result.turns,
-            failure_class: failed.then_some(TaskFailureClass::NonRetryable),
+            failure_class: if failed {
+                Some(result.failure_class.unwrap_or(TaskFailureClass::NonRetryable))
+            } else {
+                None
+            },
             error: failed.then(|| engine_failure_message(result.stop_reason).to_owned()),
         })
     }

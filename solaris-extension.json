@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Solaris-star/solaris-hub/v1.0.0/spec/extension-manifest.schema.json",
+  "name": "solaris-mesh",
+  "displayName": "Solaris Mesh",
+  "version": "0.3.0",
+  "description": "First-party Solaris Mesh ACP runtime adapter.",
+  "author": "Solaris Contributors",
+  "contributes": {
+    "acpAdapters": [
+      {
+        "id": "solaris-mesh",
+        "name": "Solaris Mesh",
+        "description": "Runs Solaris Mesh through its ACP stdio entry point.",
+        "connectionType": "cli",
+        "cliCommand": "solaris",
+        "defaultCliPath": "solaris",
+        "acpArgs": ["acp"],
+        "authRequired": false,
+        "supportsStreaming": true
+      }
+    ]
+  }
+}

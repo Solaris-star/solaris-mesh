@@ -28,6 +28,7 @@ use solaris_types::llm::{LlmEvent, LlmRequest};
 use solaris_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
 use solaris_types::permission::PermissionMode;
 use solaris_types::provider_contract::ProviderNativeMetadata;
+use solaris_types::runtime::TaskFailureClass;
 use solaris_types::spawner::AgentOutcomeStatus;
 use solaris_types::tool::ToolResultStatus;
 use tokio::sync::mpsc::Receiver;
@@ -124,6 +125,7 @@ impl AgentEngine {
                     stop_reason: StopReason::MaxTurns,
                     usage: self.total_usage.clone(),
                     turns: guards.counted_turns(),
+                    failure_class: Some(TaskFailureClass::MaxTurns),
                 });
             }
 
@@ -169,6 +171,7 @@ impl AgentEngine {
                         stop_reason: outcome.stop_reason,
                         usage: self.total_usage.clone(),
                         turns: guards.counted_turns(),
+                        failure_class: None,
                     });
                 }
                 TurnOutcome::Truncated(outcome) => {
@@ -213,6 +216,7 @@ impl AgentEngine {
                                     stop_reason: StopReason::EndTurn,
                                     usage: self.total_usage.clone(),
                                     turns: guards.counted_turns(),
+                                    failure_class: None,
                                 });
                             }
                             TurnOutcome::Truncated(continuation) => {
@@ -507,7 +511,7 @@ impl AgentEngine {
         debug_assert_eq!(tool_results.len(), tool_statuses.len());
         if let Some(context) = &self.execution_context {
             context
-                .record_tool_calls_once(&round_call_id, &tool_statuses)
+                .record_tool_calls_with_inputs_once(&round_call_id, tool_calls, &tool_statuses)
                 .map_err(AgentError::ResourceBudgetExceeded)?;
         }
         let phase = if tool_statuses.contains(&ToolResultStatus::OutcomeUnknown) {
@@ -589,6 +593,7 @@ impl AgentEngine {
                 stop_reason: StopReason::EndTurn,
                 usage: self.total_usage.clone(),
                 turns: counted_turns,
+                failure_class: None,
             });
         }
 
@@ -624,6 +629,7 @@ impl AgentEngine {
             stop_reason: fallback_stop_reason,
             usage: self.total_usage.clone(),
             turns: counted_turns,
+            failure_class: Some(TaskFailureClass::NonConvergent),
         })
     }
 

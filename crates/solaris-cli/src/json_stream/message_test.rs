@@ -539,6 +539,7 @@ fn failed_agent_result_is_not_a_successful_operation_terminal() {
         stop_reason: StopReason::MaxTurns,
         usage: TokenUsage::default(),
         turns: 1,
+        failure_class: Some(solaris_types::runtime::TaskFailureClass::MaxTurns),
     };
 
     assert_eq!(operation_terminal_for_agent_result(&result), OperationTerminal::Failed);

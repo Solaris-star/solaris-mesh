@@ -108,6 +108,40 @@ fn tool_call_statistics_resume_without_double_counting_a_replayed_round() {
 }
 
 #[test]
+fn duplicate_tool_call_fingerprints_survive_checkpoint_restore() {
+    use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+
+    let ledger = Arc::new(InMemoryRuntimeLedger::default());
+    let run_id = RunId::from("duplicate-tool-call-recovery");
+    let first = ResourceManager::new(ResourceBudget::default());
+    first
+        .attach_ledger(run_id.clone(), Arc::clone(&ledger) as Arc<dyn RuntimeLedger>)
+        .unwrap();
+    let statuses = [ToolResultStatus::Executed, ToolResultStatus::Failed];
+    let fingerprints = ["same".to_owned(), "failed".to_owned()];
+    first
+        .record_tool_call_fingerprints_once_checked("round-a", &statuses, &fingerprints)
+        .unwrap();
+    first
+        .record_tool_call_fingerprints_once_checked("round-b", &statuses, &fingerprints)
+        .unwrap();
+    assert_eq!(first.usage().duplicate_tool_calls, 2);
+    assert_eq!(first.usage().duplicate_call_rate, Some(0.5));
+
+    let restored = ResourceManager::new(ResourceBudget::default());
+    restored
+        .attach_ledger(run_id, Arc::clone(&ledger) as Arc<dyn RuntimeLedger>)
+        .unwrap();
+    restored
+        .record_tool_call_fingerprints_once_checked("round-c", &[ToolResultStatus::CacheHit], &["same".to_owned()])
+        .unwrap();
+    let usage = restored.usage();
+    assert_eq!(usage.tool_calls, 5);
+    assert_eq!(usage.duplicate_tool_calls, 3);
+    assert_eq!(usage.duplicate_call_rate, Some(0.6));
+}
+
+#[test]
 fn resource_deltas_are_compacted_by_periodic_full_snapshots() {
     use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
 

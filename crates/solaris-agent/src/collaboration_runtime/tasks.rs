@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -70,7 +71,49 @@ impl<T> CollaborationRuntime<T> {
         self.register_runtime_task(run_id, task)
     }
 
+    pub fn register_runtime_tasks_admitted(
+        &self,
+        run_id: &RunId,
+        tasks: Vec<TaskRecord>,
+        max_tasks: usize,
+    ) -> std::io::Result<Vec<bool>> {
+        if tasks.iter().any(|task| task.run_id != *run_id) {
+            return Err(std::io::Error::other("runtime task belongs to a different run"));
+        }
+        let line = self.mutation.line_for(run_id);
+        let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
+        let durable_ids = self
+            .ledger
+            .records_for_run(run_id)?
+            .into_iter()
+            .filter(|record| record.record_type == "task_created")
+            .filter_map(|record| serde_json::from_value::<TaskRecord>(record.payload).ok())
+            .map(|task| task.task_id)
+            .collect::<BTreeSet<_>>();
+        let new_ids = tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .filter(|task_id| !durable_ids.contains(task_id))
+            .collect::<BTreeSet<_>>();
+        let projected = durable_ids.len().saturating_add(new_ids.len());
+        if projected > max_tasks {
+            return Err(std::io::Error::other(format!(
+                "Run accepts at most {max_tasks} collaboration tasks"
+            )));
+        }
+        tasks
+            .into_iter()
+            .map(|task| self.register_runtime_task_locked(run_id, task))
+            .collect()
+    }
+
     pub fn register_runtime_task(&self, run_id: &RunId, task: TaskRecord) -> std::io::Result<bool> {
+        let line = self.mutation.line_for(run_id);
+        let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
+        self.register_runtime_task_locked(run_id, task)
+    }
+
+    fn register_runtime_task_locked(&self, run_id: &RunId, task: TaskRecord) -> std::io::Result<bool> {
         if task.run_id != *run_id {
             return Err(std::io::Error::other("runtime task belongs to a different run"));
         }
@@ -88,8 +131,6 @@ impl<T> CollaborationRuntime<T> {
                 ));
             }
         }
-        let line = self.mutation.line_for(run_id);
-        let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
         let durable_created = self
             .ledger
             .records_for_run(run_id)?

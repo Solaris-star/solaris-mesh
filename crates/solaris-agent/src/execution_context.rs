@@ -382,10 +382,60 @@ impl EffectExecutionContext {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn record_tool_calls_once(
         &self,
         round_call_id: &str,
         statuses: &[solaris_types::tool::ToolResultStatus],
+    ) -> Result<(), String> {
+        let fingerprints = statuses
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                stable_digest_value(&json!({
+                    "schema": "solaris/tool-call-fingerprint/legacy-v1",
+                    "agent_id": self.agent_id,
+                    "round_call_id": round_call_id,
+                    "index": index,
+                }))
+            })
+            .collect::<Vec<_>>();
+        self.record_tool_call_fingerprints_once(round_call_id, statuses, fingerprints)
+    }
+
+    pub(crate) fn record_tool_calls_with_inputs_once(
+        &self,
+        round_call_id: &str,
+        tool_calls: &[solaris_types::message::ContentBlock],
+        statuses: &[solaris_types::tool::ToolResultStatus],
+    ) -> Result<(), String> {
+        let environment = self.environment();
+        let fingerprints = tool_calls
+            .iter()
+            .filter_map(|block| match block {
+                solaris_types::message::ContentBlock::ToolUse { name, input, .. } => {
+                    Some(stable_digest_value(&json!({
+                        "schema": "solaris/tool-call-fingerprint/v1",
+                        "agent_id": self.agent_id,
+                        "environment": environment,
+                        "tool": name,
+                        "input": input,
+                    })))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if fingerprints.len() != statuses.len() {
+            return Err("tool-call identities and statuses have different lengths".to_owned());
+        }
+        self.record_tool_call_fingerprints_once(round_call_id, statuses, fingerprints)
+    }
+
+    fn record_tool_call_fingerprints_once(
+        &self,
+        round_call_id: &str,
+        statuses: &[solaris_types::tool::ToolResultStatus],
+        fingerprints: Vec<String>,
     ) -> Result<(), String> {
         // Child Agents can receive provider-local call IDs that match another
         // child's IDs. Include the durable Agent identity before applying the
@@ -397,7 +447,7 @@ impl EffectExecutionContext {
         ] {
             let Some(resources) = resources else { continue };
             resources
-                .record_tool_calls_once_checked(&round_identity, statuses)
+                .record_tool_call_fingerprints_once_checked(&round_identity, statuses, &fingerprints)
                 .map_err(|error| format!("{scope} tool-call statistics persistence failed: {error}"))?;
         }
         Ok(())

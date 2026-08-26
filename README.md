@@ -43,6 +43,9 @@ solaris
 # Agent Client Protocol (ACP) stdio agent
 solaris acp
 
+# Release archives also include solaris-extension.json. Solaris Studio reads
+# its acpAdapters contribution and launches the same `solaris acp` entry point.
+
 # Full CLI reference
 solaris --help
 ```
@@ -102,8 +105,17 @@ The policy is `disabled`, `on_demand` (the default), or `proactive`.
 `auto`, `single`, `supervisor`, `team`, `fanout`, and
 `independent_reviewer` are supported strategies. Roles are free-form; the
 runtime still limits resources: automatic parallelism is 2–8 active Child
-Agents, an explicit `--max-active-agents` value is 1–64, and a Run accepts 32
-tasks by default or at most 256 when configured.
+Agents, an explicit `--max-active-agents` value is 1–64, and durable atomic
+admission limits the entire Run to 32 logical collaboration tasks by default
+or at most 256 when configured. Replays and retries reuse their logical task
+identity; `single` creates no Child Agent task, while an automatic independent
+reviewer consumes one task slot.
+
+`CollaborationRunSummary` reports `duplicate_call_rate` for terminal tool calls.
+A duplicate is a later call in the same Agent execution scope with the same
+stable tool name, canonical JSON input, and execution-environment snapshot.
+All terminal statuses, including cache hits, denials, failures, aborts, and
+unknown outcomes, enter the denominator; status is not part of the fingerprint.
 
 The same settings can be supplied in the project configuration or through
 `SOLARIS_MULTI_AGENT_POLICY`, `SOLARIS_COLLABORATION_STRATEGY`,

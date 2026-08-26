@@ -18,7 +18,7 @@ use solaris_types::identity::{AgentId, ChildAgentKey, OperationId, TaskId};
 use solaris_types::message::TokenUsage;
 use solaris_types::permission::{PermissionCeiling, PermissionDecision};
 use solaris_types::resource::ResourceBudget;
-use solaris_types::runtime::AgentLifecycleState;
+use solaris_types::runtime::{AgentLifecycleState, TaskFailureClass};
 use solaris_types::spawner::{
     AgentHandle, AgentOutcome, AgentOutcomeStatus, AgentSpawnError, AgentSpawnService, AgentSpawnSpec, ForkOverrides,
     Spawner, SubAgentConfig, SubAgentResult,
@@ -293,6 +293,7 @@ impl AgentSpawnService for AgentSpawner {
             output,
             usage: result.usage,
             turns: result.turns,
+            failure_class: result.failure_class,
             error: (status != AgentOutcomeStatus::Completed).then_some(result.text),
         })
     }
@@ -459,6 +460,7 @@ pub(super) fn spawn_error(name: &str, text: String) -> SubAgentResult {
         text,
         usage: TokenUsage::default(),
         turns: 0,
+        failure_class: Some(TaskFailureClass::NonRetryable),
         is_error: true,
     }
 }
@@ -467,8 +469,13 @@ pub(super) fn spawn_failure(name: &str, error: AgentSpawnError) -> SubAgentResul
     let status = match error.failure_class {
         solaris_types::runtime::TaskFailureClass::OutcomeUnknown => AgentOutcomeStatus::OutcomeUnknown,
         solaris_types::runtime::TaskFailureClass::ReconciliationRequired => AgentOutcomeStatus::ReconciliationRequired,
+        solaris_types::runtime::TaskFailureClass::Cancelled => AgentOutcomeStatus::Cancelled,
         solaris_types::runtime::TaskFailureClass::Retryable
-        | solaris_types::runtime::TaskFailureClass::NonRetryable => AgentOutcomeStatus::Failed,
+        | solaris_types::runtime::TaskFailureClass::NonRetryable
+        | solaris_types::runtime::TaskFailureClass::PermissionDenied
+        | solaris_types::runtime::TaskFailureClass::MaxTurns
+        | solaris_types::runtime::TaskFailureClass::NonConvergent
+        | solaris_types::runtime::TaskFailureClass::SideEffectUnknown => AgentOutcomeStatus::Failed,
     };
     let message = error.message;
     SubAgentResult {
@@ -480,6 +487,7 @@ pub(super) fn spawn_failure(name: &str, error: AgentSpawnError) -> SubAgentResul
         text: message,
         usage: TokenUsage::default(),
         turns: 0,
+        failure_class: Some(error.failure_class),
         is_error: true,
     }
 }
@@ -494,6 +502,7 @@ pub(super) fn spawn_reconciliation(name: &str, text: String) -> SubAgentResult {
         text,
         usage: TokenUsage::default(),
         turns: 0,
+        failure_class: Some(TaskFailureClass::ReconciliationRequired),
         is_error: true,
     }
 }
@@ -515,6 +524,7 @@ pub(super) fn outcome_to_legacy(outcome: AgentOutcome) -> SubAgentResult {
         text,
         usage: outcome.usage,
         turns: outcome.turns,
+        failure_class: outcome.failure_class,
         is_error: outcome.status != AgentOutcomeStatus::Completed,
     }
 }
@@ -530,6 +540,7 @@ pub(super) fn spawn_cancelled(name: &str, agent_id: &AgentId, task_id: &TaskId) 
         text,
         usage: TokenUsage::default(),
         turns: 0,
+        failure_class: Some(TaskFailureClass::Cancelled),
         is_error: true,
     }
 }
@@ -541,6 +552,7 @@ fn cancelled_outcome(handle: &AgentHandle) -> AgentOutcome {
         output: json!({"error": "child Agent was cancelled before join"}),
         usage: TokenUsage::default(),
         turns: 0,
+        failure_class: Some(TaskFailureClass::Cancelled),
         error: Some("child Agent was cancelled before join".to_owned()),
     }
 }

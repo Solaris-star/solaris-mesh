@@ -436,8 +436,11 @@ impl AgentWorkflowExecutor {
         if settle_task {
             let (state, failure_class) = match outcome.status {
                 AgentOutcomeStatus::Completed => (TaskState::Completed, None),
-                AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, None),
-                AgentOutcomeStatus::Failed => (TaskState::Failed, Some(TaskFailureClass::Retryable)),
+                AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, Some(TaskFailureClass::Cancelled)),
+                AgentOutcomeStatus::Failed => (
+                    TaskState::Failed,
+                    Some(outcome.failure_class.unwrap_or(TaskFailureClass::NonRetryable)),
+                ),
                 AgentOutcomeStatus::OutcomeUnknown => (TaskState::Failed, Some(TaskFailureClass::OutcomeUnknown)),
                 AgentOutcomeStatus::ReconciliationRequired => {
                     (TaskState::Failed, Some(TaskFailureClass::ReconciliationRequired))
@@ -465,6 +468,7 @@ impl AgentWorkflowExecutor {
             text,
             usage: outcome.usage,
             turns: outcome.turns,
+            failure_class: outcome.failure_class,
             is_error: outcome.status != AgentOutcomeStatus::Completed,
         })
     }

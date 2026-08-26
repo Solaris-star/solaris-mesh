@@ -17,10 +17,11 @@ installer from PowerShell before starting Solaris:
 .\install-solaris.cmd
 ```
 
-The installer verifies the helper digest, replaces inherited writable DACLs on
-the helper and manifest, and runs `solaris sandbox verify-package`. A failed ACL,
-digest, or strict sandbox check exits with an error; do not use an extracted ZIP
-whose installer did not finish successfully.
+The installer verifies the helper digest and installs the CLI, sandbox helper,
+helper digest, and `solaris-extension.json` together. Solaris Studio consumes the
+manifest's `acpAdapters` contribution and launches `solaris acp`. A missing file
+or digest mismatch exits with an error; do not use an extracted ZIP whose
+installer did not finish successfully.
 
 ## Command Format
 

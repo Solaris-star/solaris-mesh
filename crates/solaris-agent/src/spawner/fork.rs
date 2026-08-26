@@ -6,7 +6,7 @@ use serde_json::json;
 use solaris_types::identity::{ChildAgentKey, OperationId, RunId};
 use solaris_types::permission::{ExecutionBoundary, PermissionCeiling, PermissionDecision, PermissionMode};
 use solaris_types::resource::ResourceBudget;
-use solaris_types::runtime::OperationEnvironmentSnapshot;
+use solaris_types::runtime::{OperationEnvironmentSnapshot, TaskFailureClass};
 
 use crate::execution_context::{
     EffectExecutionContext, EffectOutcomeGuard, EffectRecoveryDecision, build_environment_snapshot_with_plugins,
@@ -93,9 +93,12 @@ impl AgentSpawner {
             );
         }
         if evaluation.decision != PermissionDecision::Allow {
-            return spawn_error(
+            return spawn_failure(
                 &sub_config.name,
-                format!("fork permission denied: {}", evaluation.reason),
+                super::AgentSpawnError {
+                    failure_class: TaskFailureClass::PermissionDenied,
+                    message: format!("fork permission denied: {}", evaluation.reason),
+                },
             );
         }
         let _effect_permit = match context.acquire_effect_permit().await {
@@ -333,7 +336,28 @@ impl AgentSpawner {
         };
         let outcome = match run_result {
             Ok(result) => sub_agent_result_from_engine(name, reservation.child_agent_id.clone(), result),
-            Err(error) => spawn_error(&name, format!("Sub-agent error: {error}")),
+            Err(error) => {
+                let failure_class = match &error {
+                    crate::error::AgentError::Provider(provider) if provider.is_retryable() => {
+                        TaskFailureClass::Retryable
+                    }
+                    crate::error::AgentError::ApiError(_) => TaskFailureClass::Retryable,
+                    crate::error::AgentError::ReconciliationRequired { .. } => TaskFailureClass::ReconciliationRequired,
+                    crate::error::AgentError::UserAborted => TaskFailureClass::Cancelled,
+                    crate::error::AgentError::ToolCallMalformed { .. }
+                    | crate::error::AgentError::ToolCallFailures { .. } => TaskFailureClass::NonConvergent,
+                    crate::error::AgentError::Provider(_)
+                    | crate::error::AgentError::ResourceBudgetExceeded(_)
+                    | crate::error::AgentError::ContextTooLong { .. } => TaskFailureClass::NonRetryable,
+                };
+                spawn_failure(
+                    &name,
+                    solaris_types::spawner::AgentSpawnError {
+                        failure_class,
+                        message: format!("Sub-agent error: {error}"),
+                    },
+                )
+            }
         };
         let result = self.persist_outcome(&reservation, outcome);
         execution_guard.finish();

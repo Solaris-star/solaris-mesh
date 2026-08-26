@@ -293,7 +293,9 @@ impl AgentWorkflowExecutor {
                 AgentOutcomeStatus::OutcomeUnknown | AgentOutcomeStatus::ReconciliationRequired
             ) {
                 return Err(workflow_error(
-                    failure_class_from_status(result.status),
+                    result
+                        .failure_class
+                        .unwrap_or_else(|| conservative_failure_class(result.status)),
                     "Supervisor Task has an unknown worker outcome",
                 ));
             }

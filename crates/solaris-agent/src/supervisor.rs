@@ -80,7 +80,7 @@ impl SupervisorCoordinator {
             let (result, retryable) = match self.spawner.spawn(attempt_spec).await {
                 Ok(handle) => match self.spawner.join(&handle).await {
                     Ok(outcome) => {
-                        let retryable = outcome.status == AgentOutcomeStatus::Failed;
+                        let retryable = outcome.failure_class == Some(TaskFailureClass::Retryable);
                         (supervisor_outcome(outcome), retryable)
                     }
                     Err(error) => (supervisor_reconciliation(&config.name, error), false),
@@ -132,6 +132,7 @@ fn supervisor_error(name: &str, message: &str) -> SubAgentResult {
         text: message.to_owned(),
         usage: Default::default(),
         turns: 0,
+        failure_class: Some(TaskFailureClass::NonRetryable),
         is_error: true,
     }
 }
@@ -140,7 +141,13 @@ fn supervisor_spawn_failure(name: &str, error: AgentSpawnError) -> SubAgentResul
     let status = match error.failure_class {
         TaskFailureClass::OutcomeUnknown => AgentOutcomeStatus::OutcomeUnknown,
         TaskFailureClass::ReconciliationRequired => AgentOutcomeStatus::ReconciliationRequired,
-        TaskFailureClass::Retryable | TaskFailureClass::NonRetryable => AgentOutcomeStatus::Failed,
+        TaskFailureClass::Cancelled => AgentOutcomeStatus::Cancelled,
+        TaskFailureClass::Retryable
+        | TaskFailureClass::NonRetryable
+        | TaskFailureClass::PermissionDenied
+        | TaskFailureClass::MaxTurns
+        | TaskFailureClass::NonConvergent
+        | TaskFailureClass::SideEffectUnknown => AgentOutcomeStatus::Failed,
     };
     SubAgentResult {
         name: name.to_owned(),
@@ -151,6 +158,7 @@ fn supervisor_spawn_failure(name: &str, error: AgentSpawnError) -> SubAgentResul
         text: error.message,
         usage: Default::default(),
         turns: 0,
+        failure_class: Some(error.failure_class),
         is_error: true,
     }
 }
@@ -165,6 +173,7 @@ fn supervisor_reconciliation(name: &str, message: String) -> SubAgentResult {
         text: message,
         usage: Default::default(),
         turns: 0,
+        failure_class: Some(TaskFailureClass::ReconciliationRequired),
         is_error: true,
     }
 }
@@ -186,6 +195,7 @@ fn supervisor_outcome(outcome: AgentOutcome) -> SubAgentResult {
         text,
         usage: outcome.usage,
         turns: outcome.turns,
+        failure_class: outcome.failure_class,
         is_error: outcome.status != AgentOutcomeStatus::Completed,
     }
 }

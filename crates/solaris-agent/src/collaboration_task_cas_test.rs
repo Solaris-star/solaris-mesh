@@ -74,6 +74,81 @@ fn add_agent(runtime: &CollaborationRuntime<()>, run_id: &RunId, agent_id: &Agen
 }
 
 #[test]
+fn run_task_admission_is_durable_and_idempotent_after_restore() {
+    let ledger = Arc::new(InMemoryRuntimeLedger::default());
+    let run_id = RunId::from("task-admission-restore");
+    let first: CollaborationRuntime<()> = CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(2)),
+        Arc::clone(&ledger) as Arc<dyn RuntimeLedger>,
+    );
+    let task_a = task(&run_id, &TaskId::from("task-a"));
+    let task_b = task(&run_id, &TaskId::from("task-b"));
+    assert_eq!(
+        first
+            .register_runtime_tasks_admitted(&run_id, vec![task_a.clone(), task_b.clone()], 2)
+            .unwrap(),
+        vec![true, true]
+    );
+    assert_eq!(
+        first
+            .register_runtime_tasks_admitted(&run_id, vec![task_a.clone()], 2)
+            .unwrap(),
+        vec![false]
+    );
+
+    let restored: CollaborationRuntime<()> = CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(2)),
+        Arc::clone(&ledger) as Arc<dyn RuntimeLedger>,
+    );
+    assert_eq!(
+        restored
+            .register_runtime_tasks_admitted(&run_id, vec![task_b], 2)
+            .unwrap(),
+        vec![false]
+    );
+    let error = restored
+        .register_runtime_tasks_admitted(&run_id, vec![task(&run_id, &TaskId::from("task-c"))], 2)
+        .unwrap_err();
+    assert!(error.to_string().contains("at most 2"));
+}
+
+#[test]
+fn concurrent_run_task_admission_never_exceeds_the_durable_limit() {
+    let ledger = Arc::new(InMemoryRuntimeLedger::default());
+    let runtime: Arc<CollaborationRuntime<()>> = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(2)),
+        Arc::clone(&ledger) as Arc<dyn RuntimeLedger>,
+    ));
+    let run_id = RunId::from("task-admission-race");
+    let barrier = Arc::new(Barrier::new(3));
+    let threads = ["task-a", "task-b"].map(|id| {
+        let runtime = Arc::clone(&runtime);
+        let run_id = run_id.clone();
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            runtime.register_runtime_tasks_admitted(&run_id, vec![task(&run_id, &TaskId::from(id))], 1)
+        })
+    });
+    barrier.wait();
+    let successes = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .filter(Result::is_ok)
+        .count();
+    assert_eq!(successes, 1);
+    assert_eq!(
+        ledger
+            .records_for_run(&run_id)
+            .unwrap()
+            .iter()
+            .filter(|record| record.record_type == "task_created")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn durable_task_cas_recovers_after_append_before_projection_and_replay_is_single_revision() {
     let ledger = Arc::new(FailAfterTaskCasAppendOnce::default());
     let run_id = RunId::from("cas-crash-run");

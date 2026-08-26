@@ -177,12 +177,12 @@ impl AgentConversationService {
             let error = if possibly_executed {
                 AgentConversationError::outcome_unknown("Provider outcome is unknown during conversation close")
             } else {
-                AgentConversationError::non_retryable("Agent conversation closed before Provider execution")
+                AgentConversationError {
+                    failure_class: TaskFailureClass::Cancelled,
+                    message: "Agent conversation closed before Provider execution".to_owned(),
+                }
             };
-            let mut outcome = failure_outcome(handle, &turn, &identity, &error);
-            if !possibly_executed {
-                outcome.status = AgentOutcomeStatus::Cancelled;
-            }
+            let outcome = failure_outcome(handle, &turn, &identity, &error);
             self.record_turn_outcome(handle, &outcome)?;
             store
                 .finalize_turn(

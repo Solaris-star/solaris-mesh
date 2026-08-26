@@ -49,9 +49,18 @@ pub struct ResourceUsage {
     /// Tool calls that executed or returned a valid cached result.
     #[serde(default)]
     pub useful_tool_calls: u64,
+    /// Calls whose canonical tool identity was already observed in the same scope.
+    #[serde(default)]
+    pub duplicate_tool_calls: u64,
+    /// Canonical tool-call identities retained for checkpoint and cold restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen_tool_call_fingerprints: Vec<String>,
     /// `useful_tool_calls / tool_calls`, or `None` before the first call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub useful_call_rate: Option<f64>,
+    /// `duplicate_tool_calls / tool_calls`, or `None` before the first call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_call_rate: Option<f64>,
     pub cost: f64,
     /// Whether `cost` represents all recorded provider usage.
     ///
@@ -605,11 +614,29 @@ impl ResourceManager {
     ///
     /// The stable round call ID shares the same persisted applied-ID set used
     /// by provider usage, with a namespace prefix to prevent collisions.
+    #[cfg(test)]
     pub(crate) fn record_tool_calls_once_checked(
         &self,
         round_call_id: &str,
         statuses: &[ToolResultStatus],
     ) -> Result<(), String> {
+        let fingerprints = statuses
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("legacy:{round_call_id}:{index}"))
+            .collect::<Vec<_>>();
+        self.record_tool_call_fingerprints_once_checked(round_call_id, statuses, &fingerprints)
+    }
+
+    pub(crate) fn record_tool_call_fingerprints_once_checked(
+        &self,
+        round_call_id: &str,
+        statuses: &[ToolResultStatus],
+        fingerprints: &[String],
+    ) -> Result<(), String> {
+        if statuses.len() != fingerprints.len() {
+            return Err("tool-call statuses and fingerprints have different lengths".to_owned());
+        }
         let applied_id = format!("tool-round:{round_call_id}");
         self.with_state_update(|| {
             let mut applied = self
@@ -627,9 +654,24 @@ impl ResourceManager {
                 u64::try_from(statuses.iter().filter(|status| status.is_useful_call()).count()).unwrap_or(u64::MAX);
             let round_rate = useful_call_rate(statuses);
             let mut usage = self.usage.lock().unwrap_or_else(|error| error.into_inner());
+            let mut seen = usage
+                .seen_tool_call_fingerprints
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            let round_duplicates = fingerprints
+                .iter()
+                .filter(|fingerprint| !seen.insert((*fingerprint).clone()))
+                .count();
             usage.tool_calls = usage.tool_calls.saturating_add(round_calls);
             usage.useful_tool_calls = usage.useful_tool_calls.saturating_add(round_useful);
+            usage.duplicate_tool_calls = usage
+                .duplicate_tool_calls
+                .saturating_add(u64::try_from(round_duplicates).unwrap_or(u64::MAX));
+            usage.seen_tool_call_fingerprints = seen.into_iter().collect();
+            usage.seen_tool_call_fingerprints.sort();
             usage.refresh_useful_call_rate();
+            usage.refresh_duplicate_call_rate();
             tracing::debug!(
                 round_calls,
                 round_useful,
@@ -637,6 +679,9 @@ impl ResourceManager {
                 total_calls = usage.tool_calls,
                 useful_calls = usage.useful_tool_calls,
                 useful_call_rate = ?usage.useful_call_rate,
+                round_duplicates,
+                duplicate_calls = usage.duplicate_tool_calls,
+                duplicate_call_rate = ?usage.duplicate_call_rate,
                 "recorded terminal tool-call statistics"
             );
             drop(usage);

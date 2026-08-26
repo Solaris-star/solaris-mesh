@@ -273,10 +273,17 @@ fn valid_outcome_result(outcome: &AgentTurnOutcome) -> bool {
         (AgentOutcomeStatus::Completed, None, None) => true,
         (
             AgentOutcomeStatus::Failed,
-            Some(TaskFailureClass::Retryable | TaskFailureClass::NonRetryable),
+            Some(
+                TaskFailureClass::Retryable
+                | TaskFailureClass::NonRetryable
+                | TaskFailureClass::PermissionDenied
+                | TaskFailureClass::MaxTurns
+                | TaskFailureClass::NonConvergent
+                | TaskFailureClass::SideEffectUnknown,
+            ),
             Some(error),
         )
-        | (AgentOutcomeStatus::Cancelled, Some(TaskFailureClass::NonRetryable), Some(error))
+        | (AgentOutcomeStatus::Cancelled, Some(TaskFailureClass::Cancelled), Some(error))
         | (AgentOutcomeStatus::OutcomeUnknown, Some(TaskFailureClass::OutcomeUnknown), Some(error))
         | (AgentOutcomeStatus::ReconciliationRequired, Some(TaskFailureClass::ReconciliationRequired), Some(error)) => {
             !error.trim().is_empty()

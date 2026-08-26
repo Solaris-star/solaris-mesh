@@ -44,8 +44,19 @@ pub enum TaskState {
 pub enum TaskFailureClass {
     Retryable,
     NonRetryable,
+    PermissionDenied,
+    MaxTurns,
+    NonConvergent,
+    Cancelled,
     OutcomeUnknown,
     ReconciliationRequired,
+    SideEffectUnknown,
+}
+
+impl TaskFailureClass {
+    pub const fn is_retryable(self) -> bool {
+        matches!(self, Self::Retryable)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

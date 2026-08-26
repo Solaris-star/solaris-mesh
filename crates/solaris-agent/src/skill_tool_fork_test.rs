@@ -80,6 +80,9 @@ impl Spawner for MockSpawner {
             text: self.text.clone(),
             usage: TokenUsage::default(),
             turns: 1,
+            failure_class: self
+                .is_error
+                .then_some(solaris_types::runtime::TaskFailureClass::NonRetryable),
             is_error: self.is_error,
         }
     }

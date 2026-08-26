@@ -380,6 +380,7 @@ fn normalize_recovered_state(manager: &ResourceManager, state: &mut ResourceStat
     state.usage.active_agents = 0;
     state.usage.concurrent_effects = 0;
     state.usage.refresh_useful_call_rate();
+    state.usage.refresh_duplicate_call_rate();
     if state.provider_rate.started_at_unix_ms != 0
         && (manager.clock)().saturating_sub(state.provider_rate.started_at_unix_ms) >= 60_000
     {
