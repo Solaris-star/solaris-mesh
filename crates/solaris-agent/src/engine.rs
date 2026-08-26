@@ -1,50 +1,56 @@
-use std::mem::replace;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, RwLock};
 
-use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
+use crate::cache_diagnostics::CacheBreakDetector;
 use crate::commands::{CommandContext, CommandRegistry, CommandResult, SlashCommand, default_registry};
-use crate::compact::auto::{CompactError, autocompact, should_autocompact};
-use crate::compact::emergency::is_at_emergency_limit;
-use crate::compact::estimate::estimate_tokens_from_messages;
-use crate::compact::micro::{microcompact, should_microcompact};
 use crate::compact::state::CompactState;
 use crate::confirm::ToolConfirmer;
 use crate::error::AgentError;
-use crate::orchestration::{ExecutionControl, execute_tool_calls, execute_tool_calls_with_approval};
+use crate::execution_context::{EffectExecutionContext, build_environment_snapshot};
+use crate::hook_diagnostics::log_stop_hook_output;
+use crate::orchestration::EffectHookExecutor;
 use crate::output::OutputSink;
-use crate::plan::prompt::plan_mode_instructions;
+use crate::permission_engine::PermissionContext;
 use crate::plan::state::PlanState;
+use crate::resource_manager::ResourceManager;
+use crate::runtime_ledger::InMemoryRuntimeLedger;
 use crate::session::{Session, SessionManager};
 use crate::stream::StreamOutcome;
 use crate::tool_call::{
     DEFAULT_MAX_TOOL_CALL_FAILURE, DEFAULT_MAX_TOOL_CALL_MALFORMED, ToolCallFailureFingerprint,
-    ToolCallMalformedFingerprint, merge_tool_results, tool_call_failure_fingerprint, tool_call_malformed_fingerprint,
-    tool_call_malformed_reason,
+    ToolCallMalformedFingerprint,
 };
-use crate::turn::{FinalizationReason, TurnGuardAction, TurnGuards, TurnKind, TurnOutcome};
-use anyhow::{Error as AnyhowError, Result as AnyhowResult};
-use chrono::Utc;
-use serde_json::to_string;
+use anyhow::Error as AnyhowError;
+use serde_json::{Value, json};
 use solaris_compact::CompactLevel;
 use solaris_config::compact::CompactConfig;
 use solaris_config::compat::ProviderCompat;
 use solaris_config::config::Config;
 use solaris_config::hooks::HookEngine;
 use solaris_protocol::ToolApprovalManager;
-use solaris_protocol::events::ToolCategory;
 use solaris_protocol::writer::ProtocolEmitter;
 use solaris_providers::provider::{LlmProvider, create_provider};
 use solaris_tools::registry::ToolRegistry;
-use solaris_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
+use solaris_types::config::{ConfigUpdateOutcome, RuntimeConfigUpdate};
+use solaris_types::identity::{AgentId, RunId};
+use solaris_types::llm::ThinkingConfig;
 use solaris_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
-use solaris_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
-use tokio::sync::mpsc::Receiver;
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use solaris_types::permission::{ExecutionBoundary, PermissionCeiling, PermissionMode};
+use solaris_types::provider_contract::ProviderNativeMetadata;
+use solaris_types::run_preset::Intensity;
+use solaris_types::skill_types::ContextModifier;
+use solaris_types::spawner::AgentOutcomeStatus;
+use solaris_types::workflow::MultiAgentPolicy;
+use tracing::{error, info};
+use uuid::Uuid;
+
+pub use self::runtime_configuration::RuntimeConfigurationView;
+use self::runtime_configuration::{RuntimeConfigurationState, runtime_configuration_state, thinking_budget};
 
 #[derive(Debug)]
 pub struct AgentResult {
+    pub status: AgentOutcomeStatus,
     pub text: String,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
@@ -55,6 +61,9 @@ pub struct AgentEngine {
     // Provider request configuration.
     /// Shared LLM provider used to issue model requests.
     provider: Arc<dyn LlmProvider>,
+    /// Stable configured provider name or alias used in durable run identity.
+    provider_label: String,
+    provider_effect: solaris_types::effect::EffectDescriptor,
     /// Resolved provider compatibility and capability settings.
     compat: ProviderCompat,
     /// Optional provider-neutral thinking configuration for model requests.
@@ -66,6 +75,10 @@ pub struct AgentEngine {
     /// Persisted reasoning effort, updated by skill context modifiers.
     /// Carried into each model turn's LlmRequest.reasoning_effort.
     reasoning_effort: Option<String>,
+    /// Shared source read by host snapshots and configuration events.
+    runtime_configuration: Arc<RwLock<RuntimeConfigurationState>>,
+    multi_agent_policy: Arc<RwLock<MultiAgentPolicy>>,
+    resources: Arc<ResourceManager>,
 
     // Conversation and run state.
     /// Conversation history used to build the next provider request.
@@ -86,8 +99,12 @@ pub struct AgentEngine {
     // Tool execution policy.
     /// Registry of tools available to the engine.
     tools: ToolRegistry,
-    /// Shared tool confirmer used for approval policy decisions.
+    /// Shared tool confirmer used for interactive approval decisions.
     confirmer: Arc<Mutex<ToolConfirmer>>,
+    /// Shared permission posture inherited by child Agent runtimes.
+    permission_context: PermissionContext,
+    /// Durable effect/operation context for permission leases, revalidation and ledger writes.
+    execution_context: Option<EffectExecutionContext>,
     /// Tool names currently allowed without additional approval.
     allow_list: Vec<String>,
     /// Optional hook engine for lifecycle and tool hooks.
@@ -121,12 +138,43 @@ pub struct AgentEngine {
     /// Shared flag read by EnterPlanMode/ExitPlanMode tools to validate transitions.
     /// Updated by the engine when processing PlanModeTransition modifiers.
     plan_active_flag: Option<Arc<AtomicBool>>,
+    plan_mode_disable_handler: Option<plan_lifecycle::PlanModeDisableHandler>,
 
     // Diagnostics and command handling.
     /// Prompt cache break detector for diagnostics.
     cache_detector: CacheBreakDetector,
     /// Slash command registry used before normal model execution.
     commands: CommandRegistry,
+}
+
+fn standalone_execution_context(
+    config: &Config,
+    tools: &ToolRegistry,
+    permissions: &PermissionContext,
+    cwd: &std::path::Path,
+    resumed_run_id: Option<&str>,
+) -> EffectExecutionContext {
+    let boundary_root = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| cwd.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    permissions.set_boundary(ExecutionBoundary::workspace(boundary_root));
+    let provider_effect = crate::bootstrap::provider_effect_descriptor_for_config(config, cwd);
+    permissions.allow_configured_effect_for("config:provider", "ProviderRequest", &provider_effect);
+    permissions.allow_configured_effect_for("config:provider", "AutoCompact", &provider_effect);
+    permissions.set_mode(permissions.mode());
+    let run_id = resumed_run_id
+        .map(RunId::from)
+        .unwrap_or_else(|| RunId::new(format!("run-{}", Uuid::now_v7())));
+    let agent_id = AgentId::new(format!("agent:root:{}", run_id.as_str()));
+    EffectExecutionContext::new(
+        run_id,
+        agent_id,
+        Arc::new(InMemoryRuntimeLedger::default()),
+        permissions.clone(),
+        build_environment_snapshot(config, tools, permissions),
+    )
 }
 
 impl AgentEngine {
@@ -155,7 +203,30 @@ impl AgentEngine {
         runtime_env: Vec<(String, String)>,
     ) -> Self {
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer = ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
+        let provider_effect = crate::bootstrap::provider_effect_descriptor_for_config(&config, &cwd);
+        let permission_context = PermissionContext::from_auto_approve(config.tools.auto_approve);
+        let resources = ResourceManager::new(Default::default());
+        let runtime_configuration = runtime_configuration_state(
+            &config.provider_label,
+            &config.model,
+            permission_context.mode(),
+            &config.thinking,
+            config.compact.compaction,
+        );
+        let configured_multi_agent_policy = config.multi_agent.policy;
+        let configured_max_active_agents = config.multi_agent.max_active_agents;
+        {
+            let mut state = runtime_configuration.write().unwrap_or_else(|error| error.into_inner());
+            state.configuration.multi_agent_policy = configured_multi_agent_policy;
+            state.configuration.max_active_agents = configured_max_active_agents;
+            state.configuration.effective_max_active_agents =
+                configured_max_active_agents.unwrap_or_else(|| state.configuration.effective_max_active_agents);
+        }
+        let execution_context = standalone_execution_context(&config, &tools, &permission_context, &cwd, None);
+        let mut hooks = HookEngine::new_with_env(config.hooks.clone(), cwd.clone(), runtime_env);
+        hooks.set_executor(Arc::new(EffectHookExecutor::new(execution_context.clone())));
+        let allow_list = config.tools.allow_list.clone();
+        let confirmer = ToolConfirmer::new(config.tools.auto_approve, allow_list.clone());
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
@@ -166,17 +237,21 @@ impl AgentEngine {
             None
         };
 
-        let allow_list = config.tools.allow_list.clone();
         let compact_config = config.compact.clone();
 
-        Self {
+        let engine = Self {
             provider,
+            provider_label: config.provider_label.clone(),
+            provider_effect,
             model: config.model,
             max_tokens: config.max_tokens,
             thinking: config.thinking,
             compat: config.compat.clone(),
             system_prompt,
             reasoning_effort: None,
+            runtime_configuration,
+            multi_agent_policy: Arc::new(RwLock::new(configured_multi_agent_policy)),
+            resources,
             messages: Vec::new(),
             total_usage: TokenUsage::default(),
             msg_id: String::new(),
@@ -189,8 +264,10 @@ impl AgentEngine {
                 .unwrap_or(DEFAULT_MAX_TOOL_CALL_FAILURE),
             tools,
             confirmer: Arc::new(Mutex::new(confirmer)),
+            permission_context,
+            execution_context: Some(execution_context),
             allow_list,
-            hooks: Some(HookEngine::new_with_env(config.hooks.clone(), cwd.clone(), runtime_env)),
+            hooks: Some(hooks),
             session_manager,
             current_session: None,
             output,
@@ -202,9 +279,12 @@ impl AgentEngine {
             toon_enabled: config.compact.toon,
             plan_state: PlanState::default(),
             plan_active_flag: None,
+            plan_mode_disable_handler: None,
             cache_detector: CacheBreakDetector::new(),
             commands: default_registry(),
-        }
+        };
+        engine.refresh_runtime_configuration();
+        engine
     }
 
     /// Create from a resumed session
@@ -240,8 +320,51 @@ impl AgentEngine {
         cwd: PathBuf,
         runtime_env: Vec<(String, String)>,
     ) -> Self {
+        let mut session = session;
+        // A stored model is valid only for the exact provider identity that selected it.
+        // Missing or changed provider identity falls back to the current configured pair.
+        let same_provider = !session.provider.trim().is_empty() && session.provider == config.provider_label;
+        let resumed_model = if same_provider && !session.model.trim().is_empty() {
+            session.model.clone()
+        } else {
+            config.model.clone()
+        };
+        session.provider.clone_from(&config.provider_label);
+        session.model.clone_from(&resumed_model);
+        let restored_runtime = session.runtime_state.clone();
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer = ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
+        let provider_effect = crate::bootstrap::provider_effect_descriptor_for_config(&config, &cwd);
+        let permission_context = PermissionContext::from_auto_approve(config.tools.auto_approve);
+        let resources = ResourceManager::new(Default::default());
+        let runtime_configuration = runtime_configuration_state(
+            &config.provider_label,
+            &resumed_model,
+            permission_context.mode(),
+            &config.thinking,
+            config.compact.compaction,
+        );
+        let configured_multi_agent_policy = config.multi_agent.policy;
+        let configured_max_active_agents = config.multi_agent.max_active_agents;
+        {
+            let mut state = runtime_configuration.write().unwrap_or_else(|error| error.into_inner());
+            state.configuration.multi_agent_policy = configured_multi_agent_policy;
+            state.configuration.max_active_agents = configured_max_active_agents;
+            state.configuration.effective_max_active_agents =
+                configured_max_active_agents.unwrap_or_else(|| state.configuration.effective_max_active_agents);
+        }
+        let execution_context =
+            standalone_execution_context(&config, &tools, &permission_context, &cwd, session.run_id.as_deref());
+        let hook_config = restored_runtime
+            .as_ref()
+            .map(|state| state.hooks.clone())
+            .unwrap_or_else(|| config.hooks.clone());
+        let mut hooks = HookEngine::new_with_env(hook_config, cwd.clone(), runtime_env);
+        hooks.set_executor(Arc::new(EffectHookExecutor::new(execution_context.clone())));
+        let allow_list = restored_runtime
+            .as_ref()
+            .map(|state| state.allow_list.clone())
+            .unwrap_or_else(|| config.tools.allow_list.clone());
+        let confirmer = ToolConfirmer::new(config.tools.auto_approve, allow_list.clone());
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
@@ -252,17 +375,31 @@ impl AgentEngine {
             None
         };
 
-        let allow_list = config.tools.allow_list.clone();
+        let reasoning_effort = restored_runtime
+            .as_ref()
+            .and_then(|state| state.reasoning_effort.clone());
+        let plan_state = restored_runtime
+            .as_ref()
+            .map(|state| PlanState {
+                is_active: state.plan_active,
+                pre_plan_allow_list: state.pre_plan_allow_list.clone(),
+            })
+            .unwrap_or_default();
         let compact_config = config.compact.clone();
 
-        Self {
+        let engine = Self {
             provider,
-            model: config.model.clone(),
+            provider_label: config.provider_label.clone(),
+            provider_effect,
+            model: resumed_model,
             max_tokens: config.max_tokens,
             thinking: config.thinking,
             compat: config.compat.clone(),
             system_prompt,
-            reasoning_effort: None,
+            reasoning_effort,
+            runtime_configuration,
+            multi_agent_policy: Arc::new(RwLock::new(configured_multi_agent_policy)),
+            resources,
             messages: session.messages.clone(),
             total_usage: session.total_usage.clone(),
             msg_id: String::new(),
@@ -275,8 +412,10 @@ impl AgentEngine {
                 .unwrap_or(DEFAULT_MAX_TOOL_CALL_FAILURE),
             tools,
             confirmer: Arc::new(Mutex::new(confirmer)),
+            permission_context,
+            execution_context: Some(execution_context),
             allow_list,
-            hooks: Some(HookEngine::new_with_env(config.hooks.clone(), cwd, runtime_env)),
+            hooks: Some(hooks),
             session_manager,
             current_session: Some(session),
             output,
@@ -286,11 +425,14 @@ impl AgentEngine {
             compact_state: CompactState::new(),
             compact_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
-            plan_state: PlanState::default(),
+            plan_state,
             plan_active_flag: None,
+            plan_mode_disable_handler: None,
             cache_detector: CacheBreakDetector::new(),
             commands: default_registry(),
-        }
+        };
+        engine.refresh_runtime_configuration();
+        engine
     }
 
     pub fn compaction_level(&self) -> CompactLevel {
@@ -300,6 +442,24 @@ impl AgentEngine {
     /// Get a reference to the shared provider
     pub fn provider(&self) -> &Arc<dyn LlmProvider> {
         &self.provider
+    }
+
+    pub fn provider_label(&self) -> &str {
+        &self.provider_label
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Return a read-only handle shared with first-party host integrations.
+    pub fn runtime_configuration_view(&self) -> RuntimeConfigurationView {
+        self.runtime_configuration
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .shared_plan_active
+            .clone_from(&self.plan_active_flag);
+        RuntimeConfigurationView::new(Arc::clone(&self.runtime_configuration), self.permission_context.clone())
     }
 
     /// Get a reference to the resolved compat settings
@@ -320,6 +480,86 @@ impl AgentEngine {
         self.current_session.as_ref().map(|s| s.id.clone())
     }
 
+    /// Import Host-owned history into a newly created, empty Mesh session.
+    /// Resumed sessions reject imports so reconnects cannot duplicate context.
+    pub fn import_history(&mut self, messages: Vec<Message>) -> Result<usize, String> {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+        if !self.messages.is_empty() {
+            return Err("session already contains history; refusing duplicate import".to_owned());
+        }
+        self.ensure_session_lease().map_err(|error| error.to_string())?;
+        let count = messages.len();
+        let previous_session_messages = self.current_session.as_ref().map(|session| session.messages.clone());
+        self.messages = messages;
+        if let Err(error) = self.save_session() {
+            self.messages.clear();
+            if let (Some(session), Some(previous_messages)) = (&mut self.current_session, previous_session_messages) {
+                session.messages = previous_messages;
+            }
+            return Err(error.to_string());
+        }
+        Ok(count)
+    }
+
+    /// Commit a Host-routed Workflow turn to the same conversation history as ordinary model turns.
+    ///
+    /// Required Workflows run outside `AgentEngine::run`, so the Host must call this once the
+    /// Workflow has a durable terminal output. The metadata keeps the typed Workflow identity
+    /// available without making later providers understand Mesh internals.
+    pub fn commit_workflow_turn(
+        &mut self,
+        user_content: &str,
+        workflow_run_id: &RunId,
+        workflow_id: &str,
+        workflow_version: &str,
+        output: &Value,
+    ) -> Result<bool, String> {
+        if self.messages.iter().any(|message| {
+            message.role == Role::Assistant
+                && message
+                    .provider_metadata
+                    .get("solaris.workflow")
+                    .and_then(|metadata| metadata.get("run_id"))
+                    .and_then(Value::as_str)
+                    == Some(workflow_run_id.as_str())
+        }) {
+            return Ok(false);
+        }
+        self.ensure_session_lease().map_err(|error| error.to_string())?;
+        let previous_len = self.messages.len();
+        self.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: user_content.to_owned(),
+            }],
+        ));
+        let text = output
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string()));
+        let mut assistant = Message::now(Role::Assistant, vec![ContentBlock::Text { text }]);
+        assistant.provider_metadata.insert(
+            "solaris.workflow".to_owned(),
+            json!({
+                "run_id": workflow_run_id,
+                "workflow_id": workflow_id,
+                "workflow_version": workflow_version,
+                "output": output,
+            }),
+        );
+        self.messages.push(assistant);
+        if let Err(error) = self.persist_session_state() {
+            self.messages.truncate(previous_len);
+            if let Some(session) = &mut self.current_session {
+                session.messages.truncate(previous_len);
+            }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     /// Get a reference to the output sink
     pub fn output(&self) -> &dyn OutputSink {
         self.output.as_ref()
@@ -333,9 +573,113 @@ impl AgentEngine {
         self.protocol_writer = Some(writer);
     }
 
+    pub(crate) fn set_execution_context(&mut self, context: EffectExecutionContext) {
+        self.permission_context = context.permissions().clone();
+        if let Some(hooks) = &mut self.hooks {
+            hooks.set_executor(Arc::new(EffectHookExecutor::new(context.clone())));
+        }
+        self.execution_context = Some(context);
+        self.refresh_runtime_configuration();
+    }
+
+    pub fn execution_context(&self) -> Option<&EffectExecutionContext> {
+        self.execution_context.as_ref()
+    }
+
+    pub fn refresh_execution_environment(&self, plugins: Vec<solaris_types::plugin::ImplementationIdentity>) {
+        if let Some(context) = &self.execution_context {
+            let current = context.environment();
+            let refreshed =
+                crate::execution_context::refresh_environment_tools_and_plugins(&current, &self.tools, plugins);
+            context.set_environment(refreshed);
+        }
+    }
+
+    pub(crate) fn set_permission_context(&mut self, context: PermissionContext) {
+        if let Some(execution_context) = &mut self.execution_context {
+            let shared_context = execution_context.permissions().clone();
+            shared_context.replace_with(&context);
+            execution_context.set_permissions(shared_context.clone());
+            if let Some(hooks) = &mut self.hooks {
+                hooks.set_executor(Arc::new(EffectHookExecutor::new(execution_context.clone())));
+            }
+            self.permission_context = shared_context;
+        } else {
+            self.permission_context = context;
+        }
+        self.refresh_runtime_configuration();
+    }
+
+    pub fn permission_context(&self) -> PermissionContext {
+        self.permission_context.clone()
+    }
+
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        if mode == PermissionMode::Plan && self.permission_context.mode() != PermissionMode::Plan {
+            self.disable_mcp_for_plan();
+        }
+        self.permission_context.set_mode(mode);
+        self.refresh_runtime_configuration();
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permission_context.mode()
+    }
+
+    pub fn set_permission_ceiling(&self, ceiling: PermissionCeiling) {
+        self.permission_context.set_ceiling(ceiling);
+    }
+
+    pub fn permission_ceiling(&self) -> PermissionCeiling {
+        self.permission_context.ceiling()
+    }
+
+    pub fn set_interactive_confirmation(&mut self, interactive: bool) {
+        if let Ok(mut confirmer) = self.confirmer.lock() {
+            confirmer.set_interactive(interactive);
+        }
+    }
+
     /// Set the initial reasoning effort override (used by sub-agents spawned with an effort override).
     pub fn set_initial_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
+        self.refresh_runtime_configuration();
+    }
+
+    /// Apply a user-selected intensity and its provider-supported effort.
+    ///
+    /// The selected preset remains visible even when the provider supports no
+    /// effort parameter or requires a fallback to a lower advertised level.
+    pub fn apply_intensity(&mut self, intensity: Intensity) {
+        let preset = crate::run_preset::resolve_run_preset(intensity, self.compat.effort_levels());
+        self.reasoning_effort = preset.reasoning_effort;
+        *self
+            .multi_agent_policy
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = preset.multi_agent_policy;
+        let mut configuration = self
+            .runtime_configuration
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        configuration.configuration.selected_intensity = intensity;
+        configuration.configuration.multi_agent_policy = preset.multi_agent_policy;
+        configuration.configuration.effective_effort = self.reasoning_effort.clone();
+    }
+
+    pub(crate) fn set_multi_agent_policy_state(&mut self, state: Arc<RwLock<MultiAgentPolicy>>) {
+        let policy = self
+            .runtime_configuration
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .configuration
+            .multi_agent_policy;
+        *state.write().unwrap_or_else(|error| error.into_inner()) = policy;
+        self.multi_agent_policy = state;
+    }
+
+    pub(crate) fn set_resource_manager(&mut self, resources: Arc<ResourceManager>) {
+        self.resources = resources;
+        self.refresh_runtime_configuration();
     }
 
     /// Set the shared plan-mode active flag.
@@ -344,631 +688,52 @@ impl AgentEngine {
     /// validate transitions (e.g. reject double-entry).  The engine updates
     /// the flag when processing `PlanModeTransition` context modifiers.
     pub fn set_plan_active_flag(&mut self, flag: Arc<AtomicBool>) {
+        flag.store(self.plan_state.is_active, std::sync::atomic::Ordering::Release);
+        self.runtime_configuration
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .shared_plan_active = Some(Arc::clone(&flag));
         self.plan_active_flag = Some(flag);
     }
-}
 
-impl AgentEngine {
-    /// Run the agent loop with user input
-    pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
-        let session_id = self.current_session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
-        let span = info_span!(
-            target: "solaris_agent",
-            "agent_run",
-            session_id = %session_id,
-            msg_id = %msg_id,
-        );
-        self.run_inner(user_input, msg_id).instrument(span).await
-    }
-
-    async fn run_inner(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
-        // Slash command interception — before any LLM call
-        if let Some(result) = self.handle_command(user_input).await? {
-            return Ok(result);
-        }
-
-        self.msg_id = msg_id.to_string();
-        self.output.emit_stream_start(msg_id);
-        self.messages.push(Message::now(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: user_input.to_string(),
-            }],
-        ));
-
-        let mut guards = TurnGuards::new(
-            self.max_turns_per_run,
-            self.max_tool_call_malformed_turns,
-            self.max_tool_call_failure_turns,
-        );
-        loop {
-            if let Some(limit) = guards.turn_budget_reached() {
-                self.save_session();
-                let message = format!(
-                    "Stopped after reaching the turn budget (max_turns={limit}); the task did not converge. Try adjusting the request or retrying."
-                );
-                warn!(target: "solaris_agent", limit, "stopping agent run at turn budget");
-                self.output.emit_error(&message);
-                return Ok(AgentResult {
-                    text: String::new(),
-                    stop_reason: StopReason::MaxTurns,
-                    usage: self.total_usage.clone(),
-                    turns: guards.counted_turns(),
-                });
-            }
-
-            let outcome = self.run_turn(TurnKind::Normal).await?;
-            guards.record_counted_turn();
-
-            let (assistant_text, tool_calls) = match TurnOutcome::from_stream(outcome) {
-                TurnOutcome::ToolRound(outcome) => {
-                    let assistant_content = build_assistant_content(&outcome);
-                    self.messages.push(Message::now(Role::Assistant, assistant_content));
-                    (outcome.assistant_text, outcome.tool_calls)
-                }
-                TurnOutcome::Final(outcome) => {
-                    let assistant_content = build_assistant_content(&outcome);
-                    self.messages.push(Message::now(Role::Assistant, assistant_content));
-                    self.save_session();
-                    return Ok(AgentResult {
-                        text: outcome.assistant_text,
-                        stop_reason: outcome.stop_reason,
-                        usage: self.total_usage.clone(),
-                        turns: guards.counted_turns(),
-                    });
-                }
-                TurnOutcome::Truncated(outcome) => {
-                    let assistant_content = build_assistant_content(&outcome);
-                    self.messages.push(Message::now(Role::Assistant, assistant_content));
-                    return self
-                        .finalize_once(
-                            FinalizationReason::MaxTokens,
-                            outcome.assistant_text,
-                            guards.counted_turns(),
-                            StopReason::MaxTokens,
-                        )
-                        .await;
-                }
-                TurnOutcome::EmptyFinal(outcome) => {
-                    return self
-                        .finalize_once(
-                            FinalizationReason::EmptyFinal,
-                            outcome.assistant_text,
-                            guards.counted_turns(),
-                            StopReason::EndTurn,
-                        )
-                        .await;
-                }
-            };
-
-            // need to execute tool calls before the next turn
-            let ToolRoundOutput {
-                tool_results,
-                tool_modifiers,
-                tool_call_malformed_fingerprint,
-                tool_call_failure_fingerprint,
-            } = self.execute_tool_round(&tool_calls, &assistant_text).await?;
-
-            // Apply any context modifiers from skill executions before the next turn.
-            self.apply_context_modifiers(&tool_modifiers);
-
-            self.emit_tool_results(&tool_calls, &tool_results);
-
-            self.messages.push(Message::now(Role::User, tool_results));
-
-            // Save session after each tool round.
-            self.save_session();
-
-            match guards.after_tool_round(tool_call_malformed_fingerprint, tool_call_failure_fingerprint) {
-                TurnGuardAction::Continue => {}
-                TurnGuardAction::Finalize => {
-                    return self
-                        .finalize_once(
-                            FinalizationReason::TurnBudget,
-                            String::new(),
-                            guards.counted_turns(),
-                            StopReason::MaxTurns,
-                        )
-                        .await;
-                }
-                TurnGuardAction::Stop(err) => return Err(err),
-            }
-        }
-    }
-
-    /// Build the next provider request, applying plan-mode tool/system filtering
-    /// and recording the prompt state for cache diagnostics.
-    fn build_request(&mut self, kind: TurnKind) -> LlmRequest {
-        // Build tool list: filter based on plan mode state
-        let tools = if kind.disable_tools() {
-            Vec::new()
-        } else if self.plan_state.is_active {
-            // Plan mode: only Info-category tools (excluding EnterPlanMode)
-            self.tools
-                .to_tool_defs_filtered(|t| t.category() == ToolCategory::Info && t.name() != "EnterPlanMode")
-        } else {
-            // Normal mode: all tools except ExitPlanMode
-            self.tools.to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
-        };
-
-        // Build system prompt: append plan mode instructions when active
-        let system = if self.plan_state.is_active {
-            format!("{}\n\n{}", self.system_prompt, plan_mode_instructions())
-        } else {
-            self.system_prompt.clone()
-        };
-
-        // Record prompt state for cache diagnostics
-        self.cache_detector.record_request(&system, &tools);
-
-        let mut messages = self.messages.clone();
-        if let Some(prompt) = kind.control_prompt() {
-            messages.push(Message::now(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: prompt.to_string(),
-                }],
-            ));
-        }
-
-        LlmRequest {
-            model: self.model.clone(),
-            system,
-            messages,
-            tools,
-            max_tokens: self.max_tokens,
-            thinking: self.thinking.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
-        }
-    }
-
-    /// Classify, execute and re-merge one model turn's tool calls.
-    ///
-    /// Malformed calls get synthetic error results; the rest are executed via
-    /// the approval (JSON stream) or interactive (terminal) path. Results and
-    /// skill modifiers are interleaved back into the original call order.
-    /// `assistant_text` is the visible text from the same turn, used only to
-    /// classify an all-error round for the consecutive-failure breaker.
-    ///
-    /// A `Quit` from tool execution is surfaced as `AgentError::UserAborted`
-    /// after saving the session.
-    async fn execute_tool_round(
-        &mut self,
-        tool_calls: &[ContentBlock],
-        assistant_text: &str,
-    ) -> Result<ToolRoundOutput, AgentError> {
-        let tool_call_malformed_reasons: Vec<_> = tool_calls
-            .iter()
-            .map(|call| {
-                let ContentBlock::ToolUse { id, name, .. } = call else {
-                    return None;
-                };
-                tool_call_malformed_reason(id, name)
-            })
-            .collect();
-        let tool_call_malformed_fingerprint = tool_call_malformed_fingerprint(tool_calls, &tool_call_malformed_reasons);
-        let executable_tool_calls: Vec<_> = tool_calls
-            .iter()
-            .zip(&tool_call_malformed_reasons)
-            .filter(|(_, reason)| reason.is_none())
-            .map(|(call, _)| call.clone())
-            .collect();
-
-        let (executable_results, executable_modifiers) = if executable_tool_calls.is_empty() {
-            (Vec::new(), Vec::new())
-        } else if let Some(ref approval_mgr) = self.approval_manager {
-            // JSON stream mode: use protocol-based approval
-            let writer = self
-                .protocol_writer
-                .as_ref()
-                .expect("protocol writer required for approval");
-            let auto_approve = self.confirmer.lock().unwrap().is_auto_approve();
-            match execute_tool_calls_with_approval(
-                &self.tools,
-                &executable_tool_calls,
-                approval_mgr,
-                writer,
-                &self.msg_id,
-                auto_approve,
-                &self.allow_list,
-                self.hooks.as_mut(),
-                self.compact_level,
-                self.toon_enabled,
-            )
-            .await
-            {
-                Ok(o) => (o.results, o.modifiers),
-                Err(ExecutionControl::Quit) => {
-                    self.save_session();
-                    return Err(AgentError::UserAborted);
-                }
-            }
-        } else {
-            // Terminal mode: use interactive confirmation
-            match execute_tool_calls(
-                &self.tools,
-                &executable_tool_calls,
-                &self.confirmer,
-                self.hooks.as_mut(),
-                self.compact_level,
-                self.toon_enabled,
-            )
-            .await
-            {
-                Ok(o) => (o.results, o.modifiers),
-                Err(ExecutionControl::Quit) => {
-                    self.save_session();
-                    return Err(AgentError::UserAborted);
-                }
-            }
-        };
-
-        let (tool_results, tool_modifiers) = merge_tool_results(
-            tool_calls,
-            &tool_call_malformed_reasons,
-            executable_results,
-            executable_modifiers,
-        );
-
-        let tool_call_failure_fingerprint = (tool_call_malformed_fingerprint.is_none()
-            && assistant_text.trim().is_empty()
-            && !tool_results.is_empty()
-            && tool_results
-                .iter()
-                .all(|result| matches!(result, ContentBlock::ToolResult { is_error: true, .. })))
-        .then(|| tool_call_failure_fingerprint(tool_calls))
-        .flatten();
-
-        Ok(ToolRoundOutput {
-            tool_results,
-            tool_modifiers,
-            tool_call_malformed_fingerprint,
-            tool_call_failure_fingerprint,
-        })
-    }
-
-    /// Emit each tool result to the output sink, resolving the tool name from
-    /// the originating `tool_calls` for display and logging.
-    fn emit_tool_results(&self, tool_calls: &[ContentBlock], tool_results: &[ContentBlock]) {
-        for result in tool_results {
-            if let ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } = result
-            {
-                let tool_name = tool_calls
-                    .iter()
-                    .find_map(|c| {
-                        if let ContentBlock::ToolUse { id, name, .. } = c
-                            && id == tool_use_id
-                        {
-                            return Some(name.as_str());
-                        }
-                        None
-                    })
-                    .unwrap_or("unknown");
-                let status = if *is_error { "error" } else { "completed" };
-                if tool_use_id.trim().is_empty() {
-                    error!(
-                        target: "solaris_agent",
-                        tool = %tool_name,
-                        status,
-                        "tool result has empty tool_use_id"
-                    );
-                } else {
-                    debug!(
-                        target: "solaris_agent",
-                        tool_use_id = %tool_use_id,
-                        tool = %tool_name,
-                        status,
-                        "tool result emitted"
-                    );
-                }
-                self.output.emit_tool_result(tool_use_id, tool_name, *is_error, content);
-            }
-        }
-    }
-
-    async fn run_turn(&mut self, kind: TurnKind) -> Result<StreamOutcome, AgentError> {
-        // Run multi-level compaction before each API call.
-        // On the first model turn last_input_tokens is 0 so neither
-        // autocompact nor emergency will fire.
-        self.run_compaction().await?;
-        let request = self.build_request(kind);
-        let mut rx = self.provider.stream(&request).await?;
-        let outcome = self.consume_stream(&mut rx).await?;
-        self.record_turn_usage(&outcome.usage);
-        Ok(outcome)
-    }
-
-    async fn finalize_once(
-        &mut self,
-        reason: FinalizationReason,
-        prefix_text: String,
-        counted_turns: usize,
-        fallback_stop_reason: StopReason,
-    ) -> Result<AgentResult, AgentError> {
-        let outcome = self.run_turn(TurnKind::Finalization(reason)).await?;
-        let combined_text = format!("{}{}", prefix_text, outcome.assistant_text);
-        let is_success = outcome.tool_calls.is_empty()
-            && outcome.stop_reason == StopReason::EndTurn
-            && !outcome.assistant_text.trim().is_empty();
-
-        if is_success {
-            let assistant_content = build_assistant_content(&outcome);
-            self.messages.push(Message::now(Role::Assistant, assistant_content));
-            self.save_session();
-            return Ok(AgentResult {
-                text: combined_text,
-                stop_reason: StopReason::EndTurn,
-                usage: self.total_usage.clone(),
-                turns: counted_turns,
-            });
-        }
-
-        let fallback = reason.fallback_prompt();
-        self.output.emit_error(fallback);
-        let fallback_text = if combined_text.trim().is_empty() {
-            fallback.to_string()
-        } else {
-            combined_text
-        };
-
-        self.messages.push(Message::now(
-            Role::Assistant,
-            vec![ContentBlock::Text {
-                text: fallback_text.clone(),
-            }],
-        ));
-        self.save_session();
-        Ok(AgentResult {
-            text: fallback_text,
-            stop_reason: fallback_stop_reason,
-            usage: self.total_usage.clone(),
-            turns: counted_turns,
-        })
-    }
-
-    /// Drain one provider stream into a [`StreamOutcome`].
-    ///
-    /// Emits text/thinking/tool-call events to the output sink as they arrive
-    /// and accumulates the assistant text, thinking block, tool calls, stop
-    /// reason and usage for the caller. Returns early on `LlmEvent::Error`.
-    async fn consume_stream(&self, rx: &mut Receiver<LlmEvent>) -> Result<StreamOutcome, AgentError> {
-        let mut assistant_text = String::new();
-        let mut thinking_text = String::new();
-        let mut thinking_signature: Option<String> = None;
-        let mut tool_calls: Vec<ContentBlock> = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = TokenUsage::default();
-
-        while let Some(event) = rx.recv().await {
-            match event {
-                LlmEvent::TextDelta(text) => {
-                    self.output.emit_text_delta(&text, &self.msg_id);
-                    assistant_text.push_str(&text);
-                }
-                LlmEvent::ToolUse { id, name, input, extra } => {
-                    if id.trim().is_empty() {
-                        error!(
-                            target: "solaris_agent",
-                            tool = %name,
-                            "provider emitted tool call with empty tool_use_id"
-                        );
-                    } else {
-                        debug!(
-                            target: "solaris_agent",
-                            tool_use_id = %id,
-                            tool = %name,
-                            "provider tool call received"
-                        );
-                    }
-                    let input_str = to_string(&input).unwrap_or_default();
-                    self.output.emit_tool_call(&id, &name, &input_str);
-                    tool_calls.push(ContentBlock::ToolUse { id, name, input, extra });
-                }
-                LlmEvent::ThinkingDelta(text) => {
-                    self.output.emit_thinking(&text, &self.msg_id);
-                    thinking_text.push_str(&text);
-                }
-                LlmEvent::ThinkingSignature(signature) => {
-                    thinking_signature = Some(signature);
-                }
-                LlmEvent::Done {
-                    stop_reason: sr,
-                    usage: u,
-                } => {
-                    stop_reason = sr;
-                    usage = u;
-                }
-                LlmEvent::Error(e) => {
-                    return Err(AgentError::ApiError(e));
-                }
-            }
-        }
-
-        Ok(StreamOutcome {
-            assistant_text,
-            thinking_text,
-            thinking_signature,
-            tool_calls,
-            stop_reason,
-            usage,
-        })
-    }
-
-    /// Fold one turn's token usage into the running totals and update the
-    /// compaction watermark and cache-break diagnostics.
-    fn record_turn_usage(&mut self, turn_usage: &TokenUsage) {
-        self.total_usage.input_tokens += turn_usage.input_tokens;
-        self.total_usage.output_tokens += turn_usage.output_tokens;
-        self.total_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
-        self.total_usage.cache_read_tokens += turn_usage.cache_read_tokens;
-
-        // Track per-turn input tokens for compaction watermark.
-        // Use max(provider_reported, local_estimate) as a safety net:
-        // some providers (e.g. DeepSeek with prefix caching) underreport
-        // prompt_tokens, causing compaction to never trigger.
-        let local_estimate = estimate_tokens_from_messages(&self.messages);
-        let effective_watermark = turn_usage.input_tokens.max(local_estimate);
-
-        if local_estimate > turn_usage.input_tokens && local_estimate.saturating_sub(turn_usage.input_tokens) > 10_000 {
-            self.output.emit_info(&format!(
-                "Token watermark override: provider={}, local_estimate={}, using={}",
-                turn_usage.input_tokens, local_estimate, effective_watermark
-            ));
-        }
-
-        self.compact_state.last_input_tokens = effective_watermark;
-
-        // Cache break detection
-        let cache_stats = CacheStats {
-            input_tokens: turn_usage.input_tokens,
-            cache_read_tokens: turn_usage.cache_read_tokens,
-            cache_creation_tokens: turn_usage.cache_creation_tokens,
-        };
-        if let Some(diagnostic) = self.cache_detector.check_response(cache_stats) {
-            match &diagnostic {
-                CacheDiagnostic::FullMiss { cause } => {
-                    self.output.emit_info(&format!("Cache full miss: {cause:?}"));
-                }
-                CacheDiagnostic::PartialMiss { hit_rate, cause } => {
-                    if self.compact_config.cache_diagnostics {
-                        self.output
-                            .emit_info(&format!("Cache: {:.0}% hit rate (cause: {cause:?})", hit_rate * 100.0));
-                    }
-                }
-                CacheDiagnostic::Healthy { hit_rate } => {
-                    if self.compact_config.cache_diagnostics {
-                        self.output
-                            .emit_info(&format!("Cache: {:.0}% hit rate", hit_rate * 100.0));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Run the multi-level compaction pipeline before each API call.
-    ///
-    /// Execution order: microcompact → autocompact → emergency check.
-    /// After a successful autocompact the emergency check is skipped
-    /// because the context has been significantly reduced.
-    async fn run_compaction(&mut self) -> Result<(), AgentError> {
-        // 1. Microcompact (lightweight, no LLM call)
-        if should_microcompact(&self.messages, &self.compact_config) {
-            let result = microcompact(&mut self.messages, &self.compact_config);
-            if result.cleared_count > 0 {
-                self.output.emit_info(&format!(
-                    "Microcompact: cleared {} tool results (~{} tokens freed)",
-                    result.cleared_count, result.estimated_tokens_freed
-                ));
-            }
-        }
-
-        // 2. Autocompact (LLM summarization)
-        let mut compacted = false;
-        let should_compact = should_autocompact(self.compact_state.last_input_tokens, &self.compact_config);
-        if should_compact {
-            info!(target: "solaris_agent", last_input_tokens = self.compact_state.last_input_tokens, "context compaction triggered");
-            let threshold = if let Some(pct) = self.compact_config.autocompact_threshold_pct {
-                let t = self.compact_config.context_window * pct as usize / 100;
-                self.output.emit_info(&format!(
-                    "Autocompact threshold: {} tokens ({}% of {})",
-                    t, pct, self.compact_config.context_window
-                ));
-                t
-            } else {
-                self.compact_config
-                    .context_window
-                    .saturating_sub(self.compact_config.output_reserve)
-                    .saturating_sub(self.compact_config.autocompact_buffer)
-            };
-            let _ = threshold;
-        }
-        if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
-            let provider = Arc::clone(&self.provider);
-            match autocompact(
-                provider.as_ref(),
-                &self.messages,
-                &self.model,
-                &self.compact_config,
-                &mut self.compact_state,
-            )
-            .await
-            {
-                Ok(result) => {
-                    self.output.emit_info(&format!(
-                        "Autocompact: summarized {} messages ({} tokens → compact)",
-                        result.messages_summarized, result.pre_compact_tokens
-                    ));
-                    self.messages = result.messages;
-                    compacted = true;
-                }
-                Err(CompactError::CircuitBroken { .. }) => {
-                    // Already tripped; logged at circuit-breaker level
-                }
-                Err(e) => {
-                    self.output.emit_error(&format!("Autocompact failed: {}", e));
-                }
-            }
-        } else if should_compact {
-            self.output.emit_info(&format!(
-                "Autocompact: skipped (circuit breaker tripped after {} consecutive failures, \
-                 last_input_tokens={})",
-                self.compact_state.consecutive_failures, self.compact_state.last_input_tokens
-            ));
-        } else if !self.compact_config.enabled {
-            let threshold = if let Some(pct) = self.compact_config.autocompact_threshold_pct {
-                self.compact_config.context_window * pct as usize / 100
-            } else {
-                self.compact_config
-                    .context_window
-                    .saturating_sub(self.compact_config.output_reserve)
-                    .saturating_sub(self.compact_config.autocompact_buffer)
-            };
-            if self.compact_state.last_input_tokens as usize >= threshold {
-                self.output.emit_info(&format!(
-                    "Autocompact: disabled (compact.enabled=false, \
-                     last_input_tokens={}, threshold={})",
-                    self.compact_state.last_input_tokens, threshold
-                ));
-            }
-        }
-
-        // 3. Emergency check (skip if autocompact just succeeded)
-        if !compacted && is_at_emergency_limit(self.compact_state.last_input_tokens, &self.compact_config) {
-            return Err(AgentError::ContextTooLong {
-                input_tokens: self.compact_state.last_input_tokens,
-                limit: self
-                    .compact_config
-                    .context_window
-                    .saturating_sub(self.compact_config.emergency_buffer),
-            });
-        }
-
-        Ok(())
+    fn refresh_runtime_configuration(&self) {
+        let mut state = self
+            .runtime_configuration
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let configuration = &mut state.configuration;
+        configuration.provider.clone_from(&self.provider_label);
+        configuration.model.clone_from(&self.model);
+        configuration.permission = self.permission_context.mode();
+        configuration.multi_agent_policy = *self
+            .multi_agent_policy
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        configuration.max_active_agents = self.resources.budget().max_active_agents;
+        configuration.effective_max_active_agents = self.resources.effective_agent_limit();
+        configuration.effective_effort.clone_from(&self.reasoning_effort);
+        configuration.thinking.clone_from(&self.thinking);
+        configuration.thinking_budget = thinking_budget(&self.thinking);
+        configuration.compaction = self.compact_level;
+        state.plan_active = self.plan_state.is_active;
+        state.shared_plan_active.clone_from(&self.plan_active_flag);
     }
 }
 
+mod abort;
+mod config_update;
+mod context_modifiers;
+mod plan_lifecycle;
+mod run;
+mod run_resume;
+mod runtime_configuration;
+mod session_state;
+mod task_phase;
 impl AgentEngine {
-    /// Initialize a new session for this engine run
-    pub fn init_session(&mut self, provider_name: &str, cwd: &str, session_id: Option<&str>) -> AnyhowResult<()> {
-        if let Some(mgr) = &self.session_manager {
-            let session = mgr.create(provider_name, &self.model, cwd, session_id)?;
-            info!(target: "solaris_agent", session_id = %session.id, provider = %provider_name, model = %self.model, "session started");
-            self.current_session = Some(session);
-        }
-        Ok(())
-    }
-
-    /// Default thinking budget when "enabled" is requested without a specific budget.
-    const DEFAULT_THINKING_BUDGET: u32 = 10_000;
-
     /// Apply a runtime config update received from the protocol layer.
     ///
-    /// Returns a list of human-readable change descriptions for the Info event.
-    /// Empty list means no fields were changed.
+    /// Validation is atomic: if one supplied field is rejected or unsupported,
+    /// none of the supplied fields are written.
     pub fn apply_config_update(
         &mut self,
         model: Option<String>,
@@ -976,89 +741,59 @@ impl AgentEngine {
         thinking_budget: Option<u32>,
         effort: Option<String>,
         compaction: Option<String>,
-    ) -> Vec<String> {
-        let mut changes = Vec::new();
-
-        if let Some(new_model) = model {
-            let old = replace(&mut self.model, new_model.clone());
-            changes.push(format!("model: {old} → {new_model}"));
-        }
-
-        if let Some(thinking_str) = thinking {
-            match thinking_str.as_str() {
-                "enabled" => {
-                    let budget = thinking_budget.unwrap_or(Self::DEFAULT_THINKING_BUDGET);
-                    self.thinking = Some(ThinkingConfig::Enabled { budget_tokens: budget });
-                    changes.push(format!("thinking: enabled (budget: {budget})"));
-                }
-                "disabled" => {
-                    self.thinking = Some(ThinkingConfig::Disabled);
-                    changes.push("thinking: disabled".to_string());
-                }
-                other => {
-                    changes.push(format!("thinking: ignored invalid value \"{other}\""));
-                }
-            }
-        } else if let Some(new_budget) = thinking_budget
-            && let Some(ThinkingConfig::Enabled { budget_tokens }) = &mut self.thinking
-        {
-            *budget_tokens = new_budget;
-            changes.push(format!("thinking budget: {new_budget}"));
-        }
-
-        if let Some(new_effort) = effort {
-            if new_effort.is_empty() {
-                self.reasoning_effort = None;
-                changes.push("effort: cleared".to_string());
-            } else if !self.compat.supports_effort() {
-                changes.push("effort: not supported by current provider".to_string());
-            } else {
-                let levels = self.compat.effort_levels();
-                if !levels.is_empty() && !levels.iter().any(|l| l == &new_effort) {
-                    changes.push(format!(
-                        "effort: invalid level \"{}\" (valid: {})",
-                        new_effort,
-                        levels.join(", ")
-                    ));
-                } else {
-                    let old = self
-                        .reasoning_effort
-                        .replace(new_effort.clone())
-                        .unwrap_or_else(|| "none".to_string());
-                    changes.push(format!("effort: {old} → {new_effort}"));
-                }
-            }
-        }
-
-        if let Some(ref level_str) = compaction {
-            match level_str.parse::<CompactLevel>() {
-                Ok(new_level) => {
-                    let old = self.compact_level.to_string();
-                    self.compact_level = new_level;
-                    changes.push(format!("compaction: {old} → {new_level}"));
-                }
-                Err(e) => {
-                    changes.push(format!("compaction: invalid ({e})"));
-                }
-            }
-        }
-
-        changes
+    ) -> ConfigUpdateOutcome {
+        self.apply_runtime_config_update(RuntimeConfigUpdate {
+            model,
+            thinking,
+            thinking_budget,
+            effort,
+            compaction,
+            ..Default::default()
+        })
     }
 
-    /// Handle a slash command. Returns `None` if input is not a recognized command.
+    pub fn apply_config_update_with_multi_agent(
+        &mut self,
+        model: Option<String>,
+        thinking: Option<String>,
+        thinking_budget: Option<u32>,
+        effort: Option<String>,
+        compaction: Option<String>,
+        multi_agent_policy: Option<MultiAgentPolicy>,
+    ) -> ConfigUpdateOutcome {
+        self.apply_runtime_config_update(RuntimeConfigUpdate {
+            model,
+            thinking,
+            thinking_budget,
+            effort,
+            compaction,
+            multi_agent_policy,
+            max_active_agents: None,
+        })
+    }
+
+    pub fn apply_runtime_config_update(&mut self, update: RuntimeConfigUpdate) -> ConfigUpdateOutcome {
+        config_update::apply(self, update)
+    }
+
+    /// Handle a slash command. Plain text returns `None`; an unknown slash name
+    /// returns an explicit error and is never forwarded to the provider.
     async fn handle_command(&mut self, input: &str) -> Result<Option<AgentResult>, AgentError> {
         let Some(command) = parse_command_input(input) else {
             return Ok(None);
         };
         let Some(result) = self.execute_command(command).await else {
-            return Ok(None);
+            return Err(AgentError::ApiError(format!(
+                "unknown slash command: {}",
+                command.display_name
+            )));
         };
 
         match result {
             Ok(CommandResult::Continue) => {
                 info!(command = command.display_name, "Slash command executed");
                 Ok(Some(AgentResult {
+                    status: AgentOutcomeStatus::Completed,
                     text: String::new(),
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
@@ -1068,6 +803,21 @@ impl AgentEngine {
             Ok(CommandResult::Exit) => {
                 info!(command = command.display_name, "Slash command executed: exit");
                 Err(AgentError::UserAborted)
+            }
+            Ok(CommandResult::SetModel(model)) => {
+                let outcome = self.apply_config_update(Some(model), None, None, None, None);
+                if !outcome.applied {
+                    return Err(AgentError::ApiError(outcome.message));
+                }
+                self.output.emit_info(&outcome.message);
+                self.persist_session_state().map_err(AgentError::ApiError)?;
+                Ok(Some(AgentResult {
+                    status: AgentOutcomeStatus::Completed,
+                    text: String::new(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                    turns: 0,
+                }))
             }
             Err(e) => {
                 error!(command = command.display_name, error = %e, "Slash command failed");
@@ -1101,6 +851,14 @@ impl AgentEngine {
         Some(result)
     }
 
+    /// Return whether the input names a slash command registered by this engine.
+    ///
+    /// Hosts use this before routing a request into a required Workflow so that
+    /// built-in commands keep their engine-defined behavior in every preset.
+    pub fn recognizes_slash_command(&self, input: &str) -> bool {
+        parse_command_input(input).is_some_and(|command| self.commands.find(command.name).is_some())
+    }
+
     /// Return metadata for all registered slash commands.
     pub fn slash_command_list(&self) -> Vec<(String, String)> {
         self.commands
@@ -1110,114 +868,21 @@ impl AgentEngine {
             .collect()
     }
 
-    /// Apply context modifiers collected from skill tool executions.
-    fn apply_context_modifiers(&mut self, modifiers: &[Option<ContextModifier>]) {
-        for modifier in modifiers.iter().flatten() {
-            if let Some(ref model) = modifier.model {
-                self.model = model.clone();
-            }
-            if let Some(effort) = modifier.effort {
-                self.reasoning_effort = Some(effort_to_string(effort));
-            }
-            for tool_name in &modifier.allowed_tools {
-                if !self.allow_list.contains(tool_name) {
-                    self.allow_list.push(tool_name.clone());
-                }
-                self.confirmer.lock().unwrap().add_to_allow_list(tool_name);
-            }
-
-            // Handle plan mode transitions
-            if let Some(ref transition) = modifier.plan_mode_transition {
-                match transition {
-                    PlanModeTransition::Enter => {
-                        self.plan_state.pre_plan_allow_list = self.allow_list.clone();
-                        self.plan_state.is_active = true;
-                        if let Some(ref flag) = self.plan_active_flag {
-                            flag.store(true, Ordering::Release);
-                        }
-                    }
-                    PlanModeTransition::Exit { .. } => {
-                        self.plan_state.is_active = false;
-                        self.allow_list = self.plan_state.pre_plan_allow_list.clone();
-                        if let Some(ref flag) = self.plan_active_flag {
-                            flag.store(false, Ordering::Release);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn save_session(&mut self) {
-        if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
-            session.messages = self.messages.clone();
-            session.total_usage = self.total_usage.clone();
-            session.updated_at = Utc::now();
-            if let Err(e) = mgr.save(session) {
-                self.output.emit_error(&format!("Failed to save session: {}", e));
-            }
-        }
-    }
-
-    /// Close a partially recorded turn after the host cancels execution.
-    ///
-    /// Providers in the Anthropic family require every assistant `tool_use` to
-    /// be followed immediately by user `tool_result` blocks. If the host drops
-    /// `run()` while tools are executing, the assistant `tool_use` message may
-    /// already be in memory without its matching results. Add synthetic error
-    /// results so the next request can safely reuse this history.
-    pub fn abort_current_turn(&mut self, reason: &str) {
-        let Some(last_message) = self.messages.last() else {
-            return;
-        };
-        if last_message.role != Role::Assistant {
-            return;
-        }
-
-        let pending_results: Vec<_> = last_message
-            .content
-            .iter()
-            .filter_map(|block| {
-                let ContentBlock::ToolUse { id, name, .. } = block else {
-                    return None;
-                };
-                Some((id.clone(), name.clone()))
-            })
-            .collect();
-
-        if pending_results.is_empty() {
-            return;
-        }
-
-        let result_blocks = pending_results
-            .into_iter()
-            .map(|(tool_use_id, name)| {
-                info!(
-                    target: "solaris_agent",
-                    tool_use_id = %tool_use_id,
-                    tool = %name,
-                    "closing pending tool_use after abort"
-                );
-                self.output.emit_tool_result(&tool_use_id, &name, true, reason);
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    content: reason.to_string(),
-                    is_error: true,
-                }
-            })
-            .collect();
-
-        self.messages.push(Message::now(Role::User, result_blocks));
-        self.save_session();
-    }
-
     /// Run stop hooks when the agent session ends
     pub async fn run_stop_hooks(&self) {
+        if let Err(error) = self.ensure_session_lease() {
+            error!(target: "solaris_agent", error = %error, "skipping stop hooks after session lease loss");
+            let _ = self.release_session_lease();
+            return;
+        }
         if let Some(hook_engine) = &self.hooks {
             let messages = hook_engine.run_stop().await;
             for msg in messages {
-                info!(target: "solaris_agent", hook_message = %msg, "stop hook output");
+                log_stop_hook_output(&msg);
             }
+        }
+        if let Err(error) = self.release_session_lease() {
+            error!(target: "solaris_agent", error = %error, "failed to release session lease after stop hooks");
         }
     }
 }
@@ -1228,6 +893,7 @@ impl AgentEngine {
 struct ToolRoundOutput {
     tool_results: Vec<ContentBlock>,
     tool_modifiers: Vec<Option<ContextModifier>>,
+    task_call_id: String,
     /// `Some` only when every tool call in the round was malformed; feeds the
     /// tool-call-malformed breaker.
     tool_call_malformed_fingerprint: Option<ToolCallMalformedFingerprint>,
@@ -1239,12 +905,12 @@ struct ToolRoundOutput {
 
 /// Assemble the assistant message content blocks (thinking, text, tool calls)
 /// from a completed [`StreamOutcome`], preserving the canonical block order.
-fn build_assistant_content(outcome: &StreamOutcome) -> Vec<ContentBlock> {
+fn build_assistant_message(outcome: &StreamOutcome) -> Message {
     let mut content: Vec<ContentBlock> = Vec::new();
     if !outcome.thinking_text.is_empty() || outcome.thinking_signature.is_some() {
         content.push(ContentBlock::Thinking {
             thinking: outcome.thinking_text.clone(),
-            signature: outcome.thinking_signature.clone(),
+            signature: None,
         });
     }
     if !outcome.assistant_text.is_empty() {
@@ -1253,7 +919,34 @@ fn build_assistant_content(outcome: &StreamOutcome) -> Vec<ContentBlock> {
         });
     }
     content.extend(outcome.tool_calls.iter().cloned());
-    content
+    Message::now(Role::Assistant, content).with_provider_metadata(outcome.provider_metadata.clone())
+}
+
+fn merge_provider_metadata(metadata: &mut ProviderNativeMetadata, namespace: String, value: Value) {
+    match metadata.entry(namespace) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(value);
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            merge_metadata_value(entry.get_mut(), value);
+        }
+    }
+}
+
+fn merge_metadata_value(current: &mut Value, incoming: Value) {
+    match (current, incoming) {
+        (Value::Object(current), Value::Object(incoming)) => {
+            for (key, value) in incoming {
+                if let Some(existing) = current.get_mut(&key) {
+                    merge_metadata_value(existing, value);
+                } else {
+                    current.insert(key, value);
+                }
+            }
+        }
+        (Value::Array(current), Value::Array(mut incoming)) => current.append(&mut incoming),
+        (current, incoming) => *current = incoming,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1282,3 +975,19 @@ fn parse_command_input(input: &str) -> Option<ParsedSlashCommand<'_>> {
 #[cfg(test)]
 #[path = "engine_test.rs"]
 mod engine_test;
+
+#[cfg(test)]
+#[path = "engine_session_resume_test.rs"]
+mod engine_session_resume_test;
+
+#[cfg(test)]
+#[path = "engine_session_lease_test.rs"]
+mod engine_session_lease_test;
+
+#[cfg(test)]
+#[path = "engine_task_phase_test.rs"]
+mod engine_task_phase_test;
+
+#[cfg(test)]
+#[path = "engine_user_checkpoint_test.rs"]
+mod engine_user_checkpoint_test;

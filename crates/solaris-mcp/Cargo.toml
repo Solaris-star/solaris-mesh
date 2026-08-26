@@ -1,6 +1,6 @@
 [package]
 name = "solaris-mcp"
-description = "MCP (Model Context Protocol) client implementation for Solaris CLI"
+description = "MCP client and capability integration for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ solaris-types.workspace    = true
 solaris-protocol.workspace = true
 solaris-tools.workspace    = true
 solaris-config.workspace   = true
+solaris-process.workspace  = true
 
 tracing.workspace     = true
 tokio.workspace       = true
@@ -21,7 +22,16 @@ thiserror.workspace   = true
 anyhow.workspace      = true
 reqwest.workspace     = true
 futures.workspace     = true
+which.workspace       = true
+sha2.workspace        = true
+hmac.workspace        = true
+uuid.workspace        = true
+url.workspace         = true
 workspace-hack.workspace = true
 
 [features]
 test-utils = []
+
+[dev-dependencies]
+wiremock.workspace = true
+tempfile.workspace = true

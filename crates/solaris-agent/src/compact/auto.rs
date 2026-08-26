@@ -5,11 +5,18 @@
 //! then replaces the full history with a compact boundary marker and the
 //! summary.  A circuit breaker prevents runaway retries.
 
+use std::sync::Arc;
+
 use solaris_config::compact::CompactConfig;
 use solaris_providers::{LlmProvider, ProviderError};
 use solaris_types::compact::{CompactMetadata, CompactTrigger};
+use solaris_types::effect::EffectDescriptor;
+use solaris_types::identity::{AgentId, RunId};
 use solaris_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
 use solaris_types::message::{ContentBlock, Message, Role, TokenUsage};
+use solaris_types::permission::PermissionDecision;
+use solaris_types::permission::{PermissionCeiling, PermissionMode, PermissionRule};
+use solaris_types::runtime::OperationEnvironmentSnapshot;
 use tokio::sync::mpsc;
 
 use super::prompt::{
@@ -17,6 +24,12 @@ use super::prompt::{
     format_compact_summary,
 };
 use super::state::CompactState;
+use crate::compact::estimate::estimate_tokens_from_messages;
+use crate::execution_context::{
+    EffectExecutionContext, EffectOutcomeGuard, EffectRecoveryDecision, stable_digest_value,
+};
+use crate::permission_engine::PermissionContext;
+use crate::runtime_ledger::InMemoryRuntimeLedger;
 
 /// Maximum number of prompt-too-long retries.
 const MAX_PTL_RETRIES: u32 = 2;
@@ -51,6 +64,10 @@ pub enum CompactError {
     StreamError(String),
     #[error("Circuit breaker tripped after {failures} consecutive failures")]
     CircuitBroken { failures: u32 },
+    #[error("Provider effect rejected: {0}")]
+    Effect(String),
+    #[error("Provider effect requires reconciliation: {0}")]
+    ReconciliationRequired(String),
 }
 
 // ── Trigger check ───────────────────────────────────────────────────────────
@@ -91,6 +108,20 @@ pub async fn autocompact(
     config: &CompactConfig,
     state: &mut CompactState,
 ) -> Result<CompactResult, CompactError> {
+    let provider_effect = crate::bootstrap::provider_effect_descriptor("");
+    let context = standalone_compaction_context(&provider_effect);
+    autocompact_with_effect(provider, messages, model, config, state, &context, &provider_effect).await
+}
+
+pub(crate) async fn autocompact_with_effect(
+    provider: &dyn LlmProvider,
+    messages: &[Message],
+    model: &str,
+    config: &CompactConfig,
+    state: &mut CompactState,
+    execution_context: &EffectExecutionContext,
+    provider_effect: &EffectDescriptor,
+) -> Result<CompactResult, CompactError> {
     // Circuit breaker check
     if state.is_circuit_broken(config) {
         return Err(CompactError::CircuitBroken {
@@ -119,15 +150,9 @@ pub async fn autocompact(
             reasoning_effort: None,
         };
 
-        match provider.stream(&request).await {
-            Ok(rx) => match collect_stream_text(rx).await {
-                Ok((text, _usage)) => break text,
-                Err(e) => {
-                    state.record_failure();
-                    return Err(e);
-                }
-            },
-            Err(ProviderError::PromptTooLong(_)) if ptl_attempts < MAX_PTL_RETRIES => {
+        match compact_provider_call(provider, &request, execution_context, provider_effect).await {
+            Ok((text, _usage)) => break text,
+            Err(CompactError::Provider(ProviderError::PromptTooLong(_))) if ptl_attempts < MAX_PTL_RETRIES => {
                 ptl_attempts += 1;
                 // Remove the summary prompt (last msg), truncate, re-add prompt
                 let conversation_part = &conv_messages[..conv_messages.len() - 1];
@@ -147,13 +172,13 @@ pub async fn autocompact(
                     }
                 }
             }
-            Err(ProviderError::PromptTooLong(_)) => {
+            Err(CompactError::Provider(ProviderError::PromptTooLong(_))) => {
                 state.record_failure();
                 return Err(CompactError::PromptTooLong { attempts: ptl_attempts });
             }
             Err(e) => {
                 state.record_failure();
-                return Err(CompactError::Provider(e));
+                return Err(e);
             }
         }
     };
@@ -209,6 +234,152 @@ async fn collect_stream_text(mut rx: mpsc::Receiver<LlmEvent>) -> Result<(String
 
     // Channel closed without a Done event
     Err(CompactError::EmptyResponse)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CompactProviderOutcome {
+    text: String,
+    usage: TokenUsage,
+}
+
+async fn compact_provider_call(
+    provider: &dyn LlmProvider,
+    request: &LlmRequest,
+    context: &EffectExecutionContext,
+    provider_effect: &EffectDescriptor,
+) -> Result<(String, TokenUsage), CompactError> {
+    let input = serde_json::to_value(request).map_err(|error| CompactError::Effect(error.to_string()))?;
+    let effect_request = context.effect_request(
+        &format!("provider:autocompact:{}", stable_digest_value(&input)),
+        "AutoCompact",
+        &input,
+        provider_effect.clone(),
+    );
+    let effect_id = effect_request.effect_id.clone();
+    if context
+        .unresolved_other_effect_for_capability("AutoCompact", effect_id.as_str())
+        .map_err(CompactError::ReconciliationRequired)?
+        .is_some()
+    {
+        return Err(CompactError::ReconciliationRequired(
+            "a previous AutoCompact call has an unresolved outcome under a different durable identity".to_owned(),
+        ));
+    }
+    match context.recover_effect(&effect_request).map_err(CompactError::Effect)? {
+        EffectRecoveryDecision::Execute => {}
+        EffectRecoveryDecision::Reuse { is_error: true, output } => return Err(CompactError::Effect(output)),
+        EffectRecoveryDecision::Reuse {
+            is_error: false,
+            output,
+        } => {
+            let recovered: CompactProviderOutcome =
+                serde_json::from_str(&output).map_err(|error| CompactError::Effect(error.to_string()))?;
+            context
+                .record_model_usage_once(&effect_id, &recovered.usage, false)
+                .map_err(CompactError::Effect)?;
+            return Ok((recovered.text, recovered.usage));
+        }
+        EffectRecoveryDecision::Reconcile { reason } => return Err(CompactError::ReconciliationRequired(reason)),
+    }
+    let evaluation = context.evaluate(&effect_request);
+    let approved_environment = context.environment();
+    context
+        .record_permission_decision(&effect_request, &evaluation, "provider_autocompact")
+        .map_err(|error| CompactError::Effect(error.to_string()))?;
+    if evaluation.decision != PermissionDecision::Allow {
+        return Err(CompactError::Effect(format!(
+            "provider request permission denied: {}",
+            evaluation.reason
+        )));
+    }
+    let estimated_tokens =
+        estimate_tokens_from_messages(&request.messages).saturating_add(u64::from(request.max_tokens.unwrap_or(0)));
+    let mut provider_rate_permit = context
+        .acquire_provider_request(estimated_tokens)
+        .map_err(CompactError::Effect)?;
+    let _permit = context.acquire_effect_permit().await.map_err(CompactError::Effect)?;
+    context
+        .revalidate_environment(&effect_request, &approved_environment)
+        .map_err(CompactError::Effect)?;
+    context
+        .record_effect_intent(&effect_request)
+        .map_err(|error| CompactError::Effect(error.to_string()))?;
+    let mut guard = EffectOutcomeGuard::new(
+        context.clone(),
+        effect_request,
+        "provider autocompact request cancelled before a terminal result",
+    );
+    let provider_signals = context.resource_manager().map(|resources| resources.provider_signals());
+    let single_attempt = provider_signals
+        .as_ref()
+        .is_some_and(|signals| signals.requests_per_minute.is_some() || signals.tokens_per_minute.is_some());
+    if let Some(permit) = provider_rate_permit.as_mut() {
+        permit.mark_started().map_err(CompactError::Effect)?;
+    }
+    let provider_stream = if single_attempt {
+        provider.stream_once(request).await
+    } else {
+        provider.stream(request).await
+    };
+    let rx = match provider_stream {
+        Ok(rx) => rx,
+        Err(error) => {
+            if let Err(persistence_error) = guard.complete(true, &error.to_string()) {
+                return Err(CompactError::Effect(format!(
+                    "provider autocompact request failed: {error}; outcome persistence failed: {persistence_error}"
+                )));
+            }
+            return Err(CompactError::Provider(error));
+        }
+    };
+    match collect_stream_text(rx).await {
+        Ok((text, usage)) => {
+            let output = serde_json::to_string(&CompactProviderOutcome {
+                text: text.clone(),
+                usage: usage.clone(),
+            })
+            .map_err(|error| CompactError::Effect(error.to_string()))?;
+            guard
+                .complete(false, &output)
+                .map_err(|error| CompactError::Effect(error.to_string()))?;
+            if let Some(permit) = provider_rate_permit.take() {
+                permit
+                    .commit(usage.input_tokens.saturating_add(usage.output_tokens))
+                    .map_err(CompactError::Effect)?;
+            }
+            context
+                .record_model_usage_once(&effect_id, &usage, false)
+                .map_err(CompactError::Effect)?;
+            Ok((text, usage))
+        }
+        Err(error) => {
+            if let Err(persistence_error) = guard.complete(true, &error.to_string()) {
+                return Err(CompactError::Effect(format!(
+                    "provider autocompact stream failed: {error}; outcome persistence failed: {persistence_error}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn standalone_compaction_context(provider_effect: &EffectDescriptor) -> EffectExecutionContext {
+    let permissions = PermissionContext::new(PermissionMode::Auto, PermissionCeiling::unrestricted());
+    permissions.allow_configured_effect_for("config:provider", "AutoCompact", provider_effect);
+    permissions.replace_rules(vec![PermissionRule {
+        capability: Some("AutoCompact".into()),
+        action: None,
+        effect_class: Some(solaris_types::effect::EffectClass::Network),
+        resource_prefixes: Vec::new(),
+        decision: PermissionDecision::Allow,
+    }]);
+    EffectExecutionContext::new(
+        RunId::new(format!("standalone-compaction-{}", uuid::Uuid::now_v7())),
+        AgentId::from("standalone-compaction"),
+        Arc::new(InMemoryRuntimeLedger::default()),
+        permissions,
+        OperationEnvironmentSnapshot::default(),
+    )
 }
 
 /// Truncate the oldest ~20% of messages for PTL retry.

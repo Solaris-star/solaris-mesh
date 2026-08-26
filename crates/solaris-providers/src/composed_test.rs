@@ -150,7 +150,7 @@ mod tests {
             insta::with_settings!({ prepend_module_to_snapshot => false }, {
                 insta::assert_json_snapshot!(
                     concat!("solaris_providers__openai__tests__", $name),
-                    $value
+                    crate::test_support::canonicalize_json($value)
                 );
             });
         };

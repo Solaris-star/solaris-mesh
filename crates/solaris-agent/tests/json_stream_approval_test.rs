@@ -70,7 +70,6 @@ async fn test_tool_approval_approve_flow() {
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
     engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(writer);
-
     // Spawn a task that approves the tool call after a short delay
     let am = approval_manager.clone();
     tokio::spawn(async move {
@@ -83,13 +82,16 @@ async fn test_tool_approval_approve_flow() {
                 true
             };
             if has_pending {
-                am.resolve("call-1", ToolApprovalResult::Approved);
+                am.approve("call-1", solaris_protocol::commands::ApprovalScope::Once);
                 break;
             }
         }
     });
 
-    let result = engine.run("Use the tool", "msg-1").await.expect("should succeed");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), engine.run("Use the tool", "msg-1"))
+        .await
+        .expect("approval by emitted call_id must resolve")
+        .expect("should succeed");
     assert_eq!(result.text, "Done");
     assert_eq!(result.turns, 2);
 }
@@ -136,7 +138,6 @@ async fn test_tool_approval_deny_flow() {
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
     engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(writer);
-
     let am = approval_manager.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -148,7 +149,10 @@ async fn test_tool_approval_deny_flow() {
         );
     });
 
-    let result = engine.run("Use the tool", "msg-2").await.expect("should succeed");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), engine.run("Use the tool", "msg-2"))
+        .await
+        .expect("denial by emitted call_id must resolve")
+        .expect("should succeed");
     assert_eq!(result.text, "Cannot run tool");
     assert_eq!(result.turns, 2);
 }
@@ -203,9 +207,10 @@ async fn test_auto_approve_bypasses_approval() {
 }
 
 // ---------------------------------------------------------------------------
-// test: session auto-approve (scope=always) bypasses future approvals
+// test: legacy session auto-approve key bypasses future approvals
 //
-// After add_auto_approve("exec"), exec tools skip the approval wait.
+// Legacy callers store the exact tool capability key. New ApprovalScope::Always
+// decisions are converted to resource-scoped capability leases instead.
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_session_auto_approve_category() {
@@ -238,8 +243,8 @@ async fn test_session_auto_approve_category() {
 
     let output = silent_output();
     let approval_manager = Arc::new(ToolApprovalManager::new());
-    // Pre-approve the "exec" category
-    approval_manager.add_auto_approve("exec");
+    // Pre-approve the legacy exact tool capability key.
+    approval_manager.add_auto_approve("exec_tool");
     let writer = Arc::new(ProtocolWriter::new());
 
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
@@ -287,7 +292,6 @@ async fn test_client_disconnect_aborts() {
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
     engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(writer);
-
     // Simulate client disconnect: drop the pending sender without resolving
     let am = approval_manager.clone();
     tokio::spawn(async move {
@@ -295,7 +299,10 @@ async fn test_client_disconnect_aborts() {
         am.drop_pending("call-5");
     });
 
-    let err = engine.run("Use the tool", "msg-5").await.unwrap_err();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), engine.run("Use the tool", "msg-5"))
+        .await
+        .expect("dropping approval by emitted call_id must resolve")
+        .unwrap_err();
     assert!(
         format!("{:?}", err).contains("UserAborted"),
         "expected UserAborted, got: {:?}",

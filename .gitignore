@@ -28,7 +28,7 @@
 worktree/
 worktrees/
 
-# Solaris CLI session data
+# Solaris Mesh runtime/session data
 .solaris/
 .solaris-mesh/
 

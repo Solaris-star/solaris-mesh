@@ -158,22 +158,13 @@ mod discovery_supplemental_tests {
     // ---------------------------------------------------------------------------
 
     // TC-26: gitignored directory is skipped.
-    // Uses a real git repo with `.gitignore` to trigger `git check-ignore`.
+    // Uses a repository marker and `.gitignore`; evaluation stays in-process.
     #[tokio::test]
     async fn tc26_discover_dirs_skips_gitignored_dir() {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap().to_string();
 
-        // Init git repo
-        let status = std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(tmp.path())
-            .status();
-
-        // If git is not available skip gracefully
-        if status.is_err() || !status.unwrap().success() {
-            return;
-        }
+        fs::create_dir_all(tmp.path().join(".git")).unwrap();
 
         // Create subdirectory and write to .gitignore
         let ignored = tmp.path().join("ignored");
@@ -192,13 +183,13 @@ mod discovery_supplemental_tests {
         assert!(found.is_empty(), "gitignored dir should be skipped");
     }
 
-    // TC-27: when git fails (non-git dir), path is not filtered (fail-open).
+    // TC-27: outside a repository, paths are not filtered.
     #[tokio::test]
     async fn tc27_discover_dirs_not_filtered_when_git_unavailable() {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap().to_string();
 
-        // NOT a git repo — git check-ignore will fail
+        // Not a repository, so no repository ignore rules apply.
         let normal = tmp.path().join("normal");
         fs::create_dir_all(&normal).unwrap();
         create_skill_dir(&normal);

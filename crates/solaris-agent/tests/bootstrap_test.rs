@@ -22,6 +22,7 @@ fn minimal_config() -> Config {
         compat: ProviderCompat::openai_defaults(),
         tools: Default::default(),
         session: Default::default(),
+        memory: Default::default(),
         compact: Default::default(),
         plan: Default::default(),
         shell: Default::default(),
@@ -31,6 +32,33 @@ fn minimal_config() -> Config {
         vertex: None,
         mcp: Default::default(),
         logging: Default::default(),
+        multi_agent: Default::default(),
+    }
+}
+
+struct IsolatedRuntime {
+    _root: tempfile::TempDir,
+    workspace: String,
+    config: Config,
+}
+
+fn isolated_runtime() -> IsolatedRuntime {
+    let root = tempfile::tempdir().expect("create isolated bootstrap root");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create isolated workspace");
+
+    let mut config = minimal_config();
+    config.session.directory = root
+        .path()
+        .join("state")
+        .join("sessions")
+        .to_string_lossy()
+        .into_owned();
+
+    IsolatedRuntime {
+        _root: root,
+        workspace: workspace.to_string_lossy().into_owned(),
+        config,
     }
 }
 
@@ -40,8 +68,8 @@ fn null_output() -> Arc<dyn solaris_agent::output::OutputSink> {
 
 #[tokio::test]
 async fn bootstrap_builds_engine_with_model_in_prompt() {
-    let config = minimal_config();
-    let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let runtime = isolated_runtime();
+    let result = AgentBootstrap::new(runtime.config, &runtime.workspace, null_output())
         .build()
         .await
         .expect("bootstrap should succeed");
@@ -53,8 +81,8 @@ async fn bootstrap_builds_engine_with_model_in_prompt() {
 
 #[tokio::test]
 async fn bootstrap_registers_all_expected_tools() {
-    let config = minimal_config();
-    let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let runtime = isolated_runtime();
+    let result = AgentBootstrap::new(runtime.config, &runtime.workspace, null_output())
         .build()
         .await
         .unwrap();
@@ -75,10 +103,10 @@ async fn bootstrap_registers_all_expected_tools() {
 
 #[tokio::test]
 async fn bootstrap_plan_tools_when_enabled() {
-    let mut config = minimal_config();
-    config.plan.enabled = true;
+    let mut runtime = isolated_runtime();
+    runtime.config.plan.enabled = true;
 
-    let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let result = AgentBootstrap::new(runtime.config, &runtime.workspace, null_output())
         .build()
         .await
         .unwrap();
@@ -96,10 +124,10 @@ async fn bootstrap_plan_tools_when_enabled() {
 
 #[tokio::test]
 async fn bootstrap_no_plan_tools_when_disabled() {
-    let mut config = minimal_config();
-    config.plan.enabled = false;
+    let mut runtime = isolated_runtime();
+    runtime.config.plan.enabled = false;
 
-    let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let result = AgentBootstrap::new(runtime.config, &runtime.workspace, null_output())
         .build()
         .await
         .unwrap();
@@ -113,8 +141,8 @@ async fn bootstrap_no_plan_tools_when_disabled() {
 
 #[tokio::test]
 async fn bootstrap_no_mcp_when_no_servers() {
-    let config = minimal_config();
-    let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let runtime = isolated_runtime();
+    let result = AgentBootstrap::new(runtime.config, &runtime.workspace, null_output())
         .build()
         .await
         .unwrap();
@@ -125,10 +153,10 @@ async fn bootstrap_no_mcp_when_no_servers() {
 
 #[tokio::test]
 async fn bootstrap_with_custom_system_prompt() {
-    let mut config = minimal_config();
-    config.system_prompt = Some("You are a pirate assistant.".into());
+    let mut runtime = isolated_runtime();
+    runtime.config.system_prompt = Some("You are a pirate assistant.".into());
 
-    let _result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let _result = AgentBootstrap::new(runtime.config, &runtime.workspace, null_output())
         .build()
         .await
         .unwrap();
@@ -140,7 +168,8 @@ async fn bootstrap_with_agents_md_in_workspace() {
     let workspace = tmp.path();
     std::fs::write(workspace.join("AGENTS.md"), "PROJECT_RULES_MARKER").unwrap();
 
-    let config = minimal_config();
+    let mut config = minimal_config();
+    config.session.directory = tmp.path().join("state").join("sessions").to_string_lossy().into_owned();
     let _result = AgentBootstrap::new(config, workspace.to_string_lossy().as_ref(), null_output())
         .build()
         .await
@@ -157,10 +186,10 @@ async fn bootstrap_config_accessor_returns_config() {
 
 #[tokio::test]
 async fn bootstrap_with_external_provider() {
-    let config = minimal_config();
-    let provider = solaris_providers::create_provider(&config);
+    let runtime = isolated_runtime();
+    let provider = solaris_providers::create_provider(&runtime.config);
 
-    let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let result = AgentBootstrap::new(runtime.config, &runtime.workspace, null_output())
         .provider(provider)
         .build()
         .await

@@ -13,6 +13,10 @@ use solaris_protocol::events::ToolCategory;
 use solaris_tools::Tool;
 use solaris_types::skill_types::PlanModeTransition;
 
+fn plan_input() -> serde_json::Value {
+    json!({"plan": "# Test plan\n\nUse the verified implementation steps."})
+}
+
 // ---------------------------------------------------------------------------
 // TC-3.3-01  PlanState initial state
 // ---------------------------------------------------------------------------
@@ -74,12 +78,12 @@ async fn tc_3_3_04_exit_plan_mode_succeeds_when_active() {
     let flag = Arc::new(AtomicBool::new(true));
     let tool = ExitPlanModeTool::new(flag);
 
-    let result = tool.execute(json!({})).await;
+    let result = tool.execute(plan_input()).await;
 
     assert!(!result.is_error, "should succeed when in plan mode");
     assert!(
-        result.content.contains("Exited plan mode"),
-        "confirmation message should mention exiting"
+        result.content.contains("Saved plan artifact") && result.content.contains("exited plan mode"),
+        "confirmation message should mention the saved artifact and exit"
     );
 }
 
@@ -130,7 +134,7 @@ fn tc_3_3_07_exit_context_modifier_returns_exit_transition() {
     let flag = Arc::new(AtomicBool::new(true));
     let tool = ExitPlanModeTool::new(flag);
 
-    let modifier = tool.context_modifier_for(&json!({}));
+    let modifier = tool.context_modifier_for(&plan_input());
 
     assert!(modifier.is_some(), "should return a context modifier");
     let cm = modifier.unwrap();
@@ -200,12 +204,13 @@ fn tc_3_3_09_exit_tool_is_concurrency_safe() {
 }
 
 #[test]
-fn tc_3_3_09_exit_tool_schema_no_required_params() {
+fn tc_3_3_09_exit_tool_schema_requires_plan() {
     let flag = Arc::new(AtomicBool::new(false));
     let tool = ExitPlanModeTool::new(flag);
     let schema = tool.input_schema();
     let required = schema["required"].as_array().expect("required should be an array");
-    assert!(required.is_empty(), "no required parameters expected");
+    assert_eq!(required, &[json!("plan")]);
+    assert_eq!(schema["properties"]["plan"]["type"], "string");
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +235,7 @@ async fn enter_exit_cycle_with_shared_flag() {
     assert!(r.is_error);
 
     // Phase 3: exit should succeed
-    let r = exit.execute(json!({})).await;
+    let r = exit.execute(plan_input()).await;
     assert!(!r.is_error);
 
     // Simulate engine applying the transition
@@ -261,7 +266,7 @@ fn enter_context_modifier_other_fields_are_default() {
 #[test]
 fn exit_context_modifier_other_fields_are_default() {
     let tool = ExitPlanModeTool::new(Arc::new(AtomicBool::new(false)));
-    let cm = tool.context_modifier_for(&json!({})).unwrap();
+    let cm = tool.context_modifier_for(&plan_input()).unwrap();
     assert!(cm.model.is_none());
     assert!(cm.effort.is_none());
     assert!(cm.allowed_tools.is_empty());

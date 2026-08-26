@@ -2,6 +2,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 use solaris_config::compat::ProviderCompat;
 use solaris_types::llm::LlmRequest;
+use std::net::IpAddr;
 
 use crate::bedrock::BedrockTransportState;
 use crate::error::ProviderError;
@@ -66,7 +67,7 @@ pub(crate) struct ProjectedHttpRequest {
 impl OpenAiTransport {
     pub(crate) fn new(api_key: &str, base_url: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: redirect_safe_client_for_url(base_url),
             api_key: api_key.to_string(),
             base_url: normalize_openai_base_url(base_url),
         }
@@ -102,7 +103,7 @@ impl OpenAiTransport {
 impl AnthropicTransport {
     pub(crate) fn new(api_key: &str, base_url: &str, cache_enabled: bool) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: redirect_safe_client_for_url(base_url),
             api_key: api_key.to_string(),
             base_url: base_url.to_string(),
             cache_enabled,
@@ -136,6 +137,43 @@ impl AnthropicTransport {
     pub(crate) async fn send(&self, request: ProjectedHttpRequest) -> Result<reqwest::Response, ProviderError> {
         send_projected_json_request(&self.client, request).await
     }
+}
+
+pub(crate) fn redirect_safe_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("building the default no-redirect HTTP client must succeed")
+}
+
+pub(crate) fn redirect_safe_client_for_url(url: &str) -> reqwest::Client {
+    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    let builder = if is_loopback_url(url) {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    builder
+        .build()
+        .expect("building the destination-aware no-redirect HTTP client must succeed")
+}
+
+pub(crate) fn client_for_url(client: &reqwest::Client, url: &str) -> reqwest::Client {
+    if is_loopback_url(url) {
+        redirect_safe_client_for_url(url)
+    } else {
+        client.clone()
+    }
+}
+
+fn is_loopback_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback())
 }
 
 impl ProviderTransport {
@@ -264,6 +302,7 @@ async fn send_projected_json_request(
         tool_wire_shape,
     } = request;
 
+    let client = client_for_url(client, &url);
     let builder = client.post(&url).headers(headers);
     let response = match body_bytes {
         Some(bytes) => builder.body(bytes).send().await?,

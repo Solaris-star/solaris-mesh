@@ -65,12 +65,30 @@ impl SlashCommand for CompactCommand {
                     msgs_summarized
                 ));
             }
-            Err(e) => {
-                ctx.output.emit_error(&format!("Compact failed: {}", e));
+            Err(error) => {
+                let error_kind = compact_error_kind(&error);
+                tracing::warn!(
+                    target: "solaris_agent",
+                    error_kind,
+                    "manual context compaction failed"
+                );
+                anyhow::bail!("Context compaction failed");
             }
         }
 
         Ok(CommandResult::Continue)
+    }
+}
+
+fn compact_error_kind(error: &auto::CompactError) -> &'static str {
+    match error {
+        auto::CompactError::Provider(_) => "provider",
+        auto::CompactError::PromptTooLong { .. } => "prompt_too_long",
+        auto::CompactError::EmptyResponse => "empty_response",
+        auto::CompactError::StreamError(_) => "stream",
+        auto::CompactError::CircuitBroken { .. } => "circuit_broken",
+        auto::CompactError::Effect(_) => "effect",
+        auto::CompactError::ReconciliationRequired(_) => "reconciliation_required",
     }
 }
 

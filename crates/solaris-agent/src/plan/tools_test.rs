@@ -92,22 +92,25 @@ mod tests {
     }
 
     #[test]
-    fn exit_tool_schema_has_no_required_fields() {
+    fn exit_tool_schema_requires_plan_markdown() {
         let tool = ExitPlanModeTool::new(make_shared_flag(false));
         let schema = tool.input_schema();
         let required = schema["required"].as_array().unwrap();
-        assert!(required.is_empty());
+        assert_eq!(required, &[json!("plan")]);
+        assert_eq!(schema["properties"]["plan"]["maxLength"], 1024 * 1024);
     }
 
     #[test]
     fn exit_tool_context_modifier_returns_exit() {
         let tool = ExitPlanModeTool::new(make_shared_flag(false));
-        let modifier = tool.context_modifier_for(&json!({}));
+        let modifier = tool.context_modifier_for(&json!({"plan": "# My plan\n\n- Verify it."}));
         assert!(modifier.is_some());
         let cm = modifier.unwrap();
         assert!(matches!(
             cm.plan_mode_transition,
-            Some(PlanModeTransition::Exit { plan_content: None })
+            Some(PlanModeTransition::Exit {
+                plan_content: Some(ref plan)
+            }) if plan == "# My plan\n\n- Verify it."
         ));
         // Other fields are default
         assert!(cm.model.is_none());
@@ -118,17 +121,28 @@ mod tests {
     #[tokio::test]
     async fn exit_succeeds_when_active() {
         let tool = ExitPlanModeTool::new(make_shared_flag(true));
-        let result = tool.execute(json!({})).await;
+        let result = tool.execute(json!({"plan": "# My plan\n\n- Implement it."})).await;
         assert!(!result.is_error);
-        assert!(result.content.contains("Exited plan mode"));
+        assert!(result.content.contains("Saved plan artifact"));
     }
 
     #[tokio::test]
     async fn exit_rejects_when_not_active() {
         let tool = ExitPlanModeTool::new(make_shared_flag(false));
-        let result = tool.execute(json!({})).await;
+        let result = tool.execute(json!({"plan": "# My plan"})).await;
         assert!(result.is_error);
         assert!(result.content.contains("Not in plan mode"));
+    }
+
+    #[tokio::test]
+    async fn exit_rejects_missing_or_unheaded_plan() {
+        let tool = ExitPlanModeTool::new(make_shared_flag(true));
+
+        for input in [json!({}), json!({"plan": ""}), json!({"plan": "No heading"})] {
+            let result = tool.execute(input).await;
+            assert!(result.is_error);
+            assert!(result.content.contains("requires a non-empty markdown plan"));
+        }
     }
 
     #[test]
@@ -148,7 +162,7 @@ mod tests {
         // Initially not active — enter succeeds, exit fails
         let r = enter_tool.execute(json!({})).await;
         assert!(!r.is_error);
-        let r = exit_tool.execute(json!({})).await;
+        let r = exit_tool.execute(json!({"plan": "# Plan"})).await;
         assert!(r.is_error);
 
         // Simulate engine setting the flag after processing Enter transition
@@ -157,7 +171,7 @@ mod tests {
         // Now active — enter fails, exit succeeds
         let r = enter_tool.execute(json!({})).await;
         assert!(r.is_error);
-        let r = exit_tool.execute(json!({})).await;
+        let r = exit_tool.execute(json!({"plan": "# Plan"})).await;
         assert!(!r.is_error);
     }
 }

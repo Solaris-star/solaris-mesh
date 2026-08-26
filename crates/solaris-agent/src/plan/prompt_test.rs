@@ -20,6 +20,8 @@ mod tests {
     #[test]
     fn instructions_mention_exit_tool() {
         assert!(plan_mode_instructions().contains("ExitPlanMode"));
+        assert!(plan_mode_instructions().contains("`plan` field"));
+        assert!(plan_mode_instructions().contains("`#` heading"));
     }
 
     #[test]

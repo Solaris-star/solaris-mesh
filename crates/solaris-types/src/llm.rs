@@ -1,10 +1,11 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::{StopReason, TokenUsage, ToolUseId};
 use crate::tool::ToolDef;
 
 /// A request to the LLM provider
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     pub model: String,
     pub system: String,
@@ -17,7 +18,8 @@ pub struct LlmRequest {
     pub reasoning_effort: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
     Enabled { budget_tokens: u32 },
     Disabled,
@@ -40,6 +42,8 @@ pub enum LlmEvent {
     ThinkingDelta(String),
     /// Opaque provider signature for the current thinking block.
     ThinkingSignature(String),
+    /// Opaque provider-owned metadata to preserve across future requests.
+    ProviderMetadata { namespace: String, value: Value },
     /// Response complete
     Done { stop_reason: StopReason, usage: TokenUsage },
     /// Error from the API

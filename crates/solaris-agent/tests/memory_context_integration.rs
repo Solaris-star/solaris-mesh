@@ -116,6 +116,7 @@ fn tc_7_3_section_ordering() {
         effort: None,
         shell: None,
         paths: vec![],
+        network: Default::default(),
         hooks_raw: None,
         source: SkillSource::User,
         loaded_from: LoadedFrom::Skills,

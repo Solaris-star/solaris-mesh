@@ -44,7 +44,7 @@ Compose a clear, actionable implementation plan in your response including:
 - **Verification**: how to test the changes end-to-end
 
 ### Phase 4: Submit for review
-When your plan is complete, call ExitPlanMode to submit it for user review. Do not ask "Is this plan okay?" — calling ExitPlanMode is the way to request approval."#
+When your plan is complete, call ExitPlanMode with the complete markdown in its `plan` field. The plan must start with a `#` heading. Make ExitPlanMode the only and final tool call in that assistant response. Do not paste the final plan as a plain reply or ask "Is this plan okay?" — calling ExitPlanMode is the submission."#
 }
 
 #[cfg(test)]

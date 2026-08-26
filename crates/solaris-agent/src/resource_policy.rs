@@ -19,7 +19,9 @@ impl ResourcePolicy {
             .map(|n| n.get())
             .unwrap_or(1)
             .max(1);
-        let max_active = configured_max.unwrap_or(system_capacity).min(system_capacity).max(1);
+        // Agent work is primarily remote-I/O bound; CPU parallelism is only a
+        // default hint, never a hard ceiling on an explicit configured budget.
+        let max_active = configured_max.unwrap_or(system_capacity).max(1);
         Self::new(max_active)
     }
 
@@ -50,32 +52,5 @@ impl ResourcePolicy {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn configured_limit_is_respected() {
-        let p = ResourcePolicy::from_system(Some(2));
-        assert!(p.max_active() <= 2);
-        assert!(p.max_active() >= 1);
-    }
-
-    #[test]
-    fn tracks_load_and_release() {
-        let mut p = ResourcePolicy::new(3);
-        assert_eq!(p.available_slots(), 3);
-        assert!(p.try_acquire());
-        assert_eq!(p.active(), 1);
-        p.release();
-        assert_eq!(p.active(), 0);
-    }
-
-    #[test]
-    fn new_policy_is_not_fixed_at_five() {
-        let mut p = ResourcePolicy::new(10);
-        for _ in 0..10 {
-            assert!(p.try_acquire());
-        }
-        assert!(!p.try_acquire());
-    }
-}
+#[path = "resource_policy_test.rs"]
+mod resource_policy_test;

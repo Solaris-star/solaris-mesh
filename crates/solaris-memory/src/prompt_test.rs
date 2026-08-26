@@ -225,6 +225,14 @@ mod tests {
             result.contains("MEMORY.md is the index"),
             "should mention MEMORY.md role"
         );
+        assert!(
+            result.contains("Do not save code patterns"),
+            "ordinary workspace facts must not become long-term memory"
+        );
+        assert!(
+            result.contains("temporary verification results"),
+            "task-local verification must stay out of long-term memory"
+        );
     }
 
     #[test]

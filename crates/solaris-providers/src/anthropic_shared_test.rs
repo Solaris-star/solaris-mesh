@@ -921,11 +921,16 @@ mod tests {
 
         let events = parse_sse_data("content_block_delta", data, &mut state);
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         match &events[0] {
             LlmEvent::ThinkingSignature(signature) => assert_eq!(signature, "sig-123"),
             _ => panic!("expected ThinkingSignature"),
         }
+        assert!(matches!(
+            &events[1],
+            LlmEvent::ProviderMetadata { namespace, value }
+                if namespace == "anthropic" && value["thinking_signature"] == "sig-123"
+        ));
     }
 
     #[test]

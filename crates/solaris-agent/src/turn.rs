@@ -50,6 +50,8 @@ impl FinalizationReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnKind {
     Normal,
+    MaxTokensContinuation,
+    PostMutationVerification,
     Finalization(FinalizationReason),
 }
 
@@ -61,6 +63,12 @@ impl TurnKind {
     pub(crate) fn control_prompt(self) -> Option<&'static str> {
         match self {
             Self::Normal => None,
+            Self::MaxTokensContinuation => Some(
+                "The previous response was cut off by the token limit before the task finished. Continue from where you stopped. Use tools when needed, do not repeat completed work, and finish the requested task.",
+            ),
+            Self::PostMutationVerification => Some(
+                "Before declaring the task complete, compare the current implementation and generated artifacts against every explicit requirement in the user's request and any specification files you used. Verify semantic behavior, not only syntax, valid formatting, or repeated identical output. First use evidence already present in the conversation. Do not re-read files or repeat successful commands already visible there. Call the smallest relevant tool only for a specific requirement that remains unproven. If a requirement is unproven or contradicted, fix it before the final answer. Do not claim a check you did not perform.",
+            ),
             Self::Finalization(FinalizationReason::TurnBudget) => {
                 Some("Do not call any more tools. Use the tool results already provided and give the final answer now.")
             }

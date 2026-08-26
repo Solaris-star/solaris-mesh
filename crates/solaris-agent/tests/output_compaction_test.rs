@@ -341,10 +341,11 @@ async fn case_7_runtime_compaction_switch() {
     );
     assert_eq!(engine.compaction_level(), CompactLevel::Off);
 
-    let changes = engine.apply_config_update(None, None, None, None, Some("full".to_string()));
-    assert!(!changes.is_empty(), "should report changes");
+    let outcome = engine.apply_config_update(None, None, None, None, Some("full".to_string()));
+    assert!(outcome.applied, "valid compaction should be applied");
+    assert!(outcome.changed, "valid compaction should report a state change");
     assert_eq!(engine.compaction_level(), CompactLevel::Full);
-    eprintln!("[compaction:B] apply_config_update changes: {:?}", changes);
+    eprintln!("[compaction:B] apply_config_update outcome: {:?}", outcome);
 
     eprintln!("[compaction:B] ✓ runtime switch from Off to Full verified");
 }

@@ -1,6 +1,7 @@
 mod formatter;
 pub mod null_sink;
 pub mod protocol_sink;
+pub mod runtime_sink;
 mod sink;
 pub mod terminal;
 

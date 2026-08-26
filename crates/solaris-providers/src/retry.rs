@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
@@ -39,6 +40,11 @@ const INITIAL_HTTP_5XX_RETRY_BACKOFFS: [Duration; 5] = [
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 const INITIAL_CONNECT_BACKOFF: Duration = Duration::from_millis(300);
 const MAX_INITIAL_CONNECT_BACKOFF: Duration = Duration::from_secs(2);
+const MAX_INITIAL_RATE_LIMIT_RETRIES: u32 = 2;
+const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 30_000;
+const MIN_RATE_LIMIT_BACKOFF_MS: u64 = 250;
+const RATE_LIMIT_JITTER_RANGE_MS: u64 = 251;
+static RATE_LIMIT_JITTER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Retry initial request failures that occur before an HTTP response exists.
 /// HTTP status errors and rate limits are intentionally not retried here.
@@ -68,38 +74,66 @@ where
 }
 
 fn is_initial_connect_error(error: &ProviderError) -> bool {
-    match error {
-        ProviderError::Http(err) => err.is_connect(),
-        ProviderError::Connection(_) => true,
-        _ => false,
-    }
+    matches!(error, ProviderError::Http(_) | ProviderError::Connection(_))
 }
 
 /// Retry transient provider-side HTTP failures before stream consumption starts.
-pub(crate) async fn with_initial_http_5xx_retry<F, Fut, T>(f: F) -> Result<T, ProviderError>
+/// Rate-limit retries are bounded separately and honor the provider delay with
+/// a small process-wide jitter so concurrent Agents do not retry in lockstep.
+pub(crate) async fn with_initial_http_retry<F, Fut, T>(f: F) -> Result<T, ProviderError>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T, ProviderError>>,
 {
-    let max_retries = INITIAL_HTTP_5XX_RETRY_BACKOFFS.len();
-    for (attempt, backoff) in INITIAL_HTTP_5XX_RETRY_BACKOFFS.iter().enumerate() {
+    let max_server_retries = INITIAL_HTTP_5XX_RETRY_BACKOFFS.len();
+    let mut server_retries = 0;
+    let mut rate_limit_retries = 0;
+    loop {
         match f().await {
             Ok(val) => return Ok(val),
-            Err(e) => match initial_http_5xx_status(&e) {
-                Some(status) => {
+            Err(e) => {
+                if let ProviderError::RateLimited { retry_after_ms, .. } = &e
+                    && rate_limit_retries < MAX_INITIAL_RATE_LIMIT_RETRIES
+                {
+                    let backoff = rate_limit_backoff(*retry_after_ms, rate_limit_retries);
+                    rate_limit_retries += 1;
                     tracing::warn!(
-                        attempt = attempt + 1,
-                        max_retries,
+                        attempt = rate_limit_retries,
+                        max_retries = MAX_INITIAL_RATE_LIMIT_RETRIES,
+                        backoff_ms = backoff.as_millis(),
+                        "retrying initial provider request after rate limit"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+
+                if let Some(status) = initial_http_5xx_status(&e)
+                    && let Some(backoff) = INITIAL_HTTP_5XX_RETRY_BACKOFFS.get(server_retries)
+                {
+                    server_retries += 1;
+                    tracing::warn!(
+                        attempt = server_retries,
+                        max_retries = max_server_retries,
                         status,
                         "retrying initial provider request after server error"
                     );
                     tokio::time::sleep(*backoff).await;
+                    continue;
                 }
-                _ => return Err(e),
-            },
+
+                return Err(e);
+            }
         }
     }
-    f().await
+}
+
+fn rate_limit_backoff(retry_after_ms: u64, retry_index: u32) -> Duration {
+    let base = retry_after_ms.clamp(MIN_RATE_LIMIT_BACKOFF_MS, MAX_RATE_LIMIT_BACKOFF_MS);
+    let multiplier = 1_u64.checked_shl(retry_index).unwrap_or(u64::MAX);
+    let exponential = base.saturating_mul(multiplier).min(MAX_RATE_LIMIT_BACKOFF_MS);
+    let sequence = RATE_LIMIT_JITTER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let jitter = sequence.wrapping_mul(137) % RATE_LIMIT_JITTER_RANGE_MS;
+    Duration::from_millis(exponential.saturating_add(jitter).min(MAX_RATE_LIMIT_BACKOFF_MS))
 }
 
 fn initial_http_5xx_status(error: &ProviderError) -> Option<u16> {

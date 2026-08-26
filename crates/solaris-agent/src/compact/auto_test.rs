@@ -2,8 +2,36 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use async_trait::async_trait;
+    use solaris_providers::ProviderError;
+    use solaris_providers::provider::LlmProvider;
     use solaris_types::compact::CompactTrigger;
+    use solaris_types::identity::RunId;
+
+    use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+
+    struct BlockingProvider;
+
+    struct CountingProvider(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl LlmProvider for BlockingProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Connection("must not execute".to_owned()))
+        }
+    }
 
     fn default_config() -> CompactConfig {
         CompactConfig::default()
@@ -231,5 +259,89 @@ mod tests {
             }],
         );
         assert!(extract_compact_metadata(&msg).is_none());
+    }
+
+    #[tokio::test]
+    async fn changed_model_cannot_bypass_unknown_autocompact_effect() {
+        let provider_effect = crate::bootstrap::provider_effect_descriptor("");
+        let permissions = PermissionContext::new(PermissionMode::Auto, PermissionCeiling::unrestricted());
+        permissions.allow_configured_effect_for("config:provider", "AutoCompact", &provider_effect);
+        permissions.replace_rules(vec![PermissionRule {
+            capability: Some("AutoCompact".into()),
+            action: None,
+            effect_class: Some(solaris_types::effect::EffectClass::Network),
+            resource_prefixes: Vec::new(),
+            decision: PermissionDecision::Allow,
+        }]);
+        let ledger = Arc::new(InMemoryRuntimeLedger::default());
+        let run_id = RunId::from("autocompact-unknown-run");
+        let context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("root"),
+            ledger.clone(),
+            permissions,
+            OperationEnvironmentSnapshot::default(),
+        );
+        let messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "summarize me".to_owned(),
+            }],
+        )];
+        let config = CompactConfig::default();
+        let first_context = context.clone();
+        let first_messages = messages.clone();
+        let first_config = config.clone();
+        let first_effect = provider_effect.clone();
+        let running = tokio::spawn(async move {
+            let mut state = CompactState::new();
+            autocompact_with_effect(
+                &BlockingProvider,
+                &first_messages,
+                "model",
+                &first_config,
+                &mut state,
+                &first_context,
+                &first_effect,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if ledger
+                    .records_for_run(&run_id)
+                    .unwrap()
+                    .iter()
+                    .any(|record| record.record_type == "effect_intent")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        running.abort();
+        let _ = running.await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut resumed_state = CompactState::new();
+        let error = autocompact_with_effect(
+            &CountingProvider(calls.clone()),
+            &messages,
+            "changed-model",
+            &config,
+            &mut resumed_state,
+            &context,
+            &provider_effect,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CompactError::ReconciliationRequired(_)),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

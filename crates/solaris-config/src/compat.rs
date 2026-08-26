@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use solaris_types::provider_contract::CacheTokenAccounting;
 
 /// Provider-level compatibility settings.
 /// Each child struct is flattened so on-disk TOML remains backward-compatible.
@@ -22,6 +23,8 @@ pub struct ProviderCompat {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TransportCompat {
+    /// Open wire protocol identifier, independent from deployment/auth provider.
+    pub protocol_id: Option<String>,
     /// Field name for max tokens in request body.
     /// Default: "max_tokens" for all providers.
     pub max_tokens_field: Option<String>,
@@ -45,6 +48,21 @@ pub struct TransportCompat {
     /// Whether OpenAI-compatible requests include stream_options.
     /// Default: true for OpenAI-compatible providers.
     pub include_stream_options: Option<bool>,
+
+    /// Whether cache tokens are included in the provider's input token count.
+    pub cache_token_accounting: Option<CacheTokenAccounting>,
+
+    /// Price per one million uncached input tokens.
+    pub input_cost_per_million: Option<f64>,
+
+    /// Price per one million cache-read tokens.
+    pub cache_read_cost_per_million: Option<f64>,
+
+    /// Price per one million cache-write tokens.
+    pub cache_write_cost_per_million: Option<f64>,
+
+    /// Price per one million output tokens.
+    pub output_cost_per_million: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
@@ -142,12 +160,22 @@ pub struct ReasoningCompat {
 impl TransportCompat {
     fn merge(defaults: Self, user: Self) -> Self {
         Self {
+            protocol_id: user.protocol_id.or(defaults.protocol_id),
             max_tokens_field: user.max_tokens_field.or(defaults.max_tokens_field),
             default_max_tokens: user.default_max_tokens.or(defaults.default_max_tokens),
             model_max_tokens: user.model_max_tokens.or(defaults.model_max_tokens),
             api_path: user.api_path.or(defaults.api_path),
             max_request_body_bytes: user.max_request_body_bytes.or(defaults.max_request_body_bytes),
             include_stream_options: user.include_stream_options.or(defaults.include_stream_options),
+            cache_token_accounting: user.cache_token_accounting.or(defaults.cache_token_accounting),
+            input_cost_per_million: user.input_cost_per_million.or(defaults.input_cost_per_million),
+            cache_read_cost_per_million: user
+                .cache_read_cost_per_million
+                .or(defaults.cache_read_cost_per_million),
+            cache_write_cost_per_million: user
+                .cache_write_cost_per_million
+                .or(defaults.cache_write_cost_per_million),
+            output_cost_per_million: user.output_cost_per_million.or(defaults.output_cost_per_million),
         }
     }
 }
@@ -205,6 +233,7 @@ impl ProviderCompat {
             transport: TransportCompat {
                 default_max_tokens: Some(128_000),
                 model_max_tokens: Some(anthropic_model_max_tokens_rules()),
+                cache_token_accounting: Some(CacheTokenAccounting::SeparateFromInput),
                 ..Default::default()
             },
             messages: MessageCompat {
@@ -233,6 +262,7 @@ impl ProviderCompat {
             transport: TransportCompat {
                 default_max_tokens: Some(128_000),
                 model_max_tokens: Some(anthropic_model_max_tokens_rules()),
+                cache_token_accounting: Some(CacheTokenAccounting::SeparateFromInput),
                 ..Default::default()
             },
             messages: MessageCompat {
@@ -264,6 +294,7 @@ impl ProviderCompat {
                 max_tokens_field: Some("max_tokens".into()),
                 api_path: Some("/chat/completions".into()),
                 include_stream_options: Some(true),
+                cache_token_accounting: Some(CacheTokenAccounting::IncludedInInput),
                 ..Default::default()
             },
             messages: MessageCompat {
@@ -300,6 +331,10 @@ impl ProviderCompat {
     }
 
     // --- Resolved accessors (Option<bool> → bool with false default) ---
+
+    pub fn protocol_id(&self) -> Option<&str> {
+        self.transport.protocol_id.as_deref()
+    }
 
     pub fn max_tokens_field(&self) -> &str {
         self.transport.max_tokens_field.as_deref().unwrap_or("max_tokens")

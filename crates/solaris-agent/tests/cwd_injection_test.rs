@@ -2,13 +2,36 @@
 //! rather than the process working directory.
 
 use std::fs;
+use std::sync::Arc;
 
 use serde_json::json;
+use solaris_process::{
+    ManagedChild, ProcessLaunchPolicy, ProcessSpawn, ProcessSpawnAuthorization, ProcessSpawnAuthorizer,
+};
 use solaris_tools::Tool;
 use solaris_tools::exec_command::ExecCommandTool;
 use solaris_tools::glob::GlobTool;
 use solaris_tools::grep::GrepTool;
 use tempfile::tempdir;
+
+struct TestSpawnAuthorizer;
+
+impl ProcessSpawnAuthorizer for TestSpawnAuthorizer {
+    fn authorize_and_spawn(&self, spawn: ProcessSpawn) -> std::io::Result<ManagedChild> {
+        spawn(ProcessLaunchPolicy::Ambient)
+    }
+}
+
+async fn execute_approved(tool: &ExecCommandTool, input: serde_json::Value) -> solaris_types::tool::ToolResult {
+    let context = tool
+        .prepare_effect("cwd-injection-test", &input)
+        .unwrap()
+        .into_parts()
+        .1
+        .with_process_launch_policy(ProcessLaunchPolicy::Ambient)
+        .with_process_spawn_authorization(ProcessSpawnAuthorization::new(Arc::new(TestSpawnAuthorizer)));
+    tool.prepare_execution(input, context).unwrap().execute().await
+}
 
 // Windows `cd` outputs 8.3 short names (RUNNER~1) that don't match canonicalized paths;
 // exec_command_tool_with_file_operations_uses_correct_cwd covers the same behavior reliably.
@@ -18,7 +41,7 @@ async fn exec_command_tool_executes_in_injected_cwd_not_process_cwd() {
     let workspace = tempdir().unwrap();
     let tool = ExecCommandTool::new(workspace.path().to_path_buf());
 
-    let result = tool.execute(json!({"cmd": "pwd"})).await;
+    let result = execute_approved(&tool, json!({"cmd": "pwd"})).await;
 
     assert!(!result.is_error, "unexpected error: {}", result.content);
     let expected = workspace
@@ -77,7 +100,7 @@ async fn exec_command_tool_with_file_operations_uses_correct_cwd() {
     fs::write(workspace.path().join("canary.txt"), "found_it").unwrap();
 
     let tool = ExecCommandTool::new(workspace.path().to_path_buf());
-    let result = tool.execute(json!({"cmd": "cat canary.txt"})).await;
+    let result = execute_approved(&tool, json!({"cmd": "cat canary.txt"})).await;
 
     assert!(!result.is_error, "unexpected error: {}", result.content);
     assert!(

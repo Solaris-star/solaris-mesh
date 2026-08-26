@@ -1,10 +1,13 @@
 [package]
 name = "solaris-tools"
-description = "Built-in agent tools for Solaris CLI (Read, Write, Edit, ExecCommand, Grep, Glob, Spawn)"
+description = "Built-in tools and effect surfaces for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[features]
+sandbox-test-fixtures = ["solaris-process/sandbox-test-fixtures"]
 
 [dependencies]
 solaris-types.workspace    = true
@@ -20,8 +23,18 @@ serde_json.workspace  = true
 async-trait.workspace = true
 anyhow.workspace      = true
 glob.workspace        = true
+regex.workspace       = true
+sha2.workspace        = true
 lru.workspace         = true
+cap-std.workspace     = true
 workspace-hack.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+solaris-process = { path = "../solaris-process", features = ["sandbox-test-fixtures"] }

@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
+use serde_json::Value;
 use solaris_config::compact::CompactConfig;
 use solaris_types::message::{ContentBlock, Message, Role};
 
@@ -72,7 +73,23 @@ fn count_trigger(messages: &[Message], config: &CompactConfig) -> bool {
 /// Already-cleared results are left untouched and do not count toward
 /// the keep budget.
 pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> MicrocompactResult {
+    microcompact_with_observer(messages, config, |_, _| {})
+}
+
+/// Clear old tool results and report the exact tool inputs whose results were removed.
+///
+/// This crate-private observer lets the engine invalidate result-backed tool
+/// caches without widening [`MicrocompactResult`]'s public API.
+pub(crate) fn microcompact_with_observer<F>(
+    messages: &mut [Message],
+    config: &CompactConfig,
+    mut on_compacted: F,
+) -> MicrocompactResult
+where
+    F: FnMut(&str, &Value),
+{
     let tool_names = build_tool_name_map(messages);
+    let tool_inputs = build_tool_input_map(messages);
     let compactable_set: HashSet<&str> = config.compactable_tools.iter().map(String::as_str).collect();
 
     // Collect (message_index, block_index) of all compactable, non-cleared
@@ -93,11 +110,18 @@ pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> Microco
     let mut tokens_freed = 0usize;
 
     for &(mi, bi) in to_clear {
+        let compacted_tool = match &messages[mi].content[bi] {
+            ContentBlock::ToolResult { tool_use_id, .. } => tool_inputs.get(tool_use_id).cloned(),
+            _ => None,
+        };
         if let ContentBlock::ToolResult { content, .. } = &mut messages[mi].content[bi] {
             // Rough token estimate: ~4 chars per token.
             tokens_freed += content.len() / 4;
             *content = CLEARED_TOOL_RESULT.to_string();
             cleared_count += 1;
+            if let Some((name, input)) = compacted_tool.as_ref() {
+                on_compacted(name, input);
+            }
         }
     }
 
@@ -117,6 +141,18 @@ fn build_tool_name_map(messages: &[Message]) -> HashMap<String, String> {
         for block in &msg.content {
             if let ContentBlock::ToolUse { id, name, .. } = block {
                 map.insert(id.clone(), name.clone());
+            }
+        }
+    }
+    map
+}
+
+fn build_tool_input_map(messages: &[Message]) -> HashMap<String, (String, Value)> {
+    let mut map = HashMap::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, input, .. } = block {
+                map.insert(id.clone(), (name.clone(), input.clone()));
             }
         }
     }

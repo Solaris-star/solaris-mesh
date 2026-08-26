@@ -310,13 +310,18 @@ fn tc_5_5_stdout_trailing_newline_trimmed() {
 // TC-6: execute_shell_commands
 // -----------------------------------------------------------------------
 
-// TC-6.1: MCP skill → 跳过执行，返回原文
+// TC-6.1: MCP skills still enforce the embedded-command limit.
 #[tokio::test]
-async fn tc_6_1_mcp_skill_unchanged() {
+async fn tc_6_1_mcp_skill_rejects_multiple_commands() {
     let tmp = std::env::temp_dir();
     let content = "run: !`pwd` and ```!\nls\n```";
-    let result = execute_shell_commands(content, LoadedFrom::Mcp, &tmp).await.unwrap();
-    assert_eq!(result, content, "MCP skill content should be returned unchanged");
+    let error = execute_shell_commands(content, LoadedFrom::Mcp, &tmp)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ShellExecutionError::TooManyCommands { count: 2, limit: 1 }
+    ));
 }
 
 // TC-6.2: 无 shell 命令 → 原文不变
@@ -351,28 +356,26 @@ async fn tc_6_4_inline_replaced_leading_space_preserved() {
     assert!(result.contains("mydir"));
 }
 
-// TC-6.5: 多命令并行执行 — 两者都替换
+// TC-6.5: Multiple embedded commands are rejected before execution.
 #[tokio::test]
-async fn tc_6_5_multiple_commands_all_replaced() {
+async fn tc_6_5_multiple_commands_are_rejected() {
     let content = "A: !`echo aaa` B: !`echo bbb`";
-    let result = run(content).await.unwrap();
-    assert!(result.contains("aaa"), "first command missing: {result}");
-    assert!(result.contains("bbb"), "second command missing: {result}");
-    assert!(!result.contains("!`"), "shell syntax should be replaced");
+    let error = run(content).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ShellExecutionError::TooManyCommands { count: 2, limit: 1 }
+    ));
 }
 
-// TC-6.7: 从后向前替换 — 前面替换不影响后面位置
+// TC-6.7: The one-command limit applies before replacement.
 #[tokio::test]
-async fn tc_6_7_back_to_front_replacement() {
-    // Two inline commands; the first replacement should not corrupt the second
+async fn tc_6_7_multiple_replacements_are_not_started() {
     let content = "X: !`echo first` Y: !`echo second`";
-    let result = run(content).await.unwrap();
-    assert!(result.contains("first"));
-    assert!(result.contains("second"));
-    // Verify ordering: "X:" before "Y:"
-    let x_pos = result.find("X:").unwrap();
-    let y_pos = result.find("Y:").unwrap();
-    assert!(x_pos < y_pos, "X should come before Y in result: {result}");
+    let error = run(content).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ShellExecutionError::TooManyCommands { count: 2, limit: 1 }
+    ));
 }
 
 // TC-6.8: Block 命令 + 周围文本保留
@@ -452,14 +455,13 @@ async fn tc_15_4_multiline_block_executed_as_script() {
     assert!(result.contains("line2"));
 }
 
-// TC-15.6: 同一命令多次出现
+// TC-15.6: Repeating the same command still exceeds the count limit.
 #[tokio::test]
-async fn tc_15_6_same_command_repeated() {
+async fn tc_15_6_same_command_repeated_is_rejected() {
     let content = "!`echo x` and !`echo x`";
-    let result = run(content).await.unwrap();
-    // Both occurrences of !`echo x` should be replaced
-    assert!(!result.contains("!`"), "both occurrences should be replaced: {result}");
-    // Should contain "x" — at least once from each replacement
-    // On Windows cmd, echo may include trailing space; just verify no backtick syntax remains
-    assert!(result.contains('x'), "expected 'x' in result: {result}");
+    let error = run(content).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ShellExecutionError::TooManyCommands { count: 2, limit: 1 }
+    ));
 }

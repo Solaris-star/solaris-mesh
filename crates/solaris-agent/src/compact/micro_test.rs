@@ -41,6 +41,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: blocks,
+            provider_metadata: Default::default(),
             timestamp: Some(ts),
         }
     }

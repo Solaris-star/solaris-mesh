@@ -2,14 +2,84 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use serde_json::json;
+    use solaris_process::{
+        ManagedChild, ProcessLaunchPolicy, ProcessSpawn, ProcessSpawnAuthorization, ProcessSpawnAuthorizer,
+    };
+
+    struct TestSpawnAuthorizer(ProcessLaunchPolicy);
+
+    impl ProcessSpawnAuthorizer for TestSpawnAuthorizer {
+        fn authorize_and_spawn(&self, spawn: ProcessSpawn) -> std::io::Result<ManagedChild> {
+            spawn(self.0.clone())
+        }
+    }
+
+    struct NetworkProxyUnavailableAuthorizer(solaris_process::SandboxReport);
+
+    impl ProcessSpawnAuthorizer for NetworkProxyUnavailableAuthorizer {
+        fn authorize_and_spawn(&self, _spawn: ProcessSpawn) -> std::io::Result<ManagedChild> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                solaris_process::SandboxError::NetworkProxyUnavailable { report: self.0 },
+            ))
+        }
+    }
+
+    fn authorized_context(context: ToolExecutionContext, policy: ProcessLaunchPolicy) -> ToolExecutionContext {
+        context
+            .with_process_launch_policy(policy.clone())
+            .with_process_spawn_authorization(ProcessSpawnAuthorization::new(Arc::new(TestSpawnAuthorizer(policy))))
+    }
+
+    async fn execute_approved(tool: &ExecCommandTool, input: Value) -> ToolResult {
+        let context = match tool.prepare_effect("test-approved-effect", &input) {
+            Ok(prepared) => authorized_context(prepared.into_parts().1, ProcessLaunchPolicy::Ambient),
+            Err(error) => {
+                return ToolResult {
+                    content: error,
+                    is_error: true,
+                };
+            }
+        };
+        match tool.prepare_execution(input, context) {
+            Ok(prepared) => prepared.execute().await,
+            Err(error) => ToolResult {
+                content: error,
+                is_error: true,
+            },
+        }
+    }
+
+    #[test]
+    fn description_warns_about_powershell_statement_chaining() {
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+
+        assert!(tool.description().contains("PowerShell"));
+        assert!(tool.description().contains("assignments or control-flow statements"));
+    }
+
+    #[tokio::test]
+    async fn direct_execute_rejects_the_ambient_compatibility_path() {
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+
+        let result = tool.execute(json!({"cmd": "echo must-not-run"})).await;
+
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            "ExecCommand requires an approved process spawn authorization"
+        );
+    }
 
     #[tokio::test]
     async fn execute_echo_returns_stdout() {
         let tool = ExecCommandTool::new(std::env::temp_dir());
         let input = json!({"cmd": "echo hello_exec_command"});
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(result.content.contains("hello_exec_command"));
     }
@@ -18,8 +88,102 @@ mod tests {
     async fn execute_invalid_command_returns_error() {
         let tool = ExecCommandTool::new(std::env::temp_dir());
         let input = json!({"cmd": "nonexistent_command_xyz_123"});
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn unavailable_network_proxy_is_denied_with_typed_report_metadata() {
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+        let input = json!({"cmd": "echo must-not-run"});
+        let report = solaris_process::SandboxReport::new(
+            solaris_process::SandboxEnforcement::Unavailable,
+            solaris_process::SandboxBackend::WindowsAppContainer,
+            solaris_process::SandboxReason::NetworkProxyUnavailable,
+        );
+        let context = tool
+            .prepare_effect("sandbox-report", &input)
+            .unwrap()
+            .into_parts()
+            .1
+            .with_process_launch_policy(ProcessLaunchPolicy::Ambient)
+            .with_process_spawn_authorization(ProcessSpawnAuthorization::new(Arc::new(
+                NetworkProxyUnavailableAuthorizer(report),
+            )));
+
+        let result = tool
+            .prepare_execution(input, context)
+            .unwrap()
+            .execute_classified()
+            .await;
+
+        assert_eq!(result.status, ToolResultStatus::Denied);
+        assert_eq!(
+            result.metadata.and_then(|metadata| metadata.sandbox_report),
+            Some(report)
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_network_policy_denies_exec_command_before_the_marker_is_created() {
+        let workspace = tempfile::tempdir().unwrap();
+        let marker = workspace.path().join("must-not-start");
+        let command = format!(
+            "Set-Content -LiteralPath '{}' -Value started",
+            marker.to_string_lossy().replace('\'', "''")
+        );
+        let input = json!({
+            "cmd": command,
+            "shell": "powershell",
+            "network_domains": ["https://allowed.example.test"]
+        });
+        let policy = ProcessLaunchPolicy::workspace_sandbox_with_network(
+            workspace.path(),
+            [],
+            [],
+            ["https://allowed.example.test"],
+        )
+        .unwrap();
+        let tool = ExecCommandTool::new(workspace.path().to_path_buf());
+        let context = authorized_context(
+            tool.prepare_effect("windows-network-marker", &input)
+                .unwrap()
+                .into_parts()
+                .1,
+            policy,
+        );
+
+        let result = tool
+            .prepare_execution(input, context)
+            .unwrap()
+            .execute_classified()
+            .await;
+
+        assert_eq!(result.status, ToolResultStatus::Denied);
+        assert_eq!(
+            result.metadata.and_then(|metadata| metadata.sandbox_report),
+            Some(solaris_process::SandboxReport::new(
+                solaris_process::SandboxEnforcement::Unavailable,
+                solaris_process::SandboxBackend::WindowsAppContainer,
+                solaris_process::SandboxReason::NetworkProxyUnavailable,
+            ))
+        );
+        assert!(!marker.exists(), "network-bearing ExecCommand reached target spawn");
+    }
+
+    #[tokio::test]
+    async fn invalid_shell_error_does_not_expose_requested_path() {
+        let sentinel = "super-secret-token-shell";
+        let shell = std::env::temp_dir().join(sentinel).join("missing-shell");
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+
+        let result = execute_approved(&tool, json!({"cmd": "echo safe", "shell": shell})).await;
+
+        assert!(result.is_error);
+        assert!(!result.content.contains(sentinel));
+        assert!(result.content.contains("Invalid shell selection"));
+        assert!(result.content.contains("sha256:"));
     }
 
     #[tokio::test]
@@ -33,7 +197,7 @@ mod tests {
             "cat cwd_proof.txt"
         };
         let input = json!({"cmd": cmd});
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
             result.content.contains("proof"),
@@ -46,17 +210,262 @@ mod tests {
     async fn execute_injects_runtime_env() {
         let tool = ExecCommandTool::new_with_env(
             std::env::temp_dir(),
-            vec![("SOLARIS_RUNTIME_ENV_TEST".to_string(), "exec-env-value".to_string())],
+            vec![("SOLARIS_MAX_ACTIVE_AGENTS".to_string(), "4".to_string())],
         );
         #[cfg(windows)]
-        let input = json!({"cmd": "Write-Output $env:SOLARIS_RUNTIME_ENV_TEST", "shell": "powershell"});
+        let input = json!({"cmd": "Write-Output $env:SOLARIS_MAX_ACTIVE_AGENTS", "shell": "powershell"});
         #[cfg(not(windows))]
-        let input = json!({"cmd": "printf '%s' \"$SOLARIS_RUNTIME_ENV_TEST\"", "shell": "sh"});
+        let input = json!({"cmd": "printf '%s' \"$SOLARIS_MAX_ACTIVE_AGENTS\"", "shell": "sh"});
 
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
 
         assert!(!result.is_error, "unexpected error: {}", result.content);
-        assert!(result.content.contains("exec-env-value"));
+        assert!(result.content.contains('4'));
+    }
+
+    #[tokio::test]
+    async fn execute_does_not_inherit_secret_runtime_env() {
+        let sentinel = "must-not-reach-child";
+        let tool = ExecCommandTool::new_with_env(
+            std::env::temp_dir(),
+            vec![
+                ("API_KEY".to_owned(), sentinel.to_owned()),
+                ("AWS_SECRET_ACCESS_KEY".to_owned(), sentinel.to_owned()),
+                ("GH_TOKEN".to_owned(), sentinel.to_owned()),
+                ("SOLARIS_MAX_PRIVATE_TOKEN".to_owned(), sentinel.to_owned()),
+            ],
+        );
+        #[cfg(windows)]
+        let input = json!({
+            "cmd": "Write-Output \"$env:API_KEY|$env:AWS_SECRET_ACCESS_KEY|$env:GH_TOKEN|$env:SOLARIS_MAX_PRIVATE_TOKEN\"",
+            "shell": "powershell"
+        });
+        #[cfg(not(windows))]
+        let input = json!({
+            "cmd": "printf '%s|%s|%s|%s' \"$API_KEY\" \"$AWS_SECRET_ACCESS_KEY\" \"$GH_TOKEN\" \"$SOLARIS_MAX_PRIVATE_TOKEN\"",
+            "shell": "sh"
+        });
+
+        let result = execute_approved(&tool, input).await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(!result.content.contains(sentinel));
+    }
+
+    #[tokio::test]
+    async fn prepared_execution_rejects_shell_replaced_after_approval() {
+        let source = solaris_config::shell::resolve_shell(Some("auto")).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let sentinel = "super-secret-token-shell";
+        let secret_directory = directory.path().join(sentinel);
+        std::fs::create_dir(&secret_directory).unwrap();
+        let copied = secret_directory.join(source.path.file_name().unwrap());
+        std::fs::copy(&source.path, &copied).unwrap();
+        let tool = ExecCommandTool::new(directory.path().to_path_buf());
+        let input = json!({"cmd": "echo should-not-run", "shell": copied});
+        let (effect, execution) = tool
+            .prepare_effect("approved-effect", &input)
+            .expect("approval should capture executable identity")
+            .into_parts();
+        let execution = authorized_context(execution, ProcessLaunchPolicy::Ambient);
+        assert!(
+            effect
+                .resources
+                .external_resources
+                .iter()
+                .any(|resource| resource.starts_with("exec-shell-executable:sha256:"))
+        );
+        std::fs::write(&copied, b"replaced shell bytes").unwrap();
+
+        let error = match tool.prepare_execution(input, execution) {
+            Ok(_) => panic!("replacement must be rejected before intent"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("changed before execution"));
+        assert!(!error.contains(sentinel));
+    }
+
+    #[test]
+    fn effect_aware_execution_rejects_missing_launch_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("must-not-launch");
+        #[cfg(windows)]
+        let command = format!(
+            "Set-Content -LiteralPath '{}' -Value launched",
+            marker.to_string_lossy().replace('\'', "''")
+        );
+        #[cfg(not(windows))]
+        let command = format!("printf launched > '{}'", marker.to_string_lossy());
+        let tool = ExecCommandTool::new(directory.path().to_path_buf());
+        let input = json!({"cmd": command});
+        let context = tool.prepare_effect("approved-effect", &input).unwrap().into_parts().1;
+
+        let error = match tool.prepare_execution(input, context) {
+            Ok(_) => panic!("missing engine launch policy must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "approved process launch policy is missing");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn effect_aware_execution_rejects_missing_spawn_authorization() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("must-not-launch");
+        #[cfg(windows)]
+        let command = format!(
+            "Set-Content -LiteralPath '{}' -Value launched",
+            marker.to_string_lossy().replace('\'', "''")
+        );
+        #[cfg(not(windows))]
+        let command = format!("printf launched > '{}'", marker.to_string_lossy());
+        let tool = ExecCommandTool::new(directory.path().to_path_buf());
+        let input = json!({"cmd": command});
+        let context = tool
+            .prepare_effect("approved-effect", &input)
+            .unwrap()
+            .into_parts()
+            .1
+            .with_process_launch_policy(ProcessLaunchPolicy::Ambient);
+
+        let error = match tool.prepare_execution(input, context) {
+            Ok(_) => panic!("missing process spawn authorization must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "approved process spawn authorization is missing");
+        assert!(!marker.exists());
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn workspace_launch_policy_writes_only_inside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let workspace_marker = workspace.path().join("workspace-marker");
+        let outside_marker = outside.path().join("outside-marker");
+        #[cfg(windows)]
+        let command = format!(
+            "Set-Content -LiteralPath '{}' -Value denied; Set-Content -LiteralPath '{}' -Value launched",
+            outside_marker.to_string_lossy().replace('\'', "''"),
+            workspace_marker.to_string_lossy().replace('\'', "''")
+        );
+        #[cfg(target_os = "macos")]
+        let command = format!(
+            "printf denied > '{}'; printf launched > '{}'",
+            outside_marker.to_string_lossy().replace('\'', "'\\''"),
+            workspace_marker.to_string_lossy().replace('\'', "'\\''")
+        );
+        let tool = ExecCommandTool::new(workspace.path().to_path_buf());
+        let input = json!({"cmd": command});
+        let policy = ProcessLaunchPolicy::workspace_sandbox(workspace.path(), [state.path().to_path_buf()]);
+        let context = authorized_context(
+            tool.prepare_effect("approved-effect", &input).unwrap().into_parts().1,
+            policy,
+        );
+
+        let result = tool.prepare_execution(input, context).unwrap().execute().await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(workspace_marker.exists());
+        assert!(!outside_marker.exists());
+    }
+
+    #[tokio::test]
+    async fn execute_terminates_when_process_output_exceeds_budget() {
+        let tool = ExecCommandTool::new_with_env(
+            std::env::temp_dir(),
+            vec![("SOLARIS_MAX_PROCESS_OUTPUT_BYTES".to_owned(), "1024".to_owned())],
+        );
+        #[cfg(windows)]
+        let input = json!({
+            "cmd": "while ($true) { [Console]::Out.Write('0123456789') }",
+            "shell": "powershell",
+            "timeout": 10000
+        });
+        #[cfg(not(windows))]
+        let input = json!({
+            "cmd": "while :; do printf '0123456789'; done",
+            "shell": "sh",
+            "timeout": 10000
+        });
+
+        let result = execute_approved(&tool, input).await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("output exceeded 1024 bytes"));
+        assert!(result.content.len() < 4096);
+    }
+
+    #[test]
+    fn effect_declares_resolved_shell_executable_and_exact_argv() {
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+        let resolved = solaris_config::shell::resolve_shell(Some("auto")).unwrap();
+        let expected_identity = solaris_process::inspect_executable(&resolved.path).unwrap();
+        let first = tool.describe_effect(&json!({"cmd": "echo first"}));
+        let second = tool.describe_effect(&json!({"cmd": "echo second"}));
+        assert_eq!(first.resources.process_invocations.len(), 1);
+        assert!(first.resources.process_invocations[0].executable.starts_with("sha256:"));
+        assert_eq!(
+            first.resources.process_invocations[0].executable,
+            expected_identity.path_digest()
+        );
+        assert_ne!(
+            first.resources.process_invocations[0].argv,
+            second.resources.process_invocations[0].argv
+        );
+        assert!(first.resources.unrestricted_file_reads);
+        assert!(first.resources.unrestricted_file_writes);
+        assert!(!first.resources.unrestricted_network);
+        assert!(first.resources.unrestricted_process);
+    }
+
+    #[test]
+    fn effect_declares_only_explicit_network_domains() {
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+        let offline = tool.describe_effect(&json!({"cmd": "echo offline"}));
+        let online = tool.describe_effect(&json!({
+            "cmd": "echo online",
+            "network_domains": ["https://api.example.test/v1"]
+        }));
+
+        assert!(offline.resources.network_domains.is_empty());
+        assert!(!offline.resources.unrestricted_network);
+        assert_eq!(online.resources.network_domains, ["https://api.example.test/v1"]);
+        assert!(!online.resources.unrestricted_network);
+    }
+
+    #[test]
+    fn effect_audit_projection_hides_command_and_argv_but_keeps_stable_identity() {
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+        let secret = "super-secret-token";
+        let descriptor = tool.describe_effect(&json!({
+            "cmd": format!("deploy --token {secret}"),
+            "shell": "auto"
+        }));
+
+        assert!(descriptor.resources.process_commands[0].contains(secret));
+        assert!(
+            descriptor.resources.process_invocations[0]
+                .argv
+                .iter()
+                .any(|argument| argument.contains(secret))
+        );
+
+        let first = solaris_types::effect::EffectAuditProjection::from_descriptor(&descriptor);
+        let second = solaris_types::effect::EffectAuditProjection::from_descriptor(&descriptor);
+        let serialized = serde_json::to_string(&first).unwrap();
+
+        assert_eq!(first, second);
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("deploy --token"));
+        assert!(first.descriptor_digest.starts_with("sha256:"));
+        assert_eq!(first.executables.len(), 1);
+        assert!(!first.executables[0].executable_digest.is_empty());
+        assert!(first.executables[0].argv_count >= 2);
     }
 
     #[tokio::test]
@@ -72,7 +481,7 @@ mod tests {
             "timeout": 1500
         });
 
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
 
         assert!(result.is_error, "timeout should be an error: {}", result.content);
         assert!(
@@ -88,6 +497,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_execution_timeout_has_timeout_status() {
+        let tool = ExecCommandTool::new(std::env::temp_dir());
+        #[cfg(windows)]
+        let input = json!({
+            "cmd": "Start-Sleep -Seconds 5",
+            "shell": "powershell",
+            "timeout": 10
+        });
+        #[cfg(not(windows))]
+        let input = json!({"cmd": "sleep 5", "shell": "sh", "timeout": 10});
+        let context = authorized_context(
+            tool.prepare_effect("timeout-status", &input).unwrap().into_parts().1,
+            ProcessLaunchPolicy::Ambient,
+        );
+
+        let result = tool
+            .prepare_execution(input, context)
+            .unwrap()
+            .execute_classified()
+            .await;
+
+        assert_eq!(result.status, solaris_types::tool::ToolResultStatus::Timeout);
+    }
+
+    #[tokio::test]
     async fn execute_timeout_preserves_stderr_emitted_before_timeout() {
         let tool = ExecCommandTool::new(std::env::temp_dir());
         #[cfg(windows)]
@@ -100,7 +534,7 @@ mod tests {
             "timeout": 1500
         });
 
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
 
         assert!(result.is_error, "timeout should be an error: {}", result.content);
         assert!(
@@ -128,7 +562,7 @@ mod tests {
             "timeout": 1500
         });
 
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
 
         assert!(result.is_error, "timeout should be an error: {}", result.content);
         assert!(
@@ -157,7 +591,7 @@ mod tests {
             "shell": "powershell"
         });
 
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
 
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
@@ -176,7 +610,7 @@ mod tests {
             "shell": "powershell"
         });
 
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
 
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
@@ -195,7 +629,7 @@ mod tests {
             "shell": "cmd"
         });
 
-        let result = tool.execute(input).await;
+        let result = execute_approved(&tool, input).await;
 
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(

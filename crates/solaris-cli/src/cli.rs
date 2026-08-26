@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "solaris",
-    about = "Solaris CLI, a multi-provider AI agent with tool orchestration support",
+    about = "Solaris Mesh CLI — lightweight access to the multi-agent runtime",
     version
 )]
 pub(crate) struct Cli {
@@ -57,14 +57,44 @@ pub(crate) struct Cli {
 
     // --- Prompt / profile ---
     /// Custom system prompt
-    #[arg(long)]
+    #[arg(long, env = "SYSTEM_PROMPT")]
     pub(crate) system_prompt: Option<String>,
 
     /// Named profile from config file
     #[arg(long)]
     pub(crate) profile: Option<String>,
 
-    /// Auto-approve all tool executions (skip confirmation)
+    /// Permission posture: plan, auto (default), or bypass.
+    #[arg(long, value_parser = ["plan", "auto", "bypass"])]
+    pub(crate) permission: Option<String>,
+
+    /// Execution intensity: low, medium, high, xhigh, extra, or ultracode.
+    #[arg(long, value_parser = ["low", "medium", "high", "xhigh", "extra", "ultracode"])]
+    pub(crate) intensity: Option<String>,
+
+    /// Multi-agent policy: disabled, on_demand, or proactive.
+    #[arg(
+        long,
+        value_parser = ["disabled", "on_demand", "on-demand", "ondemand", "explicit", "adaptive", "proactive"]
+    )]
+    pub(crate) multi_agent_policy: Option<String>,
+
+    /// Collaboration strategy: auto, single, supervisor, team, fanout, or independent_reviewer.
+    #[arg(
+        long,
+        value_parser = ["auto", "single", "supervisor", "team", "fanout", "independent_reviewer", "independent-reviewer", "reviewer"]
+    )]
+    pub(crate) collaboration_strategy: Option<String>,
+
+    /// Maximum number of active Child Agents (1..=64).
+    #[arg(long, value_parser = clap::value_parser!(usize))]
+    pub(crate) max_active_agents: Option<usize>,
+
+    /// Maximum number of tasks registered by one Run (1..=256).
+    #[arg(long, value_parser = clap::value_parser!(u32))]
+    pub(crate) max_agent_tasks: Option<u32>,
+
+    /// Skip interactive tool approval while retaining auto permission isolation.
     #[arg(long)]
     pub(crate) auto_approve: bool,
 
@@ -89,6 +119,10 @@ pub(crate) struct Cli {
     /// Enable JSON streaming mode for host client integration
     #[arg(long)]
     pub(crate) json_stream: bool,
+
+    /// Exit after reporting process cleanup that still requires reconciliation.
+    #[arg(long)]
+    pub(crate) force_exit_with_pending_process_recovery: bool,
 
     /// Output compaction level: off, safe (default), full
     #[arg(long)]
@@ -135,6 +169,13 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: SkillsAction,
     },
+    /// Process sandbox package verification
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxAction,
+    },
+    /// Run Solaris Mesh as an Agent Client Protocol (ACP) agent over stdio.
+    Acp,
 }
 
 #[derive(Subcommand)]
@@ -163,6 +204,12 @@ pub(crate) enum SessionAction {
 pub(crate) enum SkillsAction {
     /// Print skill directory paths and exit
     Path,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SandboxAction {
+    /// Verify the packaged helper and run the strict platform sandbox probe
+    VerifyPackage,
 }
 
 #[cfg(test)]

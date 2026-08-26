@@ -10,6 +10,7 @@
 mod context;
 mod dispatch;
 mod message;
+mod outbox;
 mod pre_message;
 mod session;
 

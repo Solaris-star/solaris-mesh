@@ -61,6 +61,22 @@ mod tests {
     }
 
     #[test]
+    fn openai_stream_finish_flushes_a_deferred_terminal_event() {
+        let parser = OpenAiParser { auto_tool_id: false };
+        let mut state = parser.new_state();
+        let finish_frame = Frame {
+            event: None,
+            data: r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#.to_string(),
+            kind: FrameKind::Data,
+        };
+        let _ = parser.parse_frame(&finish_frame, &mut state);
+
+        let events = parser.finish(&mut state);
+
+        assert!(matches!(events.as_slice(), [LlmEvent::Done { .. }]));
+    }
+
+    #[test]
     fn anthropic_data_frame_routes_event_type_to_text_delta() {
         let parser = AnthropicParser;
         let mut state = parser.new_state();

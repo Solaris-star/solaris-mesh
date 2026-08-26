@@ -36,6 +36,10 @@ impl RetryPolicy {
             initial_http_5xx,
         }
     }
+
+    pub(crate) const fn single_attempt() -> Self {
+        Self::new(0, false, false, false)
+    }
 }
 
 pub(crate) async fn run_stream<Resp, SendFn, SendFut, ProcessFn, ProcessFut>(
@@ -62,7 +66,7 @@ where
     };
 
     let response = if policy.initial_http_5xx {
-        crate::retry::with_initial_http_5xx_retry(send_initial).await?
+        crate::retry::with_initial_http_retry(send_initial).await?
     } else {
         send_initial().await?
     };
@@ -98,7 +102,7 @@ where
 
                     let resend = send.clone();
                     let resend_result = if policy.initial_http_5xx {
-                        crate::retry::with_initial_http_5xx_retry(resend).await
+                        crate::retry::with_initial_http_retry(resend).await
                     } else {
                         resend().await
                     };

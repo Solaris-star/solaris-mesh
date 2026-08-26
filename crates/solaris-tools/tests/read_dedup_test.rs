@@ -31,7 +31,7 @@ async fn tc_5_3_01_first_read_returns_full_content() {
     std::fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
 
     let cache = make_cache();
-    let tool = ReadTool::new(Some(cache));
+    let tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     let input = json!({ "file_path": file.to_str().unwrap() });
     let result = tool.execute(input).await;
@@ -54,7 +54,7 @@ async fn tc_5_3_02_dedup_on_unchanged_file() {
     std::fs::write(&file, "line one\nline two\n").unwrap();
 
     let cache = make_cache();
-    let tool = ReadTool::new(Some(cache));
+    let tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     let input = json!({ "file_path": file.to_str().unwrap() });
 
@@ -72,6 +72,33 @@ async fn tc_5_3_02_dedup_on_unchanged_file() {
     );
 }
 
+/// When compaction removed the earlier tool result, callers can explicitly
+/// request the unchanged content without disabling dedup for normal reads.
+#[tokio::test]
+async fn force_restores_unchanged_content_after_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("compacted.txt");
+    std::fs::write(&file, "required context\n").unwrap();
+
+    let cache = make_cache();
+    let tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
+    let input = json!({ "file_path": file.to_str().unwrap() });
+
+    let first = tool.execute(input.clone()).await;
+    assert!(first.content.contains("required context"));
+    assert!(tool.execute(input).await.content.contains(UNCHANGED_MARKER));
+
+    let forced = tool
+        .execute(json!({
+            "file_path": file.to_str().unwrap(),
+            "force": true
+        }))
+        .await;
+    assert!(!forced.is_error);
+    assert!(forced.content.contains("required context"));
+    assert!(!forced.content.contains(UNCHANGED_MARKER));
+}
+
 /// TC-5.3-03: After external modification, re-read returns new content.
 #[tokio::test]
 async fn tc_5_3_03_modified_file_returns_new_content() {
@@ -80,7 +107,7 @@ async fn tc_5_3_03_modified_file_returns_new_content() {
     std::fs::write(&file, "version 1\n").unwrap();
 
     let cache = make_cache();
-    let tool = ReadTool::new(Some(cache));
+    let tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     let input = json!({ "file_path": file.to_str().unwrap() });
 
@@ -112,7 +139,7 @@ async fn tc_5_3_04_different_range_no_dedup() {
     std::fs::write(&file, &content).unwrap();
 
     let cache = make_cache();
-    let tool = ReadTool::new(Some(cache));
+    let tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     let path_str = file.to_str().unwrap();
 
@@ -143,7 +170,7 @@ async fn tc_5_3_05_cache_disabled_no_dedup() {
     let file = dir.path().join("nocache.txt");
     std::fs::write(&file, "always full\n").unwrap();
 
-    let tool = ReadTool::new(None);
+    let tool = ReadTool::new_with_workspace_root(None, dir.path());
     let input = json!({ "file_path": file.to_str().unwrap() });
 
     let r1 = tool.execute(input.clone()).await;
@@ -182,7 +209,7 @@ async fn tc_5_3_07_empty_file_dedup() {
     std::fs::File::create(&file).unwrap();
 
     let cache = make_cache();
-    let tool = ReadTool::new(Some(cache));
+    let tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     let input = json!({ "file_path": file.to_str().unwrap() });
 
@@ -206,7 +233,7 @@ async fn same_range_dedup() {
     std::fs::write(&file, &content).unwrap();
 
     let cache = make_cache();
-    let tool = ReadTool::new(Some(cache));
+    let tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     let input = json!({ "file_path": file.to_str().unwrap(), "offset": 5, "limit": 5 });
 
@@ -230,7 +257,7 @@ async fn cache_updated_after_modification() {
     std::fs::write(&file, "v1\n").unwrap();
 
     let cache = make_cache();
-    let tool = ReadTool::new(Some(cache.clone()));
+    let tool = ReadTool::new_with_workspace_root(Some(cache.clone()), dir.path());
 
     let input = json!({ "file_path": file.to_str().unwrap() });
 

@@ -6,8 +6,11 @@ use serde_json::{Value, json};
 
 use solaris_protocol::events::ToolCategory;
 use solaris_tools::Tool;
+use solaris_types::effect::{EffectClass, EffectDescriptor, EffectReplayPolicy, ResourceFootprint};
 use solaris_types::skill_types::{ContextModifier, PlanModeTransition};
 use solaris_types::tool::{JsonSchema, ToolResult};
+
+const MAX_PLAN_MARKDOWN_BYTES: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // EnterPlanModeTool
@@ -82,6 +85,18 @@ impl Tool for EnterPlanModeTool {
         })
     }
 
+    fn describe_effect(&self, _input: &Value) -> EffectDescriptor {
+        EffectDescriptor {
+            class: EffectClass::MeshStateMutation,
+            action: "enter legacy plan mode".into(),
+            resources: ResourceFootprint {
+                external_resources: vec!["mesh:plan-mode".into()],
+                ..Default::default()
+            },
+            replay_policy: EffectReplayPolicy::Idempotent,
+        }
+    }
+
     fn category(&self) -> ToolCategory {
         ToolCategory::Info
     }
@@ -118,15 +133,23 @@ impl Tool for ExitPlanModeTool {
     }
 
     fn description(&self) -> &str {
-        "Exit plan mode after completing your implementation plan. \
-         This restores full tool access so you can begin implementing the plan."
+        "Submit the complete markdown plan and exit plan mode. \
+         The plan must start with a # heading and is saved as a durable PlanArtifact."
     }
 
     fn input_schema(&self) -> JsonSchema {
         json!({
             "type": "object",
-            "properties": {},
-            "required": []
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "The complete markdown plan, starting with a # heading.",
+                    "minLength": 3,
+                    "maxLength": MAX_PLAN_MARKDOWN_BYTES
+                }
+            },
+            "required": ["plan"],
+            "additionalProperties": false
         })
     }
 
@@ -138,7 +161,7 @@ impl Tool for ExitPlanModeTool {
         true
     }
 
-    async fn execute(&self, _input: Value) -> ToolResult {
+    async fn execute(&self, input: Value) -> ToolResult {
         if !self.plan_active.load(Ordering::Acquire) {
             return ToolResult {
                 content: "Not in plan mode. Use EnterPlanMode to enter plan mode first.".to_string(),
@@ -146,19 +169,43 @@ impl Tool for ExitPlanModeTool {
             };
         }
 
+        let Some(plan) = validated_plan_markdown(&input) else {
+            return ToolResult {
+                content: "ExitPlanMode requires a non-empty markdown plan starting with a # heading and no larger than 1 MiB."
+                    .to_string(),
+                is_error: true,
+            };
+        };
+
         ToolResult {
-            content: "Exited plan mode. Full tool access has been restored. \
-                      You can now proceed with implementing the plan."
-                .to_string(),
+            content: format!(
+                "Saved plan artifact ({} bytes) and exited plan mode. Full tool access has been restored.",
+                plan.len()
+            ),
             is_error: false,
         }
     }
 
-    fn context_modifier_for(&self, _input: &Value) -> Option<ContextModifier> {
+    fn context_modifier_for(&self, input: &Value) -> Option<ContextModifier> {
+        let plan_content = validated_plan_markdown(input)?.to_owned();
         Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Exit { plan_content: None }),
+            plan_mode_transition: Some(PlanModeTransition::Exit {
+                plan_content: Some(plan_content),
+            }),
             ..Default::default()
         })
+    }
+
+    fn describe_effect(&self, _input: &Value) -> EffectDescriptor {
+        EffectDescriptor {
+            class: EffectClass::MeshStateMutation,
+            action: "exit legacy plan mode".into(),
+            resources: ResourceFootprint {
+                external_resources: vec!["mesh:plan-mode".into()],
+                ..Default::default()
+            },
+            replay_policy: EffectReplayPolicy::Idempotent,
+        }
     }
 
     fn category(&self) -> ToolCategory {
@@ -168,6 +215,11 @@ impl Tool for ExitPlanModeTool {
     fn describe(&self, _input: &Value) -> String {
         "Exit plan mode".to_string()
     }
+}
+
+fn validated_plan_markdown(input: &Value) -> Option<&str> {
+    let plan = input.get("plan")?.as_str()?.trim();
+    (plan.len() <= MAX_PLAN_MARKDOWN_BYTES && plan.starts_with("# ")).then_some(plan)
 }
 
 #[cfg(test)]

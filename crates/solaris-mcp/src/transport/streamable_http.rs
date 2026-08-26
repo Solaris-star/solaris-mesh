@@ -1,12 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
-use super::{McpError, McpTransport};
-use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use super::{
+    DUPLICATE_REQUEST_ID_MESSAGE, McpError, McpTransport, SERVER_ERROR_MESSAGE, redirect_safe_client, request_id,
+    validate_response_id,
+};
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse, parse_jsonrpc_response_message};
 
 /// Streamable HTTP transport: uses HTTP POST for both requests and responses
 /// Supports optional SSE streaming for server responses
@@ -15,7 +20,22 @@ pub struct StreamableHttpTransport {
     url: String,
     headers: HeaderMap,
     session_id: Mutex<Option<String>>,
+    in_flight: StdMutex<HashSet<u64>>,
     next_id: AtomicU64,
+}
+
+#[derive(Debug)]
+struct InFlightRequestId<'a> {
+    in_flight: &'a StdMutex<HashSet<u64>>,
+    request_id: u64,
+}
+
+impl Drop for InFlightRequestId<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.remove(&self.request_id);
+        }
+    }
 }
 
 impl StreamableHttpTransport {
@@ -26,21 +46,37 @@ impl StreamableHttpTransport {
             let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
                 .map_err(|e| McpError::Transport(format!("Invalid header name '{}': {}", k, e)))?;
             let value = HeaderValue::from_str(v)
-                .map_err(|e| McpError::Transport(format!("Invalid header value '{}': {}", v, e)))?;
+                .map_err(|e| McpError::Transport(format!("Invalid value for header '{}': {}", k, e)))?;
             header_map.insert(name, value);
         }
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: redirect_safe_client(url)?,
             url: url.to_string(),
             headers: header_map,
             session_id: Mutex::new(None),
+            in_flight: StdMutex::new(HashSet::new()),
             next_id: AtomicU64::new(1),
         })
     }
 
+    /// Allocate an ID for callers using the transport without `McpManager`.
     pub fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn register_request_id(&self, request_id: u64) -> Result<InFlightRequestId<'_>, McpError> {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .map_err(|_| McpError::Transport("MCP request state is unavailable".into()))?;
+        if !in_flight.insert(request_id) {
+            return Err(McpError::Transport(DUPLICATE_REQUEST_ID_MESSAGE.into()));
+        }
+        Ok(InFlightRequestId {
+            in_flight: &self.in_flight,
+            request_id,
+        })
     }
 
     /// Build request with session ID header if available
@@ -83,9 +119,23 @@ impl StreamableHttpTransport {
             let text = response
                 .text()
                 .await
-                .map_err(|e| McpError::Transport(format!("Read response body failed: {}", e)))?;
-            serde_json::from_str(&text)
-                .map_err(|e| McpError::Transport(format!("Parse JSON response failed: {} — raw: {}", e, text)))
+                .map_err(|e| McpError::Transport(format!("Read response body failed: {}", e.without_url())))?;
+            match parse_jsonrpc_response_message(text.as_bytes()) {
+                Ok(Some(response)) => Ok(response),
+                Ok(None) => Err(McpError::Transport(
+                    "HTTP request returned a JSON-RPC notification instead of a response".into(),
+                )),
+                Err(_) => {
+                    let mut hasher = Sha256::new();
+                    hasher.update(b"solaris.mcp/invalid-http-response/v1\0");
+                    hasher.update(text.as_bytes());
+                    Err(McpError::Transport(format!(
+                        "Parse JSON response failed; bytes={}; digest=sha256:{:x}",
+                        text.len(),
+                        hasher.finalize()
+                    )))
+                }
+            }
         }
     }
 
@@ -97,7 +147,7 @@ impl StreamableHttpTransport {
         let mut buffer = String::new();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e)))?;
+            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e.without_url())))?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             if let Some(rpc_response) = extract_jsonrpc_from_sse_buffer(&buffer) {
@@ -130,7 +180,7 @@ fn extract_jsonrpc_from_sse_buffer(buffer: &str) -> Option<JsonRpcResponse> {
 
         let data = data_lines.join("\n");
         if !data.is_empty()
-            && let Ok(rpc_response) = serde_json::from_str::<JsonRpcResponse>(&data)
+            && let Ok(Some(rpc_response)) = parse_jsonrpc_response_message(data.as_bytes())
         {
             return Some(rpc_response);
         }
@@ -142,6 +192,8 @@ fn extract_jsonrpc_from_sse_buffer(buffer: &str) -> Option<JsonRpcResponse> {
 #[async_trait]
 impl McpTransport for StreamableHttpTransport {
     async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+        let expected_id = request_id(req)?;
+        let _request_id = self.register_request_id(expected_id)?;
         let body =
             serde_json::to_string(req).map_err(|e| McpError::Transport(format!("JSON serialize error: {}", e)))?;
 
@@ -149,7 +201,7 @@ impl McpTransport for StreamableHttpTransport {
         let response = http_req
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("HTTP request failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("HTTP request failed: {}", e.without_url())))?;
 
         if !response.status().is_success() {
             return Err(McpError::Transport(format!(
@@ -159,11 +211,12 @@ impl McpTransport for StreamableHttpTransport {
         }
 
         let rpc_response = self.parse_response(response).await?;
+        validate_response_id(expected_id, &rpc_response)?;
 
         if let Some(err) = &rpc_response.error {
             return Err(McpError::JsonRpc {
                 code: err.code,
-                message: err.message.clone(),
+                message: SERVER_ERROR_MESSAGE.into(),
             });
         }
 
@@ -178,7 +231,7 @@ impl McpTransport for StreamableHttpTransport {
         http_req
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("Notification request failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("Notification request failed: {}", e.without_url())))?;
 
         Ok(())
     }

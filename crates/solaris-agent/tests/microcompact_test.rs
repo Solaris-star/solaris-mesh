@@ -45,6 +45,7 @@ fn assistant_at(blocks: Vec<ContentBlock>, ts: chrono::DateTime<Utc>) -> Message
     Message {
         role: Role::Assistant,
         content: blocks,
+        provider_metadata: Default::default(),
         timestamp: Some(ts),
     }
 }

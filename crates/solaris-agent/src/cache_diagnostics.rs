@@ -35,7 +35,7 @@ pub enum CacheDiagnostic {
 pub enum CacheBreakCause {
     SystemPromptChanged,
     ToolsChanged,
-    TtlExpiry,
+    Unknown,
     FirstRequest,
 }
 
@@ -148,8 +148,10 @@ impl CacheBreakDetector {
             return CacheBreakCause::ToolsChanged;
         }
 
-        // Hashes match but cache was lost — server-side TTL expiry
-        CacheBreakCause::TtlExpiry
+        // Matching local hashes do not prove a provider-side TTL expiry. The
+        // provider may have evicted, repartitioned, or declined the cache for
+        // another reason that Solaris cannot observe.
+        CacheBreakCause::Unknown
     }
 }
 

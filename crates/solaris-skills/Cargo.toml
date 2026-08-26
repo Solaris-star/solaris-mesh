@@ -1,6 +1,6 @@
 [package]
 name = "solaris-skills"
-description = "Skills system for Solaris CLI: named prompt snippets with tool orchestration, permissions, hooks, and MCP integration"
+description = "Skills and scoped capability extensions for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,10 +18,12 @@ serde_json.workspace   = true
 serde_yaml.workspace   = true
 tokio.workspace        = true
 futures.workspace      = true
+cap-std.workspace      = true
 async-trait.workspace  = true
 anyhow.workspace       = true
 thiserror.workspace    = true
 glob.workspace         = true
+ignore.workspace       = true
 dirs.workspace         = true
 regex.workspace        = true
 notify.workspace       = true

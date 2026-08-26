@@ -1,5 +1,6 @@
 use clap::Parser;
 
+mod acp;
 mod bootstrap;
 mod cli;
 mod commands;
@@ -15,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     solaris_config::migration::migrate_legacy_data(&project_dir)?;
     let command = cli.command.take();
     match command {
-        Some(cmd) => commands::dispatch(cmd).await,
+        Some(cmd) => commands::dispatch(cmd, cli).await,
         None => run::run_main_flow(cli).await,
     }
 }

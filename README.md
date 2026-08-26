@@ -1,21 +1,21 @@
-# Solaris CLI
+# Solaris Mesh
 
-A Rust-based LLM tool-use agent for the command line. It connects to LLM APIs, autonomously invokes local tools (file I/O, shell, search, etc.), and completes tasks end-to-end.
+A plugin-first, multi-agent-native Agent Runtime written in Rust. Solaris Mesh owns agent execution, collaboration, permissions, workflows, provider/protocol integration, and host-facing runtime state; the `solaris` binary is its lightweight CLI entry point, while Solaris Studio is the first-party native Host.
 
 ## Features
 
 - **Multi-provider** — Anthropic, OpenAI (and compatibles like DeepSeek/Ollama/Gemini), AWS Bedrock, Google Vertex AI
 - **ProviderCompat layer** — Configuration-driven compatibility for provider quirks (no hardcoded conditionals)
 - **Reasoning model support** — OpenAI `o1`/`o3` reasoning models with `reasoning_effort` control
-- **7 built-in tools** — Read, Write, Edit, Bash, Grep, Glob, Spawn (sub-agents)
+- **7 built-in tools** — Read, Write, Edit, Bash, Grep, Glob, Spawn (Child Agents)
 - **MCP client** — Connect to any [Model Context Protocol](https://modelcontextprotocol.io/) server (stdio / SSE / streamable-http)
 - **Dynamic MCP injection** — Host clients can inject MCP servers at runtime via the [JSON stream protocol](docs/json-stream-protocol.md)
 - **Skills** — Named prompt snippets with variable substitution, shell expansion, conditional activation, and per-skill model/permission overrides (see [docs/skills.md](docs/skills.md))
 - **Hook system** — Event-driven automation on tool lifecycle (auto-format, lint, audit)
-- **Sub-agent spawning** — Parallel task execution via the Spawn tool
+- **Multi-agent collaboration** — Configurable Child Agent policy and strategy, durable task identities, dependency waves, recovery, and typed run summaries
 - **Session persistence** — Save and resume conversation history
 - **Persistent memory** — Project-specific memory with auto-indexing across sessions (see [docs/advanced.md](docs/advanced.md#memory-system))
-- **Plan mode** — Read-only exploration mode for designing implementation plans before coding (see [docs/advanced.md](docs/advanced.md#plan-mode))
+- **Plan mode** — No-workspace-mutation execution for planning, research, and analysis (see [docs/advanced.md](docs/advanced.md#plan-mode))
 - **Context compression** — Three-tier automatic compaction: microcompact, autocompact, emergency (see [docs/advanced.md](docs/advanced.md#context-compression))
 - **Output compaction** — Configurable output compression (off/safe/full) with TOON encoding (see [docs/advanced.md](docs/advanced.md#output-compaction))
 - **File state cache** — LRU cache with read deduplication and write tracking
@@ -39,6 +39,9 @@ solaris "Read Cargo.toml and explain the dependencies"
 
 # Interactive REPL
 solaris
+
+# Agent Client Protocol (ACP) stdio agent
+solaris acp
 
 # Full CLI reference
 solaris --help
@@ -79,30 +82,60 @@ solaris --max-tool-call-malformed-turns 2 "Run the task"
 solaris --max-tool-call-failure-turns 2 "Run the task"
 ```
 
+## Multi-agent collaboration
+
+`Spawn` accepts the legacy `{ "tasks": [{ "name", "prompt" }] }` shape and
+the durable v2 shape. v2 tasks have stable `id` values, optional `role`,
+`depends_on`, `expected_output`, and a per-task `budget`.
+
+```json
+{
+  "strategy": "supervisor",
+  "tasks": [
+    {"id": "inspect", "name": "Inspect", "prompt": "Read the relevant modules."},
+    {"id": "verify", "name": "Verify", "prompt": "Check the proposed result.", "depends_on": ["inspect"]}
+  ]
+}
+```
+
+The policy is `disabled`, `on_demand` (the default), or `proactive`.
+`auto`, `single`, `supervisor`, `team`, `fanout`, and
+`independent_reviewer` are supported strategies. Roles are free-form; the
+runtime still limits resources: automatic parallelism is 2–8 active Child
+Agents, an explicit `--max-active-agents` value is 1–64, and a Run accepts 32
+tasks by default or at most 256 when configured.
+
+The same settings can be supplied in the project configuration or through
+`SOLARIS_MULTI_AGENT_POLICY`, `SOLARIS_COLLABORATION_STRATEGY`,
+`SOLARIS_MAX_ACTIVE_AGENTS`, and `SOLARIS_MAX_AGENT_TASKS`.
+
 ## Architecture
 
+```text
+Solaris Studio / CLI / Server Hosts
+              │
+              │ Native Mesh API / Host Protocol
+              ▼
+        Solaris Mesh Runtime
+  ┌───────────────────────────────────────┐
+  │ Mesh Kernel                           │
+  │ Identity / Scope / Permission /       │
+  │ Runtime Ledger / Effect Boundary      │
+  ├───────────────────────────────────────┤
+  │ Collaboration Runtime / Workflow      │
+  │ Scheduler / Agent & Task Registry     │
+  ├───────────────────────────────────────┤
+  │ Agent Core / Sessions / Context       │
+  ├───────────────────────────────────────┤
+  │ Protocol Adapters / Providers         │
+  │ Tools / Skills / MCP / Memory         │
+  └───────────────────────────────────────┘
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      main.rs (CLI / REPL)                    │
-├──────────────────────────────────────────────────────────────┤
-│  Config          │  Engine (agent loop)  │  Session Manager  │
-│  (3-level merge) │  streaming + tools    │  save / resume    │
-├──────────────────┼───────────────────────┼───────────────────┤
-│  Providers       │  Tool Registry        │  Hook Executor    │
-│  ├ Anthropic     │  ├ Built-in (7)       │  ├ pre_tool_use   │
-│  ├ OpenAI        │  ├ MCP tools (N)      │  ├ post_tool_use  │
-│  ├ Bedrock       │  └ Plan Mode tools    │  └ stop           │
-│  └ Vertex AI     │                       │                   │
-│                  │  MCP Client           │  Memory System    │
-│  ProviderCompat  │  ├ Stdio transport    │  (per-project)    │
-│  (compat layer)  │  ├ SSE transport      │                   │
-│                  │  └ HTTP transport     │  Sub-Agent        │
-│  Compact Engine  │                       │  Spawner          │
-│  ├ Microcompact  │  File State Cache     │                   │
-│  ├ Autocompact   │  (LRU)                │  Output Compactor │
-│  └ Emergency     │                       │  (off/safe/full)  │
-└──────────────────┴───────────────────────┴───────────────────┘
-```
+
+The current codebase contains the Agent Core, provider adapters, tools,
+sessions, MCP/skills/memory, Spawn execution, and the durable collaboration
+runtime. Durable identity, permission/effect policy, workflow ownership, and
+multi-agent state live in the Mesh Runtime.
 
 ## Documentation
 
@@ -112,9 +145,10 @@ solaris --max-tool-call-failure-turns 2 "Run the task"
 | [Built-in Tools](docs/tools.md) | Detailed reference for all 7 tools |
 | [MCP Integration](docs/mcp.md) | Model Context Protocol client setup and usage |
 | [Providers & Auth](docs/providers.md) | Multi-provider config, profiles, Bedrock, Vertex, OAuth |
-| [Advanced Features](docs/advanced.md) | Sub-agents, hooks, prompt caching, VCR, AGENTS.md |
+| [Advanced Features](docs/advanced.md) | Multi-agent collaboration, hooks, prompt caching, VCR, AGENTS.md |
 | [Troubleshooting](docs/troubleshooting.md) | Common errors and solutions |
 | [JSON Stream Protocol](docs/json-stream-protocol.md) | Host integration protocol (`--json-stream` mode) |
+| [Mesh Runtime Contract](docs/mesh/README.md) | Acceptance criteria, state models, Host contract, decisions, and v1 RFCs |
 
 ## Supported Providers
 
@@ -151,14 +185,17 @@ Apache-2.0
 
 ## Solaris Mesh Runtime Architecture
 
-Solaris Mesh is a plugin-first, multi-agent-native Agent Runtime. The current runtime is built around Agent Core, Scheduler, Collaboration Runtime, Plugin System, and CLI. TUI and ACP Adapter support are integration areas whose availability depends on the deployed build.
+Solaris Mesh is the runtime and source of truth for agent, workflow, task, permission, and host-visible state.
 
 - **Agent Core**: current agent execution loop, tools, sessions, and provider integration.
-- **Scheduler**: task queue and resource-aware scheduling for spawned agent tasks. `SOLARIS_MAX_ACTIVE_AGENTS` optionally limits active agents; when unset, the default is derived from system available parallelism. Queued tasks wait until resources are available.
+- **Scheduler**: task queue and resource-aware scheduling for spawned agent tasks. `SOLARIS_MAX_ACTIVE_AGENTS` sets an explicit active-agent budget; when unset, system parallelism supplies a bounded 2–8 default. Explicit values are limited to 1–64. Queued tasks wait until resources are available.
 - **Collaboration Runtime**: current scheduling entry point for coordinating queued agent work.
 - **Plugin System**: tools, skills, and MCP-related extension points provide plugin-style capabilities.
-- **CLI**: the `solaris` command-line host.
-- **TUI**: planned host-facing terminal interface beyond the current CLI surfaces.
-- **ACP Adapter**: planned integration boundary for external agent clients.
+- **CLI**: the `solaris` command-line and stdio host entry point.
+- **TUI**: intentionally not a current-stage priority.
+- **ACP Agent**: `solaris acp` serves the standard Agent Client Protocol over stdio and reuses the same runtime as the CLI.
 
-Solaris Studio is the first-party Mesh Host. Claude Code, Codex CLI, and Gemini CLI are ACP Adapter integration targets; this does not imply that every adapter is present in the current build.
+Solaris Mesh also exposes a standard ACP agent through `solaris acp`. The
+first-party Studio integration may continue using the native Mesh Host API,
+but the ACP endpoint uses the same Engine, permission checks, session store,
+and collaboration runtime.

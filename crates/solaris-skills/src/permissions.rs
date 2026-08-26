@@ -50,6 +50,7 @@ pub enum SkillPermission {
 /// 3. safe-properties: `hooks_raw.is_none() && allowed_tools.is_empty()` → `Allow`
 /// 4. `auto_approve` flag → `Allow` (converts what would be `Ask` into `Allow`)
 /// 5. fallback → `Ask { reason }`
+#[derive(Clone)]
 pub struct SkillPermissionChecker {
     deny_rules: Vec<PermissionRule>,
     allow_rules: Vec<PermissionRule>,
@@ -84,7 +85,9 @@ impl SkillPermissionChecker {
         // Step 3: safe-properties.
         // Note: hooks_raw is Option<serde_json::Value> (None check),
         // allowed_tools is Vec<String> (is_empty check). The two differ by design.
-        let is_safe = skill.hooks_raw.is_none() && skill.allowed_tools.is_empty();
+        let is_safe = skill.hooks_raw.is_none()
+            && skill.allowed_tools.is_empty()
+            && !crate::shell::contains_shell_commands(&skill.content);
         if is_safe {
             return SkillPermission::Allow;
         }

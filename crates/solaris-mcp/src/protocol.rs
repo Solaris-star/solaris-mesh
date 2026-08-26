@@ -42,6 +42,17 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
+/// Parse a server message only when it is a JSON-RPC response. Server
+/// notifications and requests carry a `method` field and must not consume a
+/// pending client request.
+pub(crate) fn parse_jsonrpc_response_message(message: &[u8]) -> Result<Option<JsonRpcResponse>, serde_json::Error> {
+    let value: Value = serde_json::from_slice(message)?;
+    if value.get("method").is_some() {
+        return Ok(None);
+    }
+    serde_json::from_value(value).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcError {
     pub code: i64,
@@ -57,6 +68,27 @@ pub struct McpToolDef {
     pub description: Option<String>,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    #[serde(default)]
+    pub annotations: McpToolAnnotations,
+}
+
+/// MCP tool-side effect hints. Missing hints are treated as unknown and are
+/// never promoted to read-only execution.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolAnnotations {
+    #[serde(default)]
+    pub read_only_hint: Option<bool>,
+    #[serde(default)]
+    pub destructive_hint: Option<bool>,
+}
+
+impl McpToolAnnotations {
+    /// Returns only the remote server's claim. Callers must still apply the
+    /// transport's minimum Process or Network effect class.
+    pub fn is_trusted_read_only(&self) -> bool {
+        self.read_only_hint == Some(true) && self.destructive_hint != Some(true)
+    }
 }
 
 /// MCP tool call result

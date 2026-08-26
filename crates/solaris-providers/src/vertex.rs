@@ -36,6 +36,11 @@ impl VertexProvider {
         Self { inner }
     }
 
+    pub fn with_retries_enabled(mut self, enabled: bool) -> Self {
+        self.inner = self.inner.with_retries_enabled(enabled);
+        self
+    }
+
     #[cfg(test)]
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, ProviderError> {
         self.inner.build_request_body(request)
@@ -47,11 +52,16 @@ impl LlmProvider for VertexProvider {
     async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         self.inner.stream(request).await
     }
+
+    async fn stream_once(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.inner.stream_once(request).await
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum GcpAuth {
     ServiceAccount { key_file: String },
+    ServiceAccountJson { json: String },
     ApplicationDefault,
     MetadataServer,
 }
@@ -70,7 +80,7 @@ pub(crate) struct VertexTransportState {
 impl VertexTransportState {
     pub(crate) fn new(project_id: &str, region: &str, auth: GcpAuth, cache_enabled: bool) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::transport::redirect_safe_client(),
             project_id: project_id.to_string(),
             region: region.to_string(),
             auth,
@@ -130,6 +140,7 @@ impl VertexTransportState {
 
         let (token, expires_in) = match &self.auth {
             GcpAuth::ServiceAccount { key_file } => self.get_service_account_token(key_file).await?,
+            GcpAuth::ServiceAccountJson { json } => self.exchange_service_account_token(json).await?,
             GcpAuth::ApplicationDefault => self.get_adc_token().await?,
             GcpAuth::MetadataServer => self.get_metadata_token().await?,
         };
@@ -152,8 +163,14 @@ impl VertexTransportState {
         let key_json = read_to_string(key_file)
             .map_err(|e| ProviderError::Connection(format!("Failed to read key file: {}", e)))?;
 
-        let sa: ServiceAccountKey = serde_json::from_str(&key_json)
+        self.exchange_service_account_token(&key_json).await
+    }
+
+    async fn exchange_service_account_token(&self, key_json: &str) -> Result<(String, u64), ProviderError> {
+        let sa: ServiceAccountKey = serde_json::from_str(key_json)
             .map_err(|e| ProviderError::Connection(format!("Failed to parse key file: {}", e)))?;
+
+        validate_service_account_token_uri(&sa.token_uri)?;
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
@@ -275,7 +292,8 @@ impl VertexTransportState {
                 .map_err(|e| ProviderError::Connection(format!("Header error: {}", e)))?,
         );
 
-        let response = self.client.post(url).headers(headers).json(body).send().await?;
+        let client = crate::transport::client_for_url(&self.client, url);
+        let response = client.post(url).headers(headers).json(body).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -336,6 +354,16 @@ fn default_expires_in() -> u64 {
     3600
 }
 
+fn validate_service_account_token_uri(token_uri: &str) -> Result<(), ProviderError> {
+    if token_uri == "https://oauth2.googleapis.com/token" {
+        Ok(())
+    } else {
+        Err(ProviderError::Connection(
+            "Vertex service-account token_uri must be https://oauth2.googleapis.com/token".into(),
+        ))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AdcCredentials {
     client_id: String,
@@ -349,6 +377,8 @@ pub fn auth_from_config(vc: &VertexConfig) -> GcpAuth {
         GcpAuth::ServiceAccount {
             key_file: creds_file.clone(),
         }
+    } else if let Some(json) = &vc.service_account_json {
+        GcpAuth::ServiceAccountJson { json: json.clone() }
     } else {
         GcpAuth::ApplicationDefault
     }

@@ -79,6 +79,7 @@ max_tokens = 64000
     fn test_flattened_compat_serializes_to_legacy_toml_keys() {
         let compat = ProviderCompat {
             transport: TransportCompat {
+                protocol_id: None,
                 max_tokens_field: Some("max_completion_tokens".to_string()),
                 default_max_tokens: Some(128_000),
                 model_max_tokens: Some(vec![ModelMaxTokensRule {
@@ -88,6 +89,7 @@ max_tokens = 64000
                 api_path: Some("/chat/completions".to_string()),
                 max_request_body_bytes: Some(1_048_576),
                 include_stream_options: Some(false),
+                ..Default::default()
             },
             messages: MessageCompat {
                 merge_assistant_messages: Some(true),

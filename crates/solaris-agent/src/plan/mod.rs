@@ -4,6 +4,7 @@
 // implementation plan.  After the plan is ready the agent exits plan mode
 // and regains full tool access.
 
+pub(crate) mod artifact;
 pub mod file;
 pub mod prompt;
 pub mod state;

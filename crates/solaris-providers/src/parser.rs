@@ -29,8 +29,8 @@ impl ResponseParser for OpenAiParser {
         }
     }
 
-    fn finish(&self, _state: &mut Self::State) -> Vec<LlmEvent> {
-        Vec::new()
+    fn finish(&self, state: &mut Self::State) -> Vec<LlmEvent> {
+        state.flush_done().into_iter().collect()
     }
 }
 

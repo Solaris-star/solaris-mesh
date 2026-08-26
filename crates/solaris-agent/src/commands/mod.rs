@@ -1,6 +1,7 @@
 pub mod clear;
 pub mod compact;
 pub mod help;
+pub mod model;
 pub mod quit;
 mod registry;
 

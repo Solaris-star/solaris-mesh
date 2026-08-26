@@ -1,125 +1,52 @@
 use super::*;
+use crate::framing::{Frame, FrameKind};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use serde_json::json;
-    use tokio::sync::mpsc;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+#[test]
+fn missing_close_notify_recovers_only_a_complete_openai_response() {
+    let parser = OpenAiParser { auto_tool_id: false };
+    let mut state = parser.new_state();
+    let finish_frame = Frame {
+        event: None,
+        data: r#"{"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}"#.to_owned(),
+        kind: FrameKind::Data,
+    };
+    let _ = parser.parse_frame(&finish_frame, &mut state);
 
-    fn aws_event_message(payload: &[u8]) -> Vec<u8> {
-        let total_len = 12 + payload.len() + 4;
-        let mut message = Vec::with_capacity(total_len);
-        message.extend_from_slice(&(total_len as u32).to_be_bytes());
-        message.extend_from_slice(&0u32.to_be_bytes());
-        message.extend_from_slice(&0u32.to_be_bytes());
-        message.extend_from_slice(payload);
-        message.extend_from_slice(&0u32.to_be_bytes());
-        message
-    }
+    let events = recover_openai_terminal_after_stream_error(
+        "request or response body error: peer closed connection without sending TLS close_notify",
+        &parser,
+        &mut state,
+    )
+    .expect("a complete response may recover from the exact rustls shutdown error");
 
-    fn bedrock_event_payload(inner: &str) -> Vec<u8> {
-        json!({
-            "bytes": STANDARD.encode(inner)
-        })
-        .to_string()
-        .into_bytes()
-    }
+    assert!(matches!(events.as_slice(), [LlmEvent::Done { .. }]));
+}
 
-    async fn mock_response(body: Vec<u8>) -> reqwest::Response {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/stream"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
-            .mount(&server)
-            .await;
+#[test]
+fn missing_close_notify_does_not_recover_an_incomplete_openai_response() {
+    let parser = OpenAiParser { auto_tool_id: false };
+    let mut state = parser.new_state();
 
-        reqwest::get(format!("{}/stream", server.uri()))
-            .await
-            .expect("mock response should be available")
-    }
+    assert!(
+        recover_openai_terminal_after_stream_error(
+            "peer closed connection without sending TLS close_notify",
+            &parser,
+            &mut state,
+        )
+        .is_none()
+    );
+}
 
-    async fn collect_events(mut rx: mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
-        let mut events = Vec::new();
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-        events
-    }
+#[test]
+fn unrelated_stream_errors_remain_failures_even_after_a_terminal_frame() {
+    let parser = OpenAiParser { auto_tool_id: false };
+    let mut state = parser.new_state();
+    let finish_frame = Frame {
+        event: None,
+        data: r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_owned(),
+        kind: FrameKind::Data,
+    };
+    let _ = parser.parse_frame(&finish_frame, &mut state);
 
-    #[test]
-    fn parse_aws_event_waits_for_complete_message_and_extracts_payload() {
-        let payload = b"payload";
-        let message = aws_event_message(payload);
-
-        assert!(parse_aws_event(&message[..message.len() - 1]).is_none());
-
-        let (event_data, consumed) = parse_aws_event(&message).expect("complete event should parse");
-        assert_eq!(event_data, Some(payload.to_vec()));
-        assert_eq!(consumed, message.len());
-    }
-
-    #[tokio::test]
-    async fn bedrock_event_stream_decodes_payloads_into_llm_events() {
-        let mut body = Vec::new();
-        for inner in [
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":12}}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
-            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
-        ] {
-            body.extend(aws_event_message(&bedrock_event_payload(inner)));
-        }
-
-        let response = mock_response(body).await;
-        let (tx, rx) = mpsc::channel(8);
-
-        let outcome = process_bedrock_aws_event_stream(response, &tx).await;
-        drop(tx);
-        let events = collect_events(rx).await;
-
-        assert!(matches!(outcome, StreamOutcome::Ok));
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], LlmEvent::TextDelta(text) if text == "Hello"));
-        match &events[1] {
-            LlmEvent::Done { stop_reason, usage } => {
-                assert_eq!(*stop_reason, StopReason::EndTurn);
-                assert_eq!(usage.input_tokens, 12);
-                assert_eq!(usage.output_tokens, 7);
-            }
-            event => panic!("expected Done event, got {event:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn bedrock_event_stream_synthesizes_done_when_message_delta_is_missing() {
-        let mut body = Vec::new();
-        for inner in [
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":12}}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
-        ] {
-            body.extend(aws_event_message(&bedrock_event_payload(inner)));
-        }
-
-        let response = mock_response(body).await;
-        let (tx, rx) = mpsc::channel(8);
-
-        let outcome = process_bedrock_aws_event_stream(response, &tx).await;
-        drop(tx);
-        let events = collect_events(rx).await;
-
-        assert!(matches!(outcome, StreamOutcome::Ok));
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], LlmEvent::TextDelta(text) if text == "Hello"));
-        match &events[1] {
-            LlmEvent::Done { stop_reason, usage } => {
-                assert_eq!(*stop_reason, StopReason::EndTurn);
-                assert_eq!(usage.input_tokens, 12);
-                assert_eq!(usage.output_tokens, 0);
-            }
-            event => panic!("expected synthesized Done event, got {event:?}"),
-        }
-    }
+    assert!(recover_openai_terminal_after_stream_error("connection reset by peer", &parser, &mut state).is_none());
 }

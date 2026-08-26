@@ -16,6 +16,7 @@ pub struct AnthropicProvider {
     base_url: String,
     compat: ProviderCompat,
     cache_enabled: bool,
+    retries_enabled: bool,
 }
 
 impl AnthropicProvider {
@@ -29,12 +30,20 @@ impl AnthropicProvider {
             base_url: base_url.to_string(),
             compat,
             cache_enabled,
+            retries_enabled: true,
         }
     }
 
     pub fn with_cache(mut self, enabled: bool) -> Self {
         self.cache_enabled = enabled;
-        self.inner = Self::build_inner(&self.api_key, &self.base_url, self.cache_enabled, &self.compat);
+        self.inner = Self::build_inner(&self.api_key, &self.base_url, self.cache_enabled, &self.compat)
+            .with_retries_enabled(self.retries_enabled);
+        self
+    }
+
+    pub fn with_retries_enabled(mut self, enabled: bool) -> Self {
+        self.retries_enabled = enabled;
+        self.inner = self.inner.with_retries_enabled(enabled);
         self
     }
 
@@ -53,6 +62,10 @@ impl AnthropicProvider {
 impl LlmProvider for AnthropicProvider {
     async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         self.inner.stream(request).await
+    }
+
+    async fn stream_once(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.inner.stream_once(request).await
     }
 }
 

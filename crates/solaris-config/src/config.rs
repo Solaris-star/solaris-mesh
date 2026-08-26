@@ -1,3 +1,7 @@
+mod init;
+
+pub use init::init_config;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -9,9 +13,14 @@ use crate::compat::ProviderCompat;
 use crate::file_cache::FileCacheConfig;
 use crate::hooks::HooksConfig;
 use crate::logging::LoggingConfig;
+use crate::memory_config::{MemoryConfig, MemoryConfigFile};
 use crate::plan::PlanConfig;
 use crate::shell::ShellConfig;
 use solaris_types::llm::ThinkingConfig;
+use solaris_types::provider_contract::{ProtocolId, ProviderContract, ProviderSignals, ReasoningCapabilities};
+use solaris_types::workflow::{
+    CollaborationRuntimeConfig, CollaborationSelection, CollaborationStrategy, MultiAgentPolicy,
+};
 
 // ---------------------------------------------------------------------------
 // Provider-specific sub-configurations (defined here to avoid circular deps)
@@ -25,6 +34,9 @@ pub struct BedrockConfig {
     pub secret_access_key: Option<String>,
     pub session_token: Option<String>,
     pub profile: Option<String>,
+    /// Resolved shared credentials file. Bootstrap pins relative paths to the
+    /// workspace before provider construction.
+    pub credentials_file: Option<String>,
 }
 
 /// Google Vertex AI authentication configuration
@@ -60,6 +72,9 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     /// HTTP headers for SSE/HTTP transports
     pub headers: Option<HashMap<String, String>>,
+    /// Exact HTTP(S) destinations required by a stdio server in Auto mode.
+    #[serde(default)]
+    pub network: solaris_types::permission::ProcessNetworkConfig,
     /// Whether tools from this server should be deferred (name-only stub sent to LLM).
     /// Defaults to true when omitted — MCP tools are deferred by default to reduce
     /// input token usage. Set to `false` to send full schemas eagerly.
@@ -95,6 +110,9 @@ pub struct ConfigFile {
     pub session: SessionConfig,
 
     #[serde(default)]
+    pub memory: MemoryConfigFile,
+
+    #[serde(default)]
     pub compact: CompactConfig,
 
     #[serde(default)]
@@ -118,6 +136,230 @@ pub struct ConfigFile {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Multi-agent policy shared by the CLI and every child Agent.
+    #[serde(default)]
+    pub multi_agent: MultiAgentConfigFile,
+}
+
+/// Values accepted in a config file for the Mesh collaboration runtime.
+///
+/// Every field is optional so global and project files can be merged without
+/// losing the distinction between an omitted value and an explicit default.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct MultiAgentConfigFile {
+    #[serde(default)]
+    pub policy: Option<MultiAgentPolicy>,
+    /// `auto` is represented by `CollaborationSelection::Auto` at runtime.
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub max_active_agents: Option<usize>,
+    #[serde(default)]
+    pub max_tasks_per_run: Option<u32>,
+}
+
+/// Resolved Mesh collaboration settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiAgentConfig {
+    pub policy: MultiAgentPolicy,
+    pub strategy: CollaborationSelection,
+    pub max_active_agents: Option<usize>,
+    pub max_tasks_per_run: u32,
+    policy_explicit: bool,
+    strategy_explicit: bool,
+}
+
+impl Default for MultiAgentConfig {
+    fn default() -> Self {
+        Self {
+            policy: MultiAgentPolicy::OnDemand,
+            strategy: CollaborationSelection::Auto,
+            max_active_agents: None,
+            max_tasks_per_run: 32,
+            policy_explicit: false,
+            strategy_explicit: false,
+        }
+    }
+}
+
+impl MultiAgentConfig {
+    pub const MIN_MAX_ACTIVE_AGENTS: usize = 1;
+    pub const MAX_MAX_ACTIVE_AGENTS: usize = 64;
+    pub const DEFAULT_MAX_TASKS_PER_RUN: u32 = 32;
+    pub const MIN_MAX_TASKS_PER_RUN: u32 = 1;
+    pub const MAX_MAX_TASKS_PER_RUN: u32 = 256;
+
+    pub fn policy_is_explicit(&self) -> bool {
+        self.policy_explicit
+    }
+
+    pub fn strategy_is_explicit(&self) -> bool {
+        self.strategy_explicit
+    }
+
+    /// Apply an intensity default only when no stronger source selected a value.
+    pub fn apply_intensity_default(&mut self, intensity: solaris_types::run_preset::Intensity) {
+        if !self.policy_explicit {
+            self.policy = if intensity == solaris_types::run_preset::Intensity::Ultracode {
+                MultiAgentPolicy::Proactive
+            } else {
+                MultiAgentPolicy::OnDemand
+            };
+        }
+        if !self.strategy_explicit {
+            self.strategy = CollaborationSelection::Auto;
+        }
+    }
+
+    fn resolve(file: MultiAgentConfigFile) -> anyhow::Result<Self> {
+        let policy = file.policy.unwrap_or(MultiAgentPolicy::OnDemand);
+        let strategy = parse_collaboration_selection(file.strategy.as_deref())?;
+        let max_active_agents = file.max_active_agents;
+        if let Some(limit) = max_active_agents
+            && !(Self::MIN_MAX_ACTIVE_AGENTS..=Self::MAX_MAX_ACTIVE_AGENTS).contains(&limit)
+        {
+            anyhow::bail!(
+                "multi_agent.max_active_agents must be between {} and {}",
+                Self::MIN_MAX_ACTIVE_AGENTS,
+                Self::MAX_MAX_ACTIVE_AGENTS
+            );
+        }
+        let max_tasks_per_run = file.max_tasks_per_run.unwrap_or(Self::DEFAULT_MAX_TASKS_PER_RUN);
+        if !(Self::MIN_MAX_TASKS_PER_RUN..=Self::MAX_MAX_TASKS_PER_RUN).contains(&max_tasks_per_run) {
+            anyhow::bail!(
+                "multi_agent.max_tasks_per_run must be between {} and {}",
+                Self::MIN_MAX_TASKS_PER_RUN,
+                Self::MAX_MAX_TASKS_PER_RUN
+            );
+        }
+        Ok(Self {
+            policy,
+            strategy,
+            max_active_agents,
+            max_tasks_per_run,
+            policy_explicit: file.policy.is_some(),
+            strategy_explicit: file.strategy.is_some(),
+        })
+    }
+
+    fn merge_overrides(&mut self, overrides: MultiAgentOverrides) -> anyhow::Result<()> {
+        if let Some(policy) = overrides.policy {
+            self.policy = parse_multi_agent_policy(&policy)?;
+            self.policy_explicit = true;
+        }
+        if let Some(strategy) = overrides.strategy {
+            self.strategy = parse_collaboration_selection(Some(&strategy))?;
+            self.strategy_explicit = true;
+        }
+        if let Some(limit) = overrides.max_active_agents {
+            validate_max_active_agents(limit)?;
+            self.max_active_agents = Some(limit);
+        }
+        if let Some(limit) = overrides.max_tasks_per_run {
+            validate_max_tasks_per_run(limit)?;
+            self.max_tasks_per_run = limit;
+        }
+        Ok(())
+    }
+}
+
+/// CLI and environment overrides for `Config::resolve_with_multi_agent`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MultiAgentOverrides {
+    pub policy: Option<String>,
+    pub strategy: Option<String>,
+    pub max_active_agents: Option<usize>,
+    pub max_tasks_per_run: Option<u32>,
+}
+
+fn parse_multi_agent_policy(value: &str) -> anyhow::Result<MultiAgentPolicy> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "disabled" => Ok(MultiAgentPolicy::Disabled),
+        "on_demand" | "on-demand" | "ondemand" | "explicit" | "adaptive" => Ok(MultiAgentPolicy::OnDemand),
+        "proactive" => Ok(MultiAgentPolicy::Proactive),
+        other => anyhow::bail!("invalid multi-agent policy '{other}'; expected disabled, on_demand, or proactive"),
+    }
+}
+
+fn parse_collaboration_selection(value: Option<&str>) -> anyhow::Result<CollaborationSelection> {
+    let Some(value) = value else {
+        return Ok(CollaborationSelection::Auto);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(CollaborationSelection::Auto),
+        "single" => Ok(CollaborationSelection::Fixed(CollaborationStrategy::Single)),
+        "supervisor" => Ok(CollaborationSelection::Configured(CollaborationRuntimeConfig {
+            strategy: CollaborationStrategy::Supervisor,
+            ..CollaborationRuntimeConfig::default()
+        })),
+        "team" => Ok(CollaborationSelection::Configured(CollaborationRuntimeConfig {
+            strategy: CollaborationStrategy::Team,
+            ..CollaborationRuntimeConfig::default()
+        })),
+        "fanout" => Ok(CollaborationSelection::Configured(CollaborationRuntimeConfig {
+            strategy: CollaborationStrategy::Fanout,
+            ..CollaborationRuntimeConfig::default()
+        })),
+        "independent_reviewer" | "independent-reviewer" | "reviewer" => {
+            Ok(CollaborationSelection::Configured(CollaborationRuntimeConfig {
+                strategy: CollaborationStrategy::IndependentReviewer,
+                ..CollaborationRuntimeConfig::default()
+            }))
+        }
+        other => anyhow::bail!(
+            "invalid collaboration strategy '{other}'; expected auto, single, supervisor, team, fanout, or independent_reviewer"
+        ),
+    }
+}
+
+fn validate_max_active_agents(value: usize) -> anyhow::Result<()> {
+    if !(MultiAgentConfig::MIN_MAX_ACTIVE_AGENTS..=MultiAgentConfig::MAX_MAX_ACTIVE_AGENTS).contains(&value) {
+        anyhow::bail!(
+            "max_active_agents must be between {} and {}",
+            MultiAgentConfig::MIN_MAX_ACTIVE_AGENTS,
+            MultiAgentConfig::MAX_MAX_ACTIVE_AGENTS
+        );
+    }
+    Ok(())
+}
+
+fn validate_max_tasks_per_run(value: u32) -> anyhow::Result<()> {
+    if !(MultiAgentConfig::MIN_MAX_TASKS_PER_RUN..=MultiAgentConfig::MAX_MAX_TASKS_PER_RUN).contains(&value) {
+        anyhow::bail!(
+            "max_agent_tasks must be between {} and {}",
+            MultiAgentConfig::MIN_MAX_TASKS_PER_RUN,
+            MultiAgentConfig::MAX_MAX_TASKS_PER_RUN
+        );
+    }
+    Ok(())
+}
+
+fn apply_multi_agent_environment(config: &mut MultiAgentConfigFile) -> anyhow::Result<()> {
+    if let Ok(value) = std::env::var("SOLARIS_MULTI_AGENT_POLICY") {
+        config.policy = Some(parse_multi_agent_policy(&value)?);
+    }
+    if let Ok(value) = std::env::var("SOLARIS_COLLABORATION_STRATEGY") {
+        // Validate now so an invalid environment value cannot silently fall
+        // back to a different strategy later.
+        let _ = parse_collaboration_selection(Some(&value))?;
+        config.strategy = Some(value);
+    }
+    if let Ok(value) = std::env::var("SOLARIS_MAX_ACTIVE_AGENTS") {
+        let parsed = value
+            .parse::<usize>()
+            .map_err(|_| anyhow::anyhow!("SOLARIS_MAX_ACTIVE_AGENTS must be an integer"))?;
+        validate_max_active_agents(parsed)?;
+        config.max_active_agents = Some(parsed);
+    }
+    if let Ok(value) = std::env::var("SOLARIS_MAX_AGENT_TASKS") {
+        let parsed = value
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("SOLARIS_MAX_AGENT_TASKS must be an integer"))?;
+        validate_max_tasks_per_run(parsed)?;
+        config.max_tasks_per_run = Some(parsed);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -154,6 +396,8 @@ impl Default for DefaultConfig {
 pub struct ProviderConfig {
     /// Underlying built-in provider type for a custom provider alias.
     pub provider: Option<String>,
+    /// Wire protocol, independent from the deployment/auth provider.
+    pub protocol: Option<String>,
     /// Optional default model for this provider entry.
     pub model: Option<String>,
     pub api_key: Option<String>,
@@ -280,6 +524,7 @@ pub struct Config {
     pub compat: ProviderCompat,
     pub tools: ToolsConfig,
     pub session: SessionConfig,
+    pub memory: MemoryConfig,
     pub compact: CompactConfig,
     pub plan: PlanConfig,
     pub shell: ShellConfig,
@@ -289,6 +534,7 @@ pub struct Config {
     pub vertex: Option<VertexConfig>,
     pub mcp: McpConfig,
     pub logging: LoggingConfig,
+    pub multi_agent: MultiAgentConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +573,14 @@ pub struct CliArgs {
 impl Config {
     /// Load and merge config from all sources
     pub fn resolve(cli: &CliArgs) -> anyhow::Result<Self> {
+        Self::resolve_with_multi_agent(cli, MultiAgentOverrides::default())
+    }
+
+    /// Load config while applying CLI-owned multi-agent overrides.
+    ///
+    /// Keeping these overrides separate from `CliArgs` preserves source
+    /// compatibility for embedders that construct `CliArgs` directly.
+    pub fn resolve_with_multi_agent(cli: &CliArgs, multi_agent_overrides: MultiAgentOverrides) -> anyhow::Result<Self> {
         let project_dir = cli.project_dir.clone().unwrap_or(std::env::current_dir()?);
         crate::migration::migrate_legacy_data(&project_dir)?;
 
@@ -343,6 +597,11 @@ impl Config {
         if let Some(profile_name) = &cli.profile {
             merged = apply_profile(merged, profile_name)?;
         }
+
+        let mut multi_agent_file = merged.multi_agent.clone();
+        apply_multi_agent_environment(&mut multi_agent_file)?;
+        let mut multi_agent = MultiAgentConfig::resolve(multi_agent_file)?;
+        multi_agent.merge_overrides(multi_agent_overrides)?;
 
         // 5. Apply CLI overrides and resolve final config
         let provider_str = cli.provider.as_deref().unwrap_or(&merged.default.provider);
@@ -408,7 +667,10 @@ impl Config {
             ProviderType::Vertex => ProviderCompat::anthropic_defaults(),
         };
 
-        let user_compat = provider_config.compat.clone().unwrap_or_default();
+        let mut user_compat = provider_config.compat.clone().unwrap_or_default();
+        if let Some(protocol) = provider_config.protocol.clone() {
+            user_compat.transport.protocol_id = Some(protocol);
+        }
 
         let compat = ProviderCompat::merge(compat_defaults, user_compat);
         let thinking = resolve_cli_thinking(cli.thinking.as_deref(), cli.thinking_budget)?;
@@ -429,6 +691,7 @@ impl Config {
             compat,
             tools,
             session: merged.session,
+            memory: merged.memory.resolve(),
             compact: merged.compact,
             plan: merged.plan,
             shell: merged.shell,
@@ -438,7 +701,52 @@ impl Config {
             vertex: merged.vertex,
             mcp: merged.mcp,
             logging: merged.logging,
+            multi_agent,
         })
+    }
+    /// Return the resolved provider contract without coupling wire protocol to provider branding.
+    pub fn provider_contract(&self) -> ProviderContract {
+        let protocol = self
+            .compat
+            .protocol_id()
+            .map(|value| ProtocolId(value.to_owned()))
+            .unwrap_or_else(|| match self.provider {
+                ProviderType::OpenAI => ProtocolId::openai_chat(),
+                ProviderType::Anthropic | ProviderType::Bedrock | ProviderType::Vertex => {
+                    ProtocolId::anthropic_messages()
+                }
+            });
+        let metadata_namespaces = match protocol.0.as_str() {
+            "anthropic-messages" => vec!["anthropic".to_owned()],
+            "openai-chat" | "openai-responses" => vec!["openai".to_owned()],
+            _ => Vec::new(),
+        };
+        let cache_token_accounting = self
+            .compat
+            .transport
+            .cache_token_accounting
+            .or_else(|| protocol.cache_token_accounting());
+        ProviderContract {
+            protocol,
+            reasoning: ReasoningCapabilities {
+                supported: self.compat.supports_thinking() || self.compat.supports_effort(),
+                effort_levels: self.compat.effort_levels().to_vec(),
+                requires_round_trip_metadata: self.compat.supports_thinking(),
+            },
+            tool_calling: self.compat.emit_tools(),
+            streaming: true,
+            context_window: None,
+            cache_stable_append_tail: self.prompt_caching,
+            metadata_namespaces,
+            signals: ProviderSignals {
+                cache_token_accounting,
+                input_cost_per_million: self.compat.transport.input_cost_per_million,
+                cache_read_cost_per_million: self.compat.transport.cache_read_cost_per_million,
+                cache_write_cost_per_million: self.compat.transport.cache_write_cost_per_million,
+                output_cost_per_million: self.compat.transport.output_cost_per_million,
+                ..Default::default()
+            },
+        }
     }
 }
 
@@ -484,6 +792,7 @@ fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
 fn merge_provider_configs(base: ProviderConfig, overlay: ProviderConfig) -> ProviderConfig {
     ProviderConfig {
         provider: overlay.provider.or(base.provider),
+        protocol: overlay.protocol.or(base.protocol),
         model: overlay.model.or(base.model),
         api_key: overlay.api_key.or(base.api_key),
         base_url: overlay.base_url.or(base.base_url),
@@ -692,6 +1001,8 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         }
     };
 
+    let memory = MemoryConfigFile::merge(global.memory, project.memory);
+
     // Hooks: combine hooks from both configs (project hooks appended after global)
     let hooks = HooksConfig {
         pre_tool_use: [global.hooks.pre_tool_use, project.hooks.pre_tool_use].concat(),
@@ -745,12 +1056,26 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.shell
     };
 
+    let multi_agent = MultiAgentConfigFile {
+        policy: project.multi_agent.policy.or(global.multi_agent.policy),
+        strategy: project.multi_agent.strategy.or(global.multi_agent.strategy),
+        max_active_agents: project
+            .multi_agent
+            .max_active_agents
+            .or(global.multi_agent.max_active_agents),
+        max_tasks_per_run: project
+            .multi_agent
+            .max_tasks_per_run
+            .or(global.multi_agent.max_tasks_per_run),
+    };
+
     ConfigFile {
         default,
         providers,
         profiles,
         tools,
         session,
+        memory,
         compact,
         plan,
         shell,
@@ -761,6 +1086,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         auth,
         mcp,
         logging,
+        multi_agent,
     }
 }
 
@@ -861,192 +1187,6 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
 
     Ok(config)
 }
-
-// --- Init config command ---
-
-pub fn init_config() -> anyhow::Result<()> {
-    let path = global_config_path();
-    if path.exists() {
-        tracing::info!(target: "solaris_config", path = %path.display(), "config file already exists");
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, DEFAULT_CONFIG_TEMPLATE)?;
-    tracing::info!(target: "solaris_config", path = %path.display(), "config file created");
-    Ok(())
-}
-
-const DEFAULT_CONFIG_TEMPLATE: &str = r#"# Solaris CLI configuration
-
-# Default provider settings
-[default]
-provider = "anthropic"            # built-in provider or custom alias from [providers.<name>]
-# model = "claude-sonnet-4-20250514"
-# max_tokens = 8192                  # optional per-response output cap; omit to use provider/model defaults
-# max_turns = 20                  # optional max model turns per run; omit or set 0 to disable
-# max_tool_call_malformed_turns = 3  # 0 disables the tool-call-malformed round breaker
-# max_tool_call_failure_turns = 3    # 0 disables the tool-call-failure round breaker
-# system_prompt = "..."          # optional custom system prompt
-
-# Shell execution settings
-[shell]
-default = "auto"                 # auto, powershell, pwsh, cmd, bash, zsh, sh, or executable path
-
-# Provider-specific API settings
-[providers.anthropic]
-# api_key = "sk-ant-xxx"         # can also use env: API_KEY or ANTHROPIC_API_KEY
-# base_url = "https://api.anthropic.com"
-
-[providers.openai]
-# api_key = "sk-xxx"             # can also use env: OPENAI_API_KEY
-# base_url = "https://api.openai.com/v1"
-
-# Custom provider alias (maps to a built-in provider type)
-# [providers.my-service]
-# provider = "openai"
-# model = "custom-model-v1"
-# api_key = "sk-xxx"
-# base_url = "https://my-service.example.com/api/openai"
-
-# Provider compatibility overrides (usually not needed — defaults work)
-# [providers.openai.compat]
-# max_tokens_field = "max_completion_tokens"  # for OpenAI official models
-# merge_assistant_messages = true
-# clean_orphan_tool_calls = true
-# dedup_tool_results = true
-# strip_patterns = ["__OPENROUTER_REASONING_DETAILS__"]
-
-# AWS Bedrock configuration (uses AWS SigV4 auth, no API key needed)
-# [bedrock]
-# region = "us-east-1"
-# access_key_id = "AKIA..."
-# secret_access_key = "..."
-# session_token = "..."
-# profile = "my-profile"        # or use AWS profile
-
-# Google Vertex AI configuration (uses GCP OAuth2 auth, no API key needed)
-# [vertex]
-# project_id = "my-gcp-project"
-# region = "us-central1"
-# credentials_file = "/path/to/service-account.json"  # or use ADC
-
-# OAuth settings (for `solaris auth login` with Claude.ai account)
-# [auth]
-# auth_url = "https://claude.ai/oauth"
-# token_url = "https://claude.ai/oauth/token"
-# client_id = "solaris-mesh"
-
-# Named profiles for quick switching (--profile <name>)
-# [profiles.deepseek]
-# provider = "openai"
-# model = "deepseek-chat"
-# api_key = "sk-xxx"
-# base_url = "https://api.deepseek.com/v1"
-
-# [profiles.deepseek-v4-pro]
-# provider = "openai"
-# model = "deepseek-v4-pro"
-# api_key = "sk-xxx"
-# base_url = "https://api.deepseek.com/v1"
-# max_tokens = 16384
-#
-# [profiles.deepseek-v4-pro.compat]
-# supports_thinking = true
-
-# [profiles.ollama]
-# provider = "openai"
-# model = "qwen2.5:32b"
-# api_key = "ollama"
-# base_url = "http://localhost:11434"
-
-# [profiles.my-service]
-# provider = "my-service"
-
-# [profiles.bedrock-claude]
-# provider = "bedrock"
-# model = "anthropic.claude-sonnet-4-20250514-v1:0"
-
-# [profiles.vertex-claude]
-# provider = "vertex"
-# model = "claude-sonnet-4@20250514"
-
-# Tool confirmation settings
-[tools]
-auto_approve = false             # --auto-approve overrides
-# Tools that skip confirmation even when auto_approve = false
-allow_list = ["Read", "Grep", "Glob"]
-
-# Context compaction settings
-# [compact]
-# context_window = 200000        # context window size in tokens
-# output_reserve = 20000         # tokens reserved for output
-# autocompact_buffer = 13000     # buffer below effective window for autocompact trigger
-# emergency_buffer = 3000        # tokens from limit for emergency block
-# max_failures = 3               # consecutive failures before circuit-breaker trips
-# micro_keep_recent = 5          # keep N most recent tool results
-# micro_gap_seconds = 3600       # gap threshold for time-based microcompact
-# compactable_tools = ["Read", "ExecCommand", "Grep", "Glob", "Write", "Edit"]
-# enabled = true
-
-# File state cache (dedup repeated reads, staleness detection)
-# [file_cache]
-# max_entries = 100            # max cached file entries
-# max_size_bytes = 26214400    # 25 MB total cache size
-# enabled = true
-
-# Session settings
-[session]
-enabled = true
-directory = ".solaris/sessions"  # relative to project root
-max_sessions = 20                # auto-cleanup oldest
-
-# Hook system: run shell commands at tool lifecycle events
-# [[hooks.post_tool_use]]
-# name = "rustfmt"
-# tool_match = ["Write", "Edit"]
-# file_match = ["*.rs"]
-# command = "rustfmt ${TOOL_INPUT_FILE_PATH}"
-
-# [[hooks.post_tool_use]]
-# name = "prettier"
-# tool_match = ["Write", "Edit"]
-# file_match = ["*.ts", "*.tsx"]
-# command = "npx prettier --write ${TOOL_INPUT_FILE_PATH}"
-
-# [[hooks.stop]]
-# name = "final-lint"
-# command = "cargo clippy --quiet 2>&1 | tail -5"
-
-# Logging configuration
-# [logging]
-# enabled = true                   # enable file logging (default: false)
-# level = "info"                   # log level filter (default: "info")
-# dir = "~/Library/Logs/solaris"    # log directory (default: platform-specific)
-
-# MCP (Model Context Protocol) servers
-# [mcp.servers.filesystem]
-# transport = "stdio"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/project"]
-
-# [mcp.servers.github]
-# transport = "stdio"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-github"]
-# env = { GITHUB_TOKEN = "ghp_xxx" }
-# startup_timeout_ms = 30000
-
-# [mcp.servers.remote]
-# transport = "sse"
-# url = "http://localhost:3001/sse"
-
-# [mcp.servers.api]
-# transport = "streamable-http"
-# url = "https://tools.example.com/mcp"
-# headers = { Authorization = "Bearer xxx" }
-"#;
 
 #[cfg(test)]
 #[path = "config_test.rs"]

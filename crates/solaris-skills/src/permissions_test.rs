@@ -28,6 +28,7 @@ mod tests {
             effort: None,
             shell: None,
             paths: vec![],
+            network: Default::default(),
             hooks_raw: None,
             source: SkillSource::User,
             loaded_from: LoadedFrom::Skills,
@@ -89,6 +90,14 @@ mod tests {
         let checker = SkillPermissionChecker::new(vec![], vec![], false);
         let skill = make_skill("read-only");
         assert_eq!(checker.check(&skill), SkillPermission::Allow);
+    }
+
+    #[test]
+    fn embedded_shell_is_not_considered_safe_content() {
+        let checker = SkillPermissionChecker::new(vec![], vec![], false);
+        let mut skill = make_skill("embedded-shell");
+        skill.content = "!`echo unsafe`".into();
+        assert!(matches!(checker.check(&skill), SkillPermission::Ask { .. }));
     }
 
     // P5-7: has hooks → Ask

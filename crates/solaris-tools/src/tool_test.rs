@@ -4,6 +4,72 @@ use super::*;
 mod tests {
     use super::*;
 
+    struct DefaultCapabilityTool;
+
+    #[async_trait]
+    impl Tool for DefaultCapabilityTool {
+        fn name(&self) -> &str {
+            "DisplayName"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn input_schema(&self) -> JsonSchema {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+    }
+
+    #[test]
+    fn permission_capability_defaults_to_registered_name() {
+        let tool = DefaultCapabilityTool;
+        assert_eq!(tool.permission_capability(), tool.name());
+    }
+
+    #[tokio::test]
+    async fn default_classified_execution_maps_legacy_binary_result() {
+        let tool = DefaultCapabilityTool;
+
+        let result = tool.execute_classified(serde_json::json!({})).await;
+
+        assert_eq!(result.status, solaris_types::tool::ToolResultStatus::Executed);
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn prepared_execution_preserves_an_explicit_status() {
+        let execution = PreparedToolExecution::new_classified(
+            None,
+            Box::pin(async {
+                solaris_types::tool::ClassifiedToolResult::new(
+                    "nothing changed",
+                    solaris_types::tool::ToolResultStatus::Noop,
+                )
+            }),
+        );
+
+        let result = execution.execute_classified().await;
+
+        assert_eq!(result.status, solaris_types::tool::ToolResultStatus::Noop);
+        assert!(!result.is_error);
+    }
+
     #[test]
     fn truncate_utf8_ascii_within_limit() {
         assert_eq!(truncate_utf8("hello", 80), "hello");

@@ -145,7 +145,7 @@ pub fn format_memory_manifest(headers: &[MemoryHeader]) -> String {
 ///
 /// Returns `(frontmatter, body)`. On parse failure, returns default
 /// frontmatter and the entire content as body.
-fn parse_frontmatter(raw: &str, path: Option<&Path>) -> (MemoryFrontmatter, String) {
+pub(crate) fn parse_frontmatter(raw: &str, path: Option<&Path>) -> (MemoryFrontmatter, String) {
     let trimmed = raw.trim_start();
 
     // Must start with `---`

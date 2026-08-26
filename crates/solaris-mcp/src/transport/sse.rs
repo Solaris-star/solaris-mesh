@@ -1,13 +1,141 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 
-use super::{McpError, McpTransport};
-use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use super::{
+    DUPLICATE_REQUEST_ID_MESSAGE, McpError, McpTransport, RESPONSE_ID_MISMATCH_MESSAGE, SERVER_ERROR_MESSAGE,
+    redirect_safe_client, request_id, validate_response_id,
+};
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse, parse_jsonrpc_response_message};
+
+type PendingResponse = Result<JsonRpcResponse, McpError>;
+type PendingSender = oneshot::Sender<PendingResponse>;
+type PendingResponses = Arc<Mutex<PendingState>>;
+
+const MAX_RETIRED_REQUEST_IDS: usize = 1_024;
+
+#[derive(Default)]
+struct PendingState {
+    responses: HashMap<u64, PendingSender>,
+    retired: VecDeque<u64>,
+}
+
+impl PendingState {
+    fn retire(&mut self, request_id: u64) {
+        if self.retired.contains(&request_id) {
+            return;
+        }
+        self.retired.push_back(request_id);
+        if self.retired.len() > MAX_RETIRED_REQUEST_IDS {
+            self.retired.pop_front();
+        }
+    }
+
+    fn drain_and_retire(&mut self) -> Vec<(u64, PendingSender)> {
+        let responses: Vec<_> = self.responses.drain().collect();
+        for (request_id, _) in &responses {
+            self.retire(*request_id);
+        }
+        responses
+    }
+}
+
+fn register_pending_response(
+    pending: &mut PendingState,
+    request_id: u64,
+    sender: PendingSender,
+) -> Result<(), McpError> {
+    if pending.retired.contains(&request_id) {
+        return Err(McpError::Transport(DUPLICATE_REQUEST_ID_MESSAGE.into()));
+    }
+    match pending.responses.entry(request_id) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(sender);
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => Err(McpError::Transport(DUPLICATE_REQUEST_ID_MESSAGE.into())),
+    }
+}
+
+fn reject_pending_responses(pending: &PendingResponses, message: &'static str) {
+    let responses = {
+        let Ok(mut pending) = pending.lock() else {
+            return;
+        };
+        pending.drain_and_retire()
+    };
+    for (_, sender) in responses {
+        let _ = sender.send(Err(McpError::Transport(message.into())));
+    }
+}
+
+fn dispatch_response(pending: &PendingResponses, response: JsonRpcResponse) {
+    enum Dispatch {
+        Deliver(PendingSender),
+        Ignore,
+        Reject(Vec<(u64, PendingSender)>),
+    }
+
+    let dispatch = {
+        let Ok(mut pending) = pending.lock() else {
+            return;
+        };
+        match response.id {
+            Some(id) => match pending.responses.remove(&id) {
+                Some(sender) => {
+                    pending.retire(id);
+                    Dispatch::Deliver(sender)
+                }
+                None if pending.retired.contains(&id) || pending.responses.is_empty() => Dispatch::Ignore,
+                None => Dispatch::Reject(pending.drain_and_retire()),
+            },
+            None if pending.responses.is_empty() => Dispatch::Ignore,
+            None => Dispatch::Reject(pending.drain_and_retire()),
+        }
+    };
+
+    match dispatch {
+        Dispatch::Deliver(sender) => {
+            let _ = sender.send(Ok(response));
+        }
+        Dispatch::Ignore => {}
+        Dispatch::Reject(responses) => {
+            for (_, sender) in responses {
+                let _ = sender.send(Err(McpError::Transport(RESPONSE_ID_MISMATCH_MESSAGE.into())));
+            }
+        }
+    }
+}
+
+fn dispatch_sse_event(pending: &PendingResponses, event_type: &str, event_data: &str) {
+    if (event_type != "message" && !event_type.is_empty()) || event_data.is_empty() {
+        return;
+    }
+    match parse_jsonrpc_response_message(event_data.as_bytes()) {
+        Ok(Some(response)) => dispatch_response(pending, response),
+        Ok(None) => {}
+        Err(_) => reject_pending_responses(pending, "MCP SSE response was invalid"),
+    }
+}
+
+struct PendingRegistration {
+    pending: PendingResponses,
+    request_id: u64,
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock()
+            && pending.responses.remove(&self.request_id).is_some()
+        {
+            pending.retire(self.request_id);
+        }
+    }
+}
 
 /// SSE transport: connects to an SSE endpoint for server→client events,
 /// sends requests via POST to the endpoint URL received from the SSE stream
@@ -17,7 +145,7 @@ pub struct SseTransport {
     post_url: String,
     headers: HeaderMap,
     /// Pending request-response channels, keyed by JSON-RPC id
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    pending: PendingResponses,
     next_id: AtomicU64,
     /// Handle to the background SSE listener task
     _listener: tokio::task::JoinHandle<()>,
@@ -31,11 +159,13 @@ impl SseTransport {
             let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
                 .map_err(|e| McpError::Transport(format!("Invalid header name '{}': {}", k, e)))?;
             let value = HeaderValue::from_str(v)
-                .map_err(|e| McpError::Transport(format!("Invalid header value '{}': {}", v, e)))?;
+                .map_err(|e| McpError::Transport(format!("Invalid value for header '{}': {}", k, e)))?;
             header_map.insert(name, value);
         }
 
-        let client = reqwest::Client::new();
+        let client = redirect_safe_client(url)?;
+        let origin_url =
+            reqwest::Url::parse(url).map_err(|error| McpError::Transport(format!("Invalid SSE URL: {error}")))?;
 
         // GET the SSE endpoint to establish the event stream
         let response = client
@@ -44,7 +174,7 @@ impl SseTransport {
             .header("Accept", "text/event-stream")
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("SSE connection failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("SSE connection failed: {}", e.without_url())))?;
 
         if !response.status().is_success() {
             return Err(McpError::Transport(format!(
@@ -53,11 +183,10 @@ impl SseTransport {
             )));
         }
 
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingResponses = Arc::new(Mutex::new(PendingState::default()));
 
         // Parse the SSE stream to find the endpoint URL
         // The server sends an "endpoint" event with the POST URL
-        let base_url = extract_base_url(url);
         let mut bytes_stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut post_url: Option<String> = None;
@@ -65,7 +194,7 @@ impl SseTransport {
         use futures::StreamExt;
         // Read initial events to get the endpoint URL
         while let Some(chunk) = bytes_stream.next().await {
-            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e)))?;
+            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e.without_url())))?;
             // Normalize CRLF to LF: Python `fastmcp` / MCP SDK servers emit
             // `\r\n` separators (via `sse-starlette`), so event boundaries are
             // `\r\n\r\n` and would not match a `\n\n` search otherwise.
@@ -79,13 +208,7 @@ impl SseTransport {
                 let (event_type, event_data) = parse_sse_event(&event_block);
 
                 if event_type == "endpoint" {
-                    // The endpoint might be relative or absolute
-                    let endpoint = if event_data.starts_with("http") {
-                        event_data.clone()
-                    } else {
-                        format!("{}{}", base_url, event_data)
-                    };
-                    post_url = Some(endpoint);
+                    post_url = Some(resolve_same_origin_endpoint(&origin_url, &event_data)?);
                     break;
                 }
             }
@@ -111,18 +234,10 @@ impl SseTransport {
 
                     let (event_type, event_data) = parse_sse_event(&event_block);
 
-                    if (event_type == "message" || event_type.is_empty())
-                        && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event_data)
-                        && let Some(id) = response.id
-                    {
-                        let mut map: tokio::sync::MutexGuard<'_, HashMap<u64, oneshot::Sender<JsonRpcResponse>>> =
-                            pending_clone.lock().await;
-                        if let Some(sender) = map.remove(&id) {
-                            let _ = sender.send(response);
-                        }
-                    }
+                    dispatch_sse_event(&pending_clone, &event_type, &event_data);
                 }
             }
+            reject_pending_responses(&pending_clone, "MCP SSE stream closed");
         });
 
         Ok(Self {
@@ -135,6 +250,7 @@ impl SseTransport {
         })
     }
 
+    /// Allocate an ID for callers using the transport without `McpManager`.
     pub fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -143,17 +259,21 @@ impl SseTransport {
 #[async_trait]
 impl McpTransport for SseTransport {
     async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
-        let req_id = req
-            .id
-            .ok_or_else(|| McpError::Transport("Request must have an id".into()))?;
+        let req_id = request_id(req)?;
 
         // Set up response channel before sending
-        let (tx, rx) = oneshot::channel::<JsonRpcResponse>();
+        let (tx, rx) = oneshot::channel::<PendingResponse>();
         {
-            let mut map: tokio::sync::MutexGuard<'_, HashMap<u64, oneshot::Sender<JsonRpcResponse>>> =
-                self.pending.lock().await;
-            map.insert(req_id, tx);
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| McpError::Transport("MCP pending request state is unavailable".into()))?;
+            register_pending_response(&mut pending, req_id, tx)?;
         }
+        let _registration = PendingRegistration {
+            pending: Arc::clone(&self.pending),
+            request_id: req_id,
+        };
 
         // POST the request
         let body =
@@ -167,11 +287,9 @@ impl McpTransport for SseTransport {
             .body(body)
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("POST request failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("POST request failed: {}", e.without_url())))?;
 
         if !response.status().is_success() {
-            // Clean up pending
-            self.pending.lock().await.remove(&req_id);
             return Err(McpError::Transport(format!(
                 "POST returned status: {}",
                 response.status()
@@ -181,12 +299,13 @@ impl McpTransport for SseTransport {
         // Wait for response from SSE stream
         let rpc_response = rx
             .await
-            .map_err(|_| McpError::Transport("Response channel closed unexpectedly".into()))?;
+            .map_err(|_| McpError::Transport("Response channel closed unexpectedly".into()))??;
+        validate_response_id(req_id, &rpc_response)?;
 
         if let Some(err) = &rpc_response.error {
             return Err(McpError::JsonRpc {
                 code: err.code,
-                message: err.message.clone(),
+                message: SERVER_ERROR_MESSAGE.into(),
             });
         }
 
@@ -204,13 +323,14 @@ impl McpTransport for SseTransport {
             .body(body)
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("Notification POST failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("Notification POST failed: {}", e.without_url())))?;
 
         Ok(())
     }
 
     async fn close(&self) -> Result<(), McpError> {
         self._listener.abort();
+        reject_pending_responses(&self.pending, "MCP SSE transport closed");
         Ok(())
     }
 }
@@ -231,14 +351,19 @@ fn parse_sse_event(block: &str) -> (String, String) {
     (event_type, data_lines.join("\n"))
 }
 
-/// Extract base URL (scheme + host + port) from a full URL
-fn extract_base_url(url: &str) -> String {
-    // Find the position after "://"
-    if let Some(scheme_end) = url.find("://") {
-        let rest = &url[scheme_end + 3..];
-        if let Some(path_start) = rest.find('/') {
-            return url[..scheme_end + 3 + path_start].to_string();
-        }
+fn resolve_same_origin_endpoint(origin: &reqwest::Url, endpoint: &str) -> Result<String, McpError> {
+    let resolved = origin
+        .join(endpoint)
+        .map_err(|error| McpError::Transport(format!("Invalid SSE endpoint URL: {error}")))?;
+    let same_origin = resolved.scheme() == origin.scheme()
+        && resolved.host_str() == origin.host_str()
+        && resolved.port_or_known_default() == origin.port_or_known_default();
+    if !same_origin {
+        return Err(McpError::Transport("SSE endpoint crosses the approved origin".into()));
     }
-    url.to_string()
+    Ok(resolved.to_string())
 }
+
+#[cfg(test)]
+#[path = "sse_test.rs"]
+mod sse_test;

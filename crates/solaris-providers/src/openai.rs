@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use solaris_types::llm::{LlmEvent, LlmRequest};
@@ -22,12 +22,21 @@ impl OpenAIProvider {
 
         Self { inner }
     }
+
+    pub fn with_retries_enabled(mut self, enabled: bool) -> Self {
+        self.inner = self.inner.with_retries_enabled(enabled);
+        self
+    }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAIProvider {
     async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         self.inner.stream(request).await
+    }
+
+    async fn stream_once(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.inner.stream_once(request).await
     }
 }
 
@@ -43,6 +52,7 @@ pub(crate) struct StreamState {
     tool_calls: Vec<ToolCallAccumulator>,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
@@ -54,6 +64,7 @@ impl StreamState {
             tool_calls: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
             pending_done: None,
         }
     }
@@ -72,7 +83,7 @@ impl StreamState {
                     input_tokens: self.input_tokens,
                     output_tokens: self.output_tokens,
                     cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+                    cache_read_tokens: self.cache_read_tokens,
                 },
             },
             other => other,
@@ -101,16 +112,17 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
     };
 
     // Extract usage if present
-    if let Some(usage) = json.get("usage") {
-        let base_prompt = usage["prompt_tokens"].as_u64().unwrap_or(state.input_tokens);
+    if let Some(usage) = json.get("usage").filter(|usage| usage.is_object()) {
+        let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(state.input_tokens);
+        let cache_hit = usage["prompt_cache_hit_tokens"]
+            .as_u64()
+            .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
+            .unwrap_or(0)
+            .min(prompt_tokens);
 
-        // DeepSeek-style: prompt_cache_hit_tokens is reported separately and
-        // prompt_tokens only contains the cache-miss portion.
-        // Add it to get the true total prompt size.
-        let cache_hit = usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0);
-
-        state.input_tokens = base_prompt + cache_hit;
+        state.input_tokens = prompt_tokens;
         state.output_tokens = usage["completion_tokens"].as_u64().unwrap_or(state.output_tokens);
+        state.cache_read_tokens = cache_hit;
     }
 
     let Some(choice) = json["choices"].as_array().and_then(|c| c.first()) else {
@@ -179,11 +191,21 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id:
                                 "provider emitted tool_call with empty function name; recorded to history as-is"
                             );
                         }
+                        if let Some(extra) = tc.extra {
+                            events.push(LlmEvent::ProviderMetadata {
+                                namespace: "openai".to_owned(),
+                                value: json!({
+                                    "tool_calls": {
+                                        id.clone(): {"extra_content": extra}
+                                    }
+                                }),
+                            });
+                        }
                         events.push(LlmEvent::ToolUse {
                             id,
                             name: tc.name,
                             input,
-                            extra: tc.extra,
+                            extra: None,
                         });
                     }
                     state.pending_done = Some(LlmEvent::Done {

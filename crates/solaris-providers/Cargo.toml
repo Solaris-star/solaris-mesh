@@ -1,6 +1,6 @@
 [package]
 name = "solaris-providers"
-description = "LLM provider implementations for Solaris CLI (Anthropic, OpenAI, Bedrock, Vertex)"
+description = "LLM provider and protocol adapters for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

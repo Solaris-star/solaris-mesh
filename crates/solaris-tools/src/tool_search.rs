@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use solaris_protocol::events::ToolCategory;
+use solaris_types::effect::{EffectClass, EffectDescriptor, EffectReplayPolicy, ResourceFootprint};
 use solaris_types::tool::{JsonSchema, ToolDef, ToolResult};
 
 use crate::Tool;
@@ -83,6 +84,15 @@ impl Tool for ToolSearchTool {
         ToolResult {
             content: serde_json::to_string_pretty(&matches).unwrap_or_default(),
             is_error: false,
+        }
+    }
+
+    fn describe_effect(&self, _input: &Value) -> EffectDescriptor {
+        EffectDescriptor {
+            class: EffectClass::ReadOnly,
+            action: "search registered tool metadata".into(),
+            resources: ResourceFootprint::default(),
+            replay_policy: EffectReplayPolicy::ReplaySafe,
         }
     }
 

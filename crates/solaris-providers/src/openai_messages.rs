@@ -174,7 +174,14 @@ pub(crate) fn build_messages(messages: &[Message], system: &str, compat: &Provid
                                 "arguments": serde_json::to_string(input).unwrap_or_default()
                             }
                         });
-                        if let Some(extra_val) = extra {
+                        if let Some(extra_val) = msg
+                            .provider_metadata
+                            .get("openai")
+                            .and_then(|value| value.get("tool_calls"))
+                            .and_then(|value| value.get(id))
+                            .and_then(|value| value.get("extra_content"))
+                            .or(extra.as_ref())
+                        {
                             tc_json["extra_content"] = extra_val.clone();
                         }
                         tool_calls.push(tc_json);

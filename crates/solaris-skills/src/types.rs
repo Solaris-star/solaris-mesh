@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use solaris_types::permission::ProcessNetworkConfig;
 
 // Re-export EffortLevel from solaris-types (single source of truth)
 pub use solaris_types::skill_types::EffortLevel;
@@ -31,6 +32,8 @@ pub struct FrontmatterData {
     pub hide_from_model_invocation: Option<BoolOrString>,
     /// Raw hooks YAML — converted to serde_json::Value in SkillMetadata (Phase 11 will parse fully)
     pub hooks: Option<serde_yaml::Value>,
+    /// Exact domains available to Skill-owned processes through the Auto Host proxy.
+    pub network: ProcessNetworkConfig,
     #[serde(rename = "type")]
     pub skill_type: Option<String>,
     pub skills: Option<String>,
@@ -126,6 +129,7 @@ pub struct SkillMetadata {
     /// Glob patterns after brace expansion
     pub paths: Vec<String>,
     /// Hooks converted from serde_yaml::Value — full parse deferred to Phase 11
+    pub network: ProcessNetworkConfig,
     pub hooks_raw: Option<serde_json::Value>,
     pub source: SkillSource,
     pub loaded_from: LoadedFrom,

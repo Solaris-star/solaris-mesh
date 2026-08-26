@@ -84,6 +84,106 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_status_serializes_all_terminal_outcomes() {
+        let cases = [
+            (ToolResultStatus::Executed, "executed"),
+            (ToolResultStatus::CacheHit, "cache_hit"),
+            (ToolResultStatus::Noop, "noop"),
+            (ToolResultStatus::Denied, "denied"),
+            (ToolResultStatus::Failed, "failed"),
+            (ToolResultStatus::Aborted, "aborted"),
+            (ToolResultStatus::Timeout, "timeout"),
+            (ToolResultStatus::OutcomeUnknown, "outcome_unknown"),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(serde_json::to_value(status).unwrap(), json!(expected));
+        }
+    }
+
+    #[test]
+    fn tool_result_status_reads_legacy_success_and_error() {
+        let success: ToolResultStatus = serde_json::from_value(json!("success")).unwrap();
+        let error: ToolResultStatus = serde_json::from_value(json!("error")).unwrap();
+
+        assert_eq!(success, ToolResultStatus::Executed);
+        assert_eq!(error, ToolResultStatus::Failed);
+    }
+
+    #[test]
+    fn classified_tool_result_status_is_authoritative() {
+        let result = ClassifiedToolResult::new("cached", ToolResultStatus::CacheHit);
+
+        assert_eq!(result.status, ToolResultStatus::CacheHit);
+        assert!(!result.is_error);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({"content": "cached", "is_error": false, "status": "cache_hit"})
+        );
+    }
+
+    #[test]
+    fn classified_tool_result_reads_legacy_binary_shape() {
+        let success: ClassifiedToolResult =
+            serde_json::from_value(json!({"content": "ok", "is_error": false})).unwrap();
+        let error: ClassifiedToolResult = serde_json::from_value(json!({"content": "bad", "is_error": true})).unwrap();
+
+        assert_eq!(success.status, ToolResultStatus::Executed);
+        assert_eq!(error.status, ToolResultStatus::Failed);
+    }
+
+    #[test]
+    fn classified_tool_result_preserves_typed_sandbox_metadata() {
+        let report = crate::sandbox::SandboxReport::new(
+            crate::sandbox::SandboxEnforcement::Partial,
+            crate::sandbox::SandboxBackend::ExternalRunner,
+            crate::sandbox::SandboxReason::ExternalRunnerCapabilityInsufficient,
+        );
+        let result = ClassifiedToolResult::new("strict sandbox unavailable", ToolResultStatus::Denied)
+            .with_metadata(ToolResultMetadata::sandbox_report(report));
+
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["status"], "denied");
+        assert_eq!(value["metadata"]["sandbox_report"]["backend"], "external_runner");
+        assert_eq!(value["metadata"]["sandbox_report"]["enforcement"], "partial");
+        assert_eq!(
+            value["metadata"]["sandbox_report"]["reason"],
+            "external_runner_capability_insufficient"
+        );
+        assert_eq!(serde_json::from_value::<ClassifiedToolResult>(value).unwrap(), result);
+    }
+
+    #[test]
+    fn legacy_tool_result_serialization_includes_an_explicit_status() {
+        let success = serde_json::to_value(ToolResult {
+            content: "ok".into(),
+            is_error: false,
+        })
+        .unwrap();
+        let error = serde_json::to_value(ToolResult {
+            content: "bad".into(),
+            is_error: true,
+        })
+        .unwrap();
+
+        assert_eq!(success["status"], "executed");
+        assert_eq!(error["status"], "failed");
+    }
+
+    #[test]
+    fn useful_call_rate_counts_executed_and_cache_hit_calls() {
+        let statuses = [
+            ToolResultStatus::Executed,
+            ToolResultStatus::CacheHit,
+            ToolResultStatus::Noop,
+            ToolResultStatus::Failed,
+        ];
+
+        assert_eq!(useful_call_rate(&statuses), Some(0.5));
+        assert_eq!(useful_call_rate(&[]), None);
+    }
+
+    #[test]
     fn test_tool_def_deferred_defaults_to_false() {
         let tool = ToolDef {
             name: "test".to_string(),

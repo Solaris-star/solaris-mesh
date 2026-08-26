@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{clear, compact, help, quit};
+use super::{clear, compact, help, model, quit};
 use crate::compact::state::CompactState;
 use crate::output::OutputSink;
 use solaris_config::compact::CompactConfig;
@@ -10,12 +10,14 @@ use solaris_providers::LlmProvider;
 use solaris_types::message::Message;
 
 /// Result of executing a slash command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResult {
     /// Command handled, continue the REPL loop.
     Continue,
     /// Exit the REPL.
     Exit,
+    /// Change the active provider model without issuing a provider request.
+    SetModel(String),
 }
 
 /// Context passed to slash commands during execution.
@@ -81,6 +83,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(compact::CompactCommand));
     registry.register(Box::new(clear::ClearCommand));
     registry.register(Box::new(help::HelpCommand));
+    registry.register(Box::new(model::ModelCommand));
     registry.register(Box::new(quit::QuitCommand));
     registry
 }

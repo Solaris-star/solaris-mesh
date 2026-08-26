@@ -54,22 +54,28 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: solaris
+            helper_name: solaris-process-sandbox-helper
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary_name: solaris
+            helper_name: solaris-process-sandbox-helper
             use_cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: solaris
+            helper_name: solaris-process-sandbox-helper
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: solaris
+            helper_name: solaris-process-sandbox-helper
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: solaris.exe
-          - os: windows-latest
+            helper_name: solaris-process-sandbox-helper.exe
+          - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             binary_name: solaris.exe
+            helper_name: solaris-process-sandbox-helper.exe
 
     steps:
       - uses: actions/checkout@v7
@@ -102,6 +108,20 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
+          digest_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} -p solaris-process --bin solaris-process-sandbox-helper
+          else
+            vx cargo build --release --target ${{ matrix.target }} -p solaris-process --bin solaris-process-sandbox-helper
+          fi
+          helper="target/${{ matrix.target }}/release/${{ matrix.helper_name }}"
+          export SOLARIS_PACKAGED_SANDBOX_HELPER_SHA256="$(digest_file "${helper}")"
           if [[ "${{ matrix.use_cross }}" == "true" ]]; then
             cross build --release --target ${{ matrix.target }} -p solaris-cli
           else
@@ -114,10 +134,66 @@ jobs:
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
+          digest_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
           mkdir -p dist
           ARCHIVE="solaris-v${VERSION}-${{ matrix.target }}.tar.gz"
-          tar -C target/${{ matrix.target }}/release -czf "dist/${ARCHIVE}" ${{ matrix.binary_name }}
+          helper_dir="target/${{ matrix.target }}/release"
+          helper_manifest="${{ matrix.helper_name }}.sha256"
+          helper_digest="$(digest_file "${helper_dir}/${{ matrix.helper_name }}")"
+          printf 'sha256:%s\n' "${helper_digest}" > "${helper_dir}/${helper_manifest}"
+          chmod 0555 "${helper_dir}/${{ matrix.helper_name }}"
+          chmod 0444 "${helper_dir}/${helper_manifest}"
+          tar -C target/${{ matrix.target }}/release -czf "dist/${ARCHIVE}" \
+            ${{ matrix.binary_name }} ${{ matrix.helper_name }} "${helper_manifest}"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Smoke test packaged binaries (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          digest_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
+          mkdir -p dist/smoke
+          tar -xzf "dist/${ARCHIVE}" -C dist/smoke
+          test -x "dist/smoke/${{ matrix.binary_name }}"
+          test -x "dist/smoke/${{ matrix.helper_name }}"
+          test -f "dist/smoke/${{ matrix.helper_name }}.sha256"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            helper_mode="$(stat -f '%Lp' "dist/smoke/${{ matrix.helper_name }}")"
+            manifest_mode="$(stat -f '%Lp' "dist/smoke/${{ matrix.helper_name }}.sha256")"
+          else
+            helper_mode="$(stat -c '%a' "dist/smoke/${{ matrix.helper_name }}")"
+            manifest_mode="$(stat -c '%a' "dist/smoke/${{ matrix.helper_name }}.sha256")"
+          fi
+          test "${helper_mode}" = "555"
+          test "${manifest_mode}" = "444"
+          helper_digest="$(digest_file "dist/smoke/${{ matrix.helper_name }}")"
+          test "$(tr -d '\r\n' < "dist/smoke/${{ matrix.helper_name }}.sha256")" = "sha256:${helper_digest}"
+          case "${{ matrix.target }}:${{ runner.arch }}" in
+            x86_64-unknown-linux-gnu:X64|x86_64-apple-darwin:X64|aarch64-apple-darwin:ARM64)
+              set +e
+              "dist/smoke/${{ matrix.helper_name }}" >/dev/null 2>&1
+              helper_status=$?
+              set -e
+              test "${helper_status}" -eq 125
+              if [[ "${{ runner.os }}" == "macOS" ]]; then
+                /usr/bin/sandbox-exec \
+                  -p '(version 1) (allow default) (deny network*) (deny syscall-unix (syscall-number SYS_setsid)) (deny syscall-unix (syscall-number SYS_setpgid)) (deny syscall-unix (syscall-number SYS_posix_spawn))' \
+                  "dist/smoke/${{ matrix.helper_name }}" --solaris-sandbox-probe-target
+              fi
+              ;;
+          esac
 
       - name: Package binary (Windows)
         if: runner.os == 'Windows'
@@ -127,8 +203,104 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $archive = "solaris-v${env:VERSION}-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" -DestinationPath "dist/${archive}" -Force
+          $helper = "target/${{ matrix.target }}/release/${{ matrix.helper_name }}"
+          $helperManifest = "${helper}.sha256"
+          $installer = "target/${{ matrix.target }}/release/install-solaris.ps1"
+          $installerEntry = "target/${{ matrix.target }}/release/install-solaris.cmd"
+          $helperDigest = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText($helperManifest, "sha256:${helperDigest}`n", [Text.UTF8Encoding]::new($false))
+          Copy-Item -LiteralPath packaging/windows/install-solaris.ps1 -Destination $installer
+          Copy-Item -LiteralPath packaging/windows/install-solaris.cmd -Destination $installerEntry
+          $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          & icacls.exe $helper /inheritance:r /grant:r "*${currentSid}:(RX)" '*S-1-5-18:(RX)' '*S-1-5-32-544:(RX)'
+          if ($LASTEXITCODE -ne 0) { throw "failed to tighten sandbox helper DACL" }
+          & icacls.exe $helperManifest /inheritance:r /grant:r "*${currentSid}:(R)" '*S-1-5-18:(R)' '*S-1-5-32-544:(R)'
+          if ($LASTEXITCODE -ne 0) { throw "failed to tighten sandbox helper manifest DACL" }
+          $writeMask = [Security.AccessControl.FileSystemRights]::WriteData `
+            -bor [Security.AccessControl.FileSystemRights]::AppendData `
+            -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes `
+            -bor [Security.AccessControl.FileSystemRights]::WriteAttributes `
+            -bor [Security.AccessControl.FileSystemRights]::Delete `
+            -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles `
+            -bor [Security.AccessControl.FileSystemRights]::ChangePermissions `
+            -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+          foreach ($path in @($helper, $helperManifest)) {
+            $writableAllow = (Get-Acl -LiteralPath $path).Access | Where-Object {
+              $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+              ($_.FileSystemRights -band $writeMask) -ne 0
+            }
+            if ($writableAllow) { throw "failed to remove writable helper DACL: $path" }
+          }
+          $files = @(
+            "target/${{ matrix.target }}/release/${{ matrix.binary_name }}",
+            $helper,
+            $helperManifest,
+            $installer,
+            $installerEntry
+          )
+          Compress-Archive -Path $files -DestinationPath "dist/${archive}" -Force
           "ARCHIVE=${archive}" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Smoke test packaged binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $smoke = "dist/smoke"
+          Expand-Archive -Path "dist/${env:ARCHIVE}" -DestinationPath $smoke -Force
+          if (-not (Test-Path -LiteralPath "$smoke/${{ matrix.binary_name }}" -PathType Leaf)) {
+            throw "release archive is missing the Solaris binary"
+          }
+          if (-not (Test-Path -LiteralPath "$smoke/${{ matrix.helper_name }}" -PathType Leaf)) {
+            throw "release archive is missing the sandbox helper"
+          }
+          $manifest = "$smoke/${{ matrix.helper_name }}.sha256"
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw "release archive is missing the sandbox helper manifest"
+          }
+          $installer = "$smoke/install-solaris.ps1"
+          $installerEntry = "$smoke/install-solaris.cmd"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $installerEntry -PathType Leaf)) {
+            throw "release archive is missing the Windows installer"
+          }
+          $helperDigest = (Get-FileHash -LiteralPath "$smoke/${{ matrix.helper_name }}" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-Content -LiteralPath $manifest -Raw).Trim() -ne "sha256:${helperDigest}") {
+            throw "sandbox helper manifest does not match the packaged helper"
+          }
+          & $installerEntry
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows package installer failed with exit code $LASTEXITCODE"
+          }
+          $writeMask = [Security.AccessControl.FileSystemRights]::WriteData `
+            -bor [Security.AccessControl.FileSystemRights]::AppendData `
+            -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes `
+            -bor [Security.AccessControl.FileSystemRights]::WriteAttributes `
+            -bor [Security.AccessControl.FileSystemRights]::Delete `
+            -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles `
+            -bor [Security.AccessControl.FileSystemRights]::ChangePermissions `
+            -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+          $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $broadSids = @($currentSid, 'S-1-5-32-545', 'S-1-1-0')
+          foreach ($path in @("$smoke/${{ matrix.helper_name }}", $manifest)) {
+            $writableAllow = (Get-Acl -LiteralPath $path).Access | Where-Object {
+              $sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+              $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+              $sid -in $broadSids -and
+              ($_.FileSystemRights -band $writeMask) -ne 0
+            }
+            if ($writableAllow) { throw "installed package retains a broad writable helper DACL: $path" }
+          }
+          $installedDigest = (Get-FileHash -LiteralPath "$smoke/${{ matrix.helper_name }}" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-Content -LiteralPath $manifest -Raw).Trim() -ne "sha256:${installedDigest}") {
+            throw "installed helper digest no longer matches its manifest"
+          }
+          $nativePair = "${{ matrix.target }}:${{ runner.arch }}"
+          if ($nativePair -eq "x86_64-pc-windows-msvc:X64" -or $nativePair -eq "aarch64-pc-windows-msvc:ARM64") {
+            $process = Start-Process -FilePath "$smoke/${{ matrix.helper_name }}" -WindowStyle Hidden -Wait -PassThru
+            if ($process.ExitCode -ne 125) {
+              throw "sandbox helper smoke returned unexpected status $($process.ExitCode)"
+            }
+          }
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7

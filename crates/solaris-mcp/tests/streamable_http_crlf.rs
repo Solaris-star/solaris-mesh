@@ -6,12 +6,19 @@
 //! expose no tools to the model: the runtime SSE parser searched for `\n\n`
 //! event boundaries, which never appear in a `\r\n\r\n`-delimited stream.
 
-use std::collections::HashMap;
-
 use solaris_mcp::config::{McpServerConfig, TransportType};
-use solaris_mcp::manager::McpManager;
+use solaris_mcp::manager::{McpConnectionGuard, McpManager};
+use solaris_mcp::transport::McpError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+struct TestConnectionGuard;
+
+impl McpConnectionGuard for TestConnectionGuard {
+    fn complete(&mut self, _result: &Result<Vec<String>, McpError>) -> Result<(), McpError> {
+        Ok(())
+    }
+}
 
 /// Build an HTTP response whose body is a single SSE `message` event using
 /// CRLF separators — byte-for-byte what `sse-starlette` produces.
@@ -103,12 +110,15 @@ async fn stateful_fastmcp_style_server_exposes_tools() {
         env: None,
         url: Some(url),
         headers: None,
+        network: Default::default(),
         deferred: None,
         startup_timeout_ms: Some(5_000),
     };
-    let configs = HashMap::from([("meta-ads".to_string(), config)]);
-
-    let manager = McpManager::connect_all(&configs).await.unwrap();
+    let mut manager = McpManager::new();
+    manager
+        .connect_one_authorized("meta-ads".to_string(), &config, TestConnectionGuard)
+        .await
+        .unwrap();
 
     assert!(
         manager.has_tool_name("meta_ads_query"),

@@ -28,6 +28,7 @@ mod tests {
             effort: None,
             shell: None,
             paths: Vec::new(),
+            network: Default::default(),
             hooks_raw: None,
             source: SkillSource::User,
             loaded_from: LoadedFrom::Skills,
@@ -136,6 +137,7 @@ mod supplemental_tests {
             effort: None,
             shell: None,
             paths: Vec::new(),
+            network: Default::default(),
             hooks_raw: None,
             source: SkillSource::User,
             loaded_from: LoadedFrom::Skills,
@@ -386,6 +388,14 @@ mod phase7_tests {
             *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
             SubAgentResult {
                 name: config.name.clone(),
+                agent_id: None,
+                task_id: None,
+                status: if self.is_error {
+                    solaris_types::spawner::AgentOutcomeStatus::Failed
+                } else {
+                    solaris_types::spawner::AgentOutcomeStatus::Completed
+                },
+                output: Some(serde_json::json!({"text": self.text.clone()})),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
                 turns: 1,
@@ -417,6 +427,7 @@ mod phase7_tests {
             effort: None,
             shell: None,
             paths: Vec::new(),
+            network: Default::default(),
             hooks_raw: None,
             source: SkillSource::User,
             loaded_from: LoadedFrom::Skills,

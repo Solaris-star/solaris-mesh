@@ -10,6 +10,7 @@ mod tests {
         assert!(registry.find("compact").is_some());
         assert!(registry.find("clear").is_some());
         assert!(registry.find("help").is_some());
+        assert!(registry.find("model").is_some());
         assert!(registry.find("quit").is_some());
     }
 
@@ -30,6 +31,6 @@ mod tests {
     #[test]
     fn registry_all_returns_all_commands() {
         let registry = default_registry();
-        assert_eq!(registry.all().len(), 4);
+        assert_eq!(registry.all().len(), 5);
     }
 }

@@ -28,6 +28,7 @@ fn make_pre_hook(name: &str, tool_match: &str, command: &str) -> HookDef {
         file_match: vec![],
         command: command.to_string(),
         timeout_ms: 5_000,
+        network: Default::default(),
     }
 }
 
@@ -38,6 +39,7 @@ fn make_post_hook(name: &str, tool_match: &str, command: &str) -> HookDef {
         file_match: vec![],
         command: command.to_string(),
         timeout_ms: 5_000,
+        network: Default::default(),
     }
 }
 

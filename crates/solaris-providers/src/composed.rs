@@ -15,23 +15,28 @@ use crate::transport::ProviderTransport;
 pub(crate) struct ComposedProvider {
     transport: ProviderTransport,
     compat: ProviderCompat,
+    retries_enabled: bool,
 }
 
 impl ComposedProvider {
     pub(crate) fn new(transport: ProviderTransport, compat: ProviderCompat) -> Self {
-        Self { transport, compat }
+        Self {
+            transport,
+            compat,
+            retries_enabled: true,
+        }
     }
 
-    #[cfg(test)]
-    pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, ProviderError> {
-        let (body, _) = self.transport.project_body(request, &self.compat)?;
-        Ok(body)
+    pub(crate) fn with_retries_enabled(mut self, enabled: bool) -> Self {
+        self.retries_enabled = enabled;
+        self
     }
-}
 
-#[async_trait]
-impl LlmProvider for ComposedProvider {
-    async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+    async fn stream_with_retries(
+        &self,
+        request: &LlmRequest,
+        retries_enabled: bool,
+    ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let (body, tool_wire_shape) = self.transport.project_body(request, &self.compat)?;
 
         tracing::debug!(target: "solaris_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
@@ -52,9 +57,30 @@ impl LlmProvider for ComposedProvider {
 
         let decoder = self.transport.decoder(&self.compat);
         let process = move |response, tx| async move { decoder.process(response, &tx).await };
-        let retry_policy = self.transport.retry_policy();
+        let retry_policy = if retries_enabled && self.retries_enabled {
+            self.transport.retry_policy()
+        } else {
+            crate::stream_runner::RetryPolicy::single_attempt()
+        };
 
         run_stream(send, process, retry_policy).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, ProviderError> {
+        let (body, _) = self.transport.project_body(request, &self.compat)?;
+        Ok(body)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ComposedProvider {
+    async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.stream_with_retries(request, true).await
+    }
+
+    async fn stream_once(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.stream_with_retries(request, false).await
     }
 }
 

@@ -1,16 +1,16 @@
 # AGENTS.md
 
-Rules and conventions for AI assistants and contributors working on Solaris CLI.
+Rules and conventions for AI assistants and contributors working on Solaris Mesh.
 
 ## Overview
 
-Solaris CLI is a **multi-provider AI agent CLI** written in Rust. It connects to
+Solaris Mesh is a **plugin-first, multi-agent-native Agent Runtime** written in Rust. It connects to
 LLM providers (Anthropic, OpenAI, AWS Bedrock, Google Vertex AI), orchestrates
 built-in tools (Read, Write, Edit, Bash, Grep, Glob, Spawn), supports MCP
 servers, skills, hooks, and long-term memory. It also exposes a JSON stream
-protocol for host integration (e.g. Electron-based Solaris Studio).
+protocols for first-party host integration with Solaris Studio and the lightweight `solaris` CLI.
 
-Tech stack: Rust 2021 edition, stable toolchain, Cargo workspace under `crates/`.
+Tech stack: Rust 2024 edition, stable toolchain, Cargo workspace under `crates/`.
 
 ## Crate Map
 
@@ -18,17 +18,17 @@ Dependencies flow **downward** — never introduce circular or upward references
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
-| Bottom | `solaris-types` | Shared provider-neutral data types (LLM, message, tool) — zero internal deps |
+| Bottom | `solaris-types` | Shared provider-neutral Mesh runtime types — zero internal deps |
 | Bottom | `solaris-compact` | Context compression algorithms (folding, sanitization, tokenization) |
 | Mid | `solaris-config` | Configuration, ProviderCompat, auth, hooks, logging (`create_file_layer`), **cross-platform shell helpers** |
-| Mid | `solaris-protocol` | JSON stream protocol (events, commands, approval manager) for host integration |
+| Mid | `solaris-protocol` | Mesh host protocol, runtime events/commands, and approval transport |
 | Mid | `solaris-providers` | LLM provider implementations (Anthropic, OpenAI, Bedrock, Vertex) |
 | Mid | `solaris-tools` | Built-in agent tools (Read, Write, Edit, Bash, Grep, Glob, Spawn) |
 | Mid | `solaris-mcp` | MCP (Model Context Protocol) client |
 | Mid | `solaris-skills` | Skills system (prompt snippets, hooks, permissions, shell expansion) |
 | Mid | `solaris-memory` | Long-term cross-session memory (user prefs, feedback, project context) |
-| Top | `solaris-agent` | Agent engine, session management, orchestration |
-| Top | `solaris-cli` | CLI binary entry point |
+| Top | `solaris-agent` | Agent engine, collaboration runtime, workflow, scheduler, sessions |
+| Top | `solaris-cli` | Lightweight CLI / stdio host entry point |
 
 When adding new functionality, place it in the **lowest crate where it
 semantically belongs**. Don't create a new crate just for one shared function.
@@ -101,8 +101,8 @@ against this section. Do not rely on tests or review to catch style drift.
 
 ### Agent Integration
 
-- SolarisCLI is the built-in SDK/library integration path. Do not model it as an
-  external agent subprocess when changing Solaris host integration code.
+- Solaris Studio is the first-party native Mesh Host. Do not model Mesh as an
+  external ACP agent when changing first-party host integration code.
 - For Claude Code, Codex, or other external agent integrations, first review
   the ACP protocol, subprocess lifecycle, logging, and security boundaries.
 
@@ -127,10 +127,10 @@ Production-visible logs must not include sensitive payloads such as prompts, too
 
 ### No Hardcoded Provider Quirks
 
-**This is the single most important rule for this codebase.**
+Provider differences must remain data/contract driven.
 
-Handle provider differences through the **`ProviderCompat` configuration
-layer**, not through hardcoded conditionals.
+Existing code handles provider differences through the **`ProviderCompat` configuration
+layer**; evolve new capabilities toward a protocol-first `ProviderContract`, never hardcoded brand/model conditionals.
 
 ```rust
 // WRONG: hardcoded provider detection

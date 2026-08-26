@@ -42,6 +42,14 @@ pub(crate) async fn process_openai_sse_stream(
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
+                if let Some(events) = recover_openai_terminal_after_stream_error(&e.to_string(), &parser, &mut state) {
+                    for event in events {
+                        if tx.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                    return StreamOutcome::Ok;
+                }
                 let err = ProviderError::Connection(e.to_string());
                 return if emitted_content {
                     StreamOutcome::FailedPartial(err)
@@ -81,6 +89,21 @@ pub(crate) async fn process_openai_sse_stream(
     StreamOutcome::Ok
 }
 
+fn recover_openai_terminal_after_stream_error(
+    error: &str,
+    parser: &OpenAiParser,
+    state: &mut <OpenAiParser as ResponseParser>::State,
+) -> Option<Vec<LlmEvent>> {
+    if !error.contains("peer closed connection without sending TLS close_notify") {
+        return None;
+    }
+    let events = parser.finish(state);
+    events
+        .iter()
+        .any(|event| matches!(event, LlmEvent::Done { .. }))
+        .then_some(events)
+}
+
 pub(crate) async fn process_anthropic_sse_stream(
     response: reqwest::Response,
     tx: &mpsc::Sender<LlmEvent>,
@@ -115,6 +138,7 @@ pub(crate) async fn process_anthropic_sse_stream(
                     LlmEvent::TextDelta(_)
                         | LlmEvent::ThinkingDelta(_)
                         | LlmEvent::ThinkingSignature(_)
+                        | LlmEvent::ProviderMetadata { .. }
                         | LlmEvent::ToolUse { .. }
                 ) {
                     emitted_content = true;
@@ -178,6 +202,7 @@ pub(crate) async fn process_bedrock_aws_event_stream(
                         LlmEvent::TextDelta(_)
                             | LlmEvent::ThinkingDelta(_)
                             | LlmEvent::ThinkingSignature(_)
+                            | LlmEvent::ProviderMetadata { .. }
                             | LlmEvent::ToolUse { .. }
                     ) {
                         emitted_content = true;

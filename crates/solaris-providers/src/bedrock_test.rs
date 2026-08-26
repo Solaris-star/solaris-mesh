@@ -22,6 +22,43 @@ mod tests {
         )
     }
 
+    #[test]
+    fn shared_credentials_parser_reads_only_the_selected_static_profile() {
+        let parsed = parse_shared_credentials_profile(
+            "[default]\naws_access_key_id = default-key\naws_secret_access_key = default-secret\n\
+             [research]\naws_access_key_id = research-key\naws_secret_access_key = research-secret\n",
+            "research",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.get("aws_access_key_id").map(String::as_str),
+            Some("research-key")
+        );
+        assert_eq!(
+            parsed.get("aws_secret_access_key").map(String::as_str),
+            Some("research-secret")
+        );
+        assert!(!parsed.contains_key("credential_process"));
+    }
+
+    #[test]
+    fn default_bedrock_credentials_use_the_aws_sdk_provider_chain() {
+        let profile = AwsCredentials::Profile {
+            profile: "sso-profile".to_owned(),
+            credentials_file: None,
+        };
+        assert_eq!(sdk_chain_profile(&profile), Some(Some("sso-profile")));
+
+        let environment = AwsCredentials::Environment { credentials_file: None };
+        assert_eq!(sdk_chain_profile(&environment), Some(None));
+
+        let explicit_file = AwsCredentials::Profile {
+            profile: "static".to_owned(),
+            credentials_file: Some(PathBuf::from("credentials")),
+        };
+        assert_eq!(sdk_chain_profile(&explicit_file), None);
+    }
+
     fn bedrock_req(messages: Vec<Message>, tools: Vec<ToolDef>) -> LlmRequest {
         LlmRequest {
             model: "test-model".to_string(),
@@ -52,7 +89,7 @@ mod tests {
             insta::with_settings!({ prepend_module_to_snapshot => false }, {
                 insta::assert_json_snapshot!(
                     concat!("solaris_providers__bedrock__tests__", $name),
-                    $value
+                    crate::test_support::canonicalize_json($value)
                 );
             });
         };

@@ -276,6 +276,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_transport_does_not_follow_cross_origin_redirects() {
+        let destination = MockServer::start().await;
+        let source = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", destination.uri()))
+            .mount(&source)
+            .await;
+        let transport = ProviderTransport::OpenAi(OpenAiTransport::new("test-key", &source.uri()));
+        let compat = ProviderCompat::openai_defaults();
+        let (body, tool_wire_shape) = transport
+            .project_body(&test_request(vec![]), &compat)
+            .expect("request body projection should succeed");
+        let request = transport
+            .build_projected_request("test-model", body, &compat, tool_wire_shape)
+            .expect("projected request should build");
+
+        let error = transport.send(request).await.expect_err("redirect must be rejected");
+        assert!(matches!(error, ProviderError::Api { status: 302, .. }));
+        assert!(destination.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn anthropic_transport_maps_tool_shape_mismatch_to_actionable_api_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

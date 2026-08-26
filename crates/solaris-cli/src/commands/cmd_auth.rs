@@ -7,7 +7,7 @@ pub(crate) async fn run(action: AuthAction) -> anyhow::Result<()> {
     match action {
         AuthAction::Login => {
             oauth.login().await?;
-            eprintln!("Login successful! You can now use Solaris CLI without --api-key.");
+            eprintln!("Login successful! You can now use Solaris Mesh without --api-key.");
             Ok(())
         }
         AuthAction::Logout => oauth.logout(),

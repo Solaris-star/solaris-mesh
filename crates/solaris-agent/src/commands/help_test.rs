@@ -80,6 +80,7 @@ mod tests {
         assert!(help_text.contains("/clear"));
         assert!(help_text.contains("/compact"));
         assert!(help_text.contains("/help"));
+        assert!(help_text.contains("/model"));
         assert!(help_text.contains("/quit"));
     }
 
@@ -109,10 +110,12 @@ mod tests {
         let clear_pos = help_text.find("/clear").unwrap();
         let compact_pos = help_text.find("/compact").unwrap();
         let help_pos = help_text.find("/help").unwrap();
+        let model_pos = help_text.find("/model").unwrap();
         let quit_pos = help_text.find("/quit").unwrap();
 
         assert!(clear_pos < compact_pos);
         assert!(compact_pos < help_pos);
-        assert!(help_pos < quit_pos);
+        assert!(help_pos < model_pos);
+        assert!(model_pos < quit_pos);
     }
 }

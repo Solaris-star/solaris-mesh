@@ -42,7 +42,7 @@ mod tests {
             insta::with_settings!({ prepend_module_to_snapshot => false }, {
                 insta::assert_json_snapshot!(
                     concat!("solaris_providers__vertex__tests__", $name),
-                    $value
+                    crate::test_support::canonicalize_json($value)
                 );
             });
         };
@@ -53,6 +53,12 @@ mod tests {
         fn assert_clone<T: Clone>() {}
 
         assert_clone::<VertexProvider>();
+    }
+
+    #[test]
+    fn service_account_token_uri_cannot_redirect_authentication() {
+        assert!(validate_service_account_token_uri("https://oauth2.googleapis.com/token").is_ok());
+        assert!(validate_service_account_token_uri("https://attacker.invalid/token").is_err());
     }
 
     #[test]

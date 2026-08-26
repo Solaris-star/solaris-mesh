@@ -11,24 +11,41 @@ use crate::anthropic;
 use crate::bedrock;
 use crate::error::ProviderError;
 use crate::openai;
+use crate::openai_responses;
 use crate::vertex;
 
 /// Unified interface for LLM API providers
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError>;
+
+    async fn stream_once(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.stream(request).await
+    }
 }
 
 /// Create a provider from resolved config
 pub fn create_provider(config: &Config) -> Arc<dyn LlmProvider> {
     let compat = config.compat.clone();
+    let signals = config.provider_contract().signals;
+    let retries_enabled = signals.requests_per_minute.is_none() && signals.tokens_per_minute.is_none();
 
     match config.provider {
         ProviderType::Anthropic => Arc::new(
             anthropic::AnthropicProvider::new(&config.api_key, &config.base_url, compat)
-                .with_cache(config.prompt_caching),
+                .with_cache(config.prompt_caching)
+                .with_retries_enabled(retries_enabled),
         ),
-        ProviderType::OpenAI => Arc::new(openai::OpenAIProvider::new(&config.api_key, &config.base_url, compat)),
+        ProviderType::OpenAI => match config.provider_contract().protocol.0.as_str() {
+            "openai-responses" => Arc::new(
+                openai_responses::OpenAIResponsesProvider::new(&config.api_key, &config.base_url, compat)
+                    .with_retries_enabled(retries_enabled),
+            ),
+            _ => Arc::new(
+                openai::OpenAIProvider::new(&config.api_key, &config.base_url, compat)
+                    .with_retries_enabled(retries_enabled),
+            ),
+        },
         ProviderType::Bedrock => {
             let bc = config.bedrock.clone().unwrap_or_default();
             let region = bc
@@ -38,25 +55,20 @@ pub fn create_provider(config: &Config) -> Arc<dyn LlmProvider> {
                 .or_else(|| env::var("AWS_DEFAULT_REGION").ok())
                 .unwrap_or_else(|| "us-east-1".to_string());
             let credentials = bedrock::credentials_from_config(&bc);
-            Arc::new(bedrock::BedrockProvider::new(
-                &region,
-                credentials,
-                config.prompt_caching,
-                compat,
-            ))
+            Arc::new(
+                bedrock::BedrockProvider::new(&region, credentials, config.prompt_caching, compat)
+                    .with_retries_enabled(retries_enabled),
+            )
         }
         ProviderType::Vertex => {
             let vc = config.vertex.clone().unwrap_or_default();
             let project_id = vc.project_id.clone().unwrap_or_default();
             let region = vc.region.clone().unwrap_or_else(|| "us-central1".to_string());
             let auth = vertex::auth_from_config(&vc);
-            Arc::new(vertex::VertexProvider::new(
-                &project_id,
-                &region,
-                auth,
-                config.prompt_caching,
-                compat,
-            ))
+            Arc::new(
+                vertex::VertexProvider::new(&project_id, &region, auth, config.prompt_caching, compat)
+                    .with_retries_enabled(retries_enabled),
+            )
         }
     }
 }

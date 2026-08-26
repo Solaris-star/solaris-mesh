@@ -15,12 +15,13 @@ members = [
     "crates/solaris-cli",
     "workspace-hack",
 ]
+exclude = ["third_party/process_security_environment_spec"]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/Solaris-star/solaris-rs"
+repository = "https://github.com/Solaris-star/solaris-mesh"
 
 [workspace.dependencies]
 # Internal crates
@@ -61,6 +62,7 @@ anyhow    = "1"
 
 # File globbing
 glob = "0.3"
+ignore = "0.4.25"
 
 # Executable lookup for cross-platform shell detection
 which = "8"
@@ -80,8 +82,19 @@ serde_yaml = "0.9"
 # XDG/platform config directory
 dirs = "6"
 
+# Embedded SQLite storage for the durable Runtime Ledger
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+
 # Regular expressions (for argument substitution in skills)
 regex = "1"
+
+# Cryptographic digests for durable effect and plugin identities
+sha2 = "0.10"
+hmac = "0.12"
+
+# Capability-based filesystem access for race-resistant workspace writes
+cap-std = "4"
+same-file = "1.0.6"
 
 # File system change notification (for skill hot-reload)
 notify = "8"
@@ -100,6 +113,10 @@ aws-sdk-sts          = { version = "1", default-features = false, features = ["r
 
 # Pin rustls-webpki to fix RUSTSEC-2026-{0098,0099,0104}
 rustls-webpki = "0.103.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13.2", default-features = false, features = ["pem", "ring", "zeroize"] }
+webpki-roots = "1"
+zeroize = "1"
 
 # JWT creation (for Vertex GCP service account auth)
 jsonwebtoken = "10"
@@ -115,13 +132,19 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 
+# Agent Client Protocol (ACP) stdio agent transport
+agent-client-protocol = "2.0.0"
+
 unicode-width = "0.2.2"
 
 # Unix file flags (O_NOFOLLOW) for secure bundled skill file extraction
 libc = "0.2"
+landlock = "=0.4.7"
 
 # Windows process containment
 windows-sys = "0.61"
+flatbuffers = "=25.12.19"
+process_security_environment_spec = { path = "third_party/process_security_environment_spec", version = "=0.8.0" }
 
 # workspace-hack (managed by cargo-hakari for build speed)
 workspace-hack = { path = "workspace-hack" }

@@ -7,7 +7,7 @@ mod tests {
     use solaris_config::compact::CompactConfig;
     use solaris_config::compat::ProviderCompat;
     use solaris_config::config::{
-        BedrockConfig, Config, McpConfig, ProviderType, SessionConfig, ToolsConfig, VertexConfig,
+        BedrockConfig, Config, McpConfig, MultiAgentConfig, ProviderType, SessionConfig, ToolsConfig, VertexConfig,
     };
     use solaris_config::file_cache::FileCacheConfig;
     use solaris_config::hooks::HooksConfig;
@@ -84,6 +84,7 @@ mod tests {
             compat,
             tools: ToolsConfig::default(),
             session: SessionConfig::default(),
+            memory: Default::default(),
             compact: CompactConfig::default(),
             plan: PlanConfig::default(),
             shell: ShellConfig::default(),
@@ -93,6 +94,7 @@ mod tests {
             vertex,
             mcp: McpConfig::default(),
             logging: LoggingConfig::default(),
+            multi_agent: MultiAgentConfig::default(),
         }
     }
 

@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn full_miss_ttl_expiry() {
+    fn full_miss_with_matching_local_hashes_has_unknown_cause() {
         let mut detector = CacheBreakDetector::new();
 
         // Turn 1
@@ -156,7 +156,8 @@ mod tests {
             cache_creation_tokens: 2000,
         });
 
-        // Turn 2 — same prompt and tools but cache lost (TTL expired server-side)
+        // Turn 2 — the same locally visible prompt and tools are insufficient
+        // to prove why the provider did not reuse its cache.
         detector.record_request("prompt", &make_tools());
         let diag = detector
             .check_response(CacheStats {
@@ -168,7 +169,7 @@ mod tests {
 
         match diag {
             CacheDiagnostic::FullMiss { cause } => {
-                assert_eq!(cause, CacheBreakCause::TtlExpiry);
+                assert_eq!(cause, CacheBreakCause::Unknown);
             }
             _ => panic!("expected FullMiss"),
         }

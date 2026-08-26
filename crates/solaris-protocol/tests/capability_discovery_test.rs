@@ -1,4 +1,8 @@
-use solaris_protocol::events::{Capabilities, ProtocolEvent};
+use solaris_compact::CompactLevel;
+use solaris_protocol::events::{Capabilities, ProtocolEvent, RuntimeConfiguration};
+use solaris_types::permission::PermissionMode;
+use solaris_types::run_preset::Intensity;
+use solaris_types::workflow::MultiAgentPolicy;
 
 #[test]
 fn capabilities_serialize_with_all_fields() {
@@ -14,6 +18,7 @@ fn capabilities_serialize_with_all_fields() {
     let event = ProtocolEvent::Ready {
         version: "0.2.0".into(),
         session_id: None,
+        resumed: false,
         capabilities: caps,
     };
     let json = serde_json::to_string(&event).unwrap();
@@ -38,7 +43,22 @@ fn config_changed_event_serializes_correctly() {
         current_mode: "default".into(),
         mcp: false,
     };
-    let event = ProtocolEvent::ConfigChanged { capabilities: caps };
+    let event = ProtocolEvent::ConfigChanged {
+        capabilities: caps,
+        configuration: RuntimeConfiguration {
+            provider: "provider".into(),
+            model: "model".into(),
+            permission: PermissionMode::Auto,
+            selected_intensity: Intensity::High,
+            multi_agent_policy: MultiAgentPolicy::OnDemand,
+            max_active_agents: Some(4),
+            effective_max_active_agents: 4,
+            effective_effort: Some("high".into()),
+            thinking: None,
+            thinking_budget: None,
+            compaction: CompactLevel::Safe,
+        },
+    };
     let json = serde_json::to_string(&event).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -60,6 +80,7 @@ fn capabilities_with_effort_levels_roundtrip() {
     let event = ProtocolEvent::Ready {
         version: "0.2.0".into(),
         session_id: Some("test-session".into()),
+        resumed: false,
         capabilities: caps,
     };
     let json = serde_json::to_string(&event).unwrap();

@@ -25,6 +25,7 @@ mod tests {
             effort,
             shell: None,
             paths: Vec::new(),
+            network: Default::default(),
             hooks_raw: None,
             source: SkillSource::User,
             loaded_from: LoadedFrom::Skills,

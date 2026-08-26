@@ -3,12 +3,17 @@
 
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
+use aws_credential_types::provider::ProvideCredentials;
 use aws_sigv4::http_request::{
     self as sigv4_http, PayloadChecksumKind, SignableBody, SignableRequest, SignatureLocation, SigningSettings,
 };
 use aws_sigv4::sign::v4::SigningParams;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::thread;
 use std::time::SystemTime;
 use tokio::runtime::{Handle, Runtime};
@@ -38,6 +43,11 @@ impl BedrockProvider {
         Self { inner }
     }
 
+    pub fn with_retries_enabled(mut self, enabled: bool) -> Self {
+        self.inner = self.inner.with_retries_enabled(enabled);
+        self
+    }
+
     #[cfg(test)]
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, ProviderError> {
         self.inner.build_request_body(request)
@@ -49,6 +59,10 @@ impl LlmProvider for BedrockProvider {
     async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         self.inner.stream(request).await
     }
+
+    async fn stream_once(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.inner.stream_once(request).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,8 +72,31 @@ pub enum AwsCredentials {
         secret_access_key: String,
         session_token: Option<String>,
     },
-    Profile(String),
-    Environment,
+    Profile {
+        profile: String,
+        credentials_file: Option<PathBuf>,
+    },
+    Environment {
+        credentials_file: Option<PathBuf>,
+    },
+}
+
+fn sdk_chain_profile(credentials: &AwsCredentials) -> Option<Option<&str>> {
+    match credentials {
+        AwsCredentials::Profile {
+            profile,
+            credentials_file: None,
+        } => Some(Some(profile)),
+        AwsCredentials::Environment { credentials_file: None } => Some(None),
+        AwsCredentials::Explicit { .. }
+        | AwsCredentials::Profile {
+            credentials_file: Some(_),
+            ..
+        }
+        | AwsCredentials::Environment {
+            credentials_file: Some(_),
+        } => None,
+    }
 }
 
 #[derive(Clone)]
@@ -73,7 +110,7 @@ pub(crate) struct BedrockTransportState {
 impl BedrockTransportState {
     pub(crate) fn new(region: &str, credentials: AwsCredentials, cache_enabled: bool) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::transport::redirect_safe_client(),
             region: region.to_string(),
             credentials,
             cache_enabled,
@@ -99,6 +136,9 @@ impl BedrockTransportState {
     }
 
     fn resolve_credentials(&self) -> Result<Credentials, ProviderError> {
+        if let Some(profile) = sdk_chain_profile(&self.credentials) {
+            return Self::credentials_from_sdk(profile.map(str::to_owned));
+        }
         match &self.credentials {
             AwsCredentials::Explicit {
                 access_key_id,
@@ -111,65 +151,115 @@ impl BedrockTransportState {
                 None,
                 "solaris",
             )),
-            AwsCredentials::Profile(profile) => Self::credentials_from_sdk(Some(profile.clone())),
-            AwsCredentials::Environment => Self::credentials_from_sdk(None),
+            AwsCredentials::Profile {
+                profile,
+                credentials_file: Some(credentials_file),
+            } => Self::credentials_from_profile(profile, Some(credentials_file)),
+            AwsCredentials::Environment {
+                credentials_file: Some(credentials_file),
+            } => Self::credentials_from_environment(Some(credentials_file)),
+            AwsCredentials::Profile {
+                credentials_file: None, ..
+            }
+            | AwsCredentials::Environment { credentials_file: None } => Err(ProviderError::Connection(
+                "AWS credential source selection failed".to_owned(),
+            )),
         }
     }
 
     fn credentials_from_sdk(profile: Option<String>) -> Result<Credentials, ProviderError> {
-        // Use a short-lived tokio runtime to resolve credentials synchronously.
-        // This is called once per LLM request so the overhead is acceptable.
-        let rt = Handle::try_current();
-
         let resolve = async move {
             let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-            if let Some(p) = profile {
-                loader = loader.profile_name(p);
+            if let Some(profile) = profile {
+                loader = loader.profile_name(profile);
             }
             let config = loader.load().await;
             let provider = config.credentials_provider().ok_or_else(|| {
-                ProviderError::Connection(
-                    "No AWS credentials found. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, \
-                     AWS_PROFILE, or configure credentials in ~/.aws/credentials"
-                        .into(),
-                )
+                ProviderError::Connection("No AWS credentials were found in the configured provider chain".to_owned())
             })?;
-
-            use aws_credential_types::provider::ProvideCredentials;
-            let creds = provider
+            let credentials = provider
                 .provide_credentials()
                 .await
-                .map_err(|e| ProviderError::Connection(format!("AWS credential error: {}", e)))?;
-
+                .map_err(|_| ProviderError::Connection("AWS credential provider chain failed".to_owned()))?;
             Ok(Credentials::new(
-                creds.access_key_id(),
-                creds.secret_access_key(),
-                creds.session_token().map(|s| s.to_string()),
-                creds.expiry(),
+                credentials.access_key_id(),
+                credentials.secret_access_key(),
+                credentials.session_token().map(str::to_owned),
+                credentials.expiry(),
                 "solaris-sdk",
             ))
         };
 
-        match rt {
-            Ok(_handle) => {
-                // Already inside a tokio runtime — use spawn_blocking to avoid nested block_on
-                thread::scope(|s| {
-                    s.spawn(|| {
+        if Handle::try_current().is_ok() {
+            thread::scope(|scope| {
+                scope
+                    .spawn(|| {
                         Runtime::new()
-                            .map_err(|e| ProviderError::Connection(format!("Runtime error: {}", e)))?
+                            .map_err(|_| ProviderError::Connection("AWS credential runtime failed".to_owned()))?
                             .block_on(resolve)
                     })
                     .join()
-                    .unwrap()
-                })
-            }
-            Err(_) => {
-                // No runtime — safe to create one
-                Runtime::new()
-                    .map_err(|e| ProviderError::Connection(format!("Runtime error: {}", e)))?
-                    .block_on(resolve)
-            }
+                    .map_err(|_| ProviderError::Connection("AWS credential worker failed".to_owned()))?
+            })
+        } else {
+            Runtime::new()
+                .map_err(|_| ProviderError::Connection("AWS credential runtime failed".to_owned()))?
+                .block_on(resolve)
         }
+    }
+
+    fn credentials_from_environment(credentials_file: Option<&std::path::Path>) -> Result<Credentials, ProviderError> {
+        if let (Ok(access_key), Ok(secret_key)) = (env::var("AWS_ACCESS_KEY_ID"), env::var("AWS_SECRET_ACCESS_KEY")) {
+            return Ok(Credentials::new(
+                access_key,
+                secret_key,
+                env::var("AWS_SESSION_TOKEN").ok(),
+                None,
+                "solaris-env",
+            ));
+        }
+        let profile = env::var("AWS_PROFILE").unwrap_or_else(|_| "default".into());
+        Self::credentials_from_profile(&profile, credentials_file)
+    }
+
+    fn credentials_from_profile(
+        profile: &str,
+        credentials_file: Option<&std::path::Path>,
+    ) -> Result<Credentials, ProviderError> {
+        let path = credentials_file
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("AWS_SHARED_CREDENTIALS_FILE").map(PathBuf::from))
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .or_else(|| env::var_os("HOME"))
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".aws/credentials"))
+            })
+            .ok_or_else(|| ProviderError::Connection("Cannot determine AWS shared credentials path".into()))?;
+        let contents = fs::read_to_string(&path).map_err(|error| {
+            ProviderError::Connection(format!(
+                "Failed to read AWS shared credentials file {}: {error}",
+                path.display()
+            ))
+        })?;
+        let values = parse_shared_credentials_profile(&contents, profile).ok_or_else(|| {
+            ProviderError::Connection(format!("AWS profile {profile} was not found in {}", path.display()))
+        })?;
+        let access_key = values
+            .get("aws_access_key_id")
+            .cloned()
+            .ok_or_else(|| ProviderError::Connection(format!("AWS profile {profile} has no aws_access_key_id")))?;
+        let secret_key = values
+            .get("aws_secret_access_key")
+            .cloned()
+            .ok_or_else(|| ProviderError::Connection(format!("AWS profile {profile} has no aws_secret_access_key")))?;
+        Ok(Credentials::new(
+            access_key,
+            secret_key,
+            values.get("aws_session_token").cloned(),
+            None,
+            "solaris-profile",
+        ))
     }
 
     fn sign_request(
@@ -258,7 +348,8 @@ impl BedrockTransportState {
             ProviderError::Connection("Bedrock projected request missing signed request body bytes".to_string())
         })?;
 
-        let response = self.client.post(&url).headers(headers).body(body_bytes).send().await?;
+        let client = crate::transport::client_for_url(&self.client, &url);
+        let response = client.post(&url).headers(headers).body(body_bytes).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -328,6 +419,32 @@ fn format_bedrock_error(status: u16, body: &str) -> String {
     }
 }
 
+fn parse_shared_credentials_profile(contents: &str, profile: &str) -> Option<HashMap<String, String>> {
+    let mut current = None::<String>;
+    let mut profiles = HashMap::<String, HashMap<String, String>>::new();
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = line.strip_prefix('[').and_then(|value| value.strip_suffix(']')) {
+            current = Some(section.trim().to_owned());
+            continue;
+        }
+        let Some(section) = current.as_ref() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        profiles
+            .entry(section.clone())
+            .or_default()
+            .insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
+    }
+    profiles.remove(profile)
+}
+
 /// Build AwsCredentials from solaris-config's BedrockConfig
 pub fn credentials_from_config(bc: &BedrockConfig) -> AwsCredentials {
     if let (Some(key_id), Some(secret)) = (&bc.access_key_id, &bc.secret_access_key) {
@@ -337,9 +454,14 @@ pub fn credentials_from_config(bc: &BedrockConfig) -> AwsCredentials {
             session_token: bc.session_token.clone(),
         }
     } else if let Some(profile) = &bc.profile {
-        AwsCredentials::Profile(profile.clone())
+        AwsCredentials::Profile {
+            profile: profile.clone(),
+            credentials_file: bc.credentials_file.as_deref().map(PathBuf::from),
+        }
     } else {
-        AwsCredentials::Environment
+        AwsCredentials::Environment {
+            credentials_file: bc.credentials_file.as_deref().map(PathBuf::from),
+        }
     }
 }
 

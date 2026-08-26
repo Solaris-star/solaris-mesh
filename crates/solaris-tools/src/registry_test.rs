@@ -7,6 +7,7 @@ mod tests {
     use async_trait::async_trait;
     use solaris_protocol::events::ToolCategory;
     use solaris_types::tool::ToolResult;
+    use std::sync::{Arc, Mutex};
 
     /// A minimal Tool implementation used only in tests
     struct MockTool {
@@ -70,6 +71,30 @@ mod tests {
         let found = registry.get("my_tool");
         assert!(found.is_some(), "registered tool should be retrievable by name");
         assert_eq!(found.unwrap().name(), "my_tool");
+    }
+
+    #[test]
+    fn unique_registration_rejects_a_duplicate_without_replacing_the_original() {
+        let mut registry = ToolRegistry::new();
+        registry.register_unique(make_tool("Read", "built-in read")).unwrap();
+
+        let error = registry
+            .register_unique(make_tool("Read", "untrusted duplicate"))
+            .unwrap_err();
+
+        assert!(error.contains("Read"));
+        assert_eq!(registry.tool_names(), vec!["Read"]);
+        assert_eq!(registry.get("Read").unwrap().description(), "built-in read");
+    }
+
+    #[test]
+    fn remove_category_removes_only_matching_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool_with_category("Read", "read", ToolCategory::Info));
+        registry.register(make_tool_with_category("remote", "remote", ToolCategory::Mcp));
+
+        assert_eq!(registry.remove_category(ToolCategory::Mcp), 1);
+        assert_eq!(registry.tool_names(), vec!["Read"]);
     }
 
     #[test]
@@ -250,5 +275,70 @@ mod tests {
         }));
         let defs = registry.to_tool_defs();
         assert!(defs[0].deferred, "deferred tool should have deferred=true");
+    }
+
+    struct CompactionAwareTool {
+        name: String,
+        compacted_inputs: Arc<Mutex<Vec<serde_json::Value>>>,
+        history_compactions: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl Tool for CompactionAwareTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "records compaction notifications"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            ToolResult {
+                content: "ok".to_string(),
+                is_error: false,
+            }
+        }
+
+        fn on_result_compacted(&self, input: &serde_json::Value) {
+            self.compacted_inputs.lock().unwrap().push(input.clone());
+        }
+
+        fn on_history_compacted(&self) {
+            *self.history_compactions.lock().unwrap() += 1;
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+    }
+
+    #[test]
+    fn compaction_notifications_reach_only_the_relevant_tool() {
+        let compacted_inputs = Arc::new(Mutex::new(Vec::new()));
+        let history_compactions = Arc::new(Mutex::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(CompactionAwareTool {
+            name: "Read".to_string(),
+            compacted_inputs: Arc::clone(&compacted_inputs),
+            history_compactions: Arc::clone(&history_compactions),
+        }));
+        registry.register(make_tool("Other", "unrelated"));
+
+        let input = serde_json::json!({"file_path": "example.txt"});
+        registry.notify_result_compacted("Read", &input);
+        registry.notify_result_compacted("Missing", &input);
+        registry.notify_history_compacted();
+
+        assert_eq!(*compacted_inputs.lock().unwrap(), vec![input]);
+        assert_eq!(*history_compactions.lock().unwrap(), 1);
     }
 }

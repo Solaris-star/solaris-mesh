@@ -48,6 +48,7 @@ fn openai_config(api_key: &str) -> Config {
             directory: "/tmp".to_string(),
             max_sessions: 1,
         },
+        memory: Default::default(),
         compact: solaris_config::compact::CompactConfig::default(),
         plan: solaris_config::plan::PlanConfig::default(),
         shell: solaris_config::shell::ShellConfig::default(),
@@ -57,6 +58,7 @@ fn openai_config(api_key: &str) -> Config {
         vertex: None,
         mcp: McpConfig::default(),
         logging: solaris_config::logging::LoggingConfig::default(),
+        multi_agent: Default::default(),
     }
 }
 

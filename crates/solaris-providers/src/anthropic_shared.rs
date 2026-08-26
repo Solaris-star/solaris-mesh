@@ -138,7 +138,13 @@ pub fn build_messages(messages: &[Message], compat: &ProviderCompat) -> Vec<Valu
                         "type": "thinking",
                         "thinking": thinking
                     });
-                    if let Some(signature) = signature {
+                    if let Some(signature) = msg
+                        .provider_metadata
+                        .get("anthropic")
+                        .and_then(|value| value.get("thinking_signature"))
+                        .and_then(Value::as_str)
+                        .or(signature.as_deref())
+                    {
                         value["signature"] = json!(signature);
                     }
                     content.push(value);
@@ -328,6 +334,10 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
                 "signature_delta" => {
                     if let Some(signature) = delta["signature"].as_str() {
                         events.push(LlmEvent::ThinkingSignature(signature.to_string()));
+                        events.push(LlmEvent::ProviderMetadata {
+                            namespace: "anthropic".to_owned(),
+                            value: json!({"thinking_signature": signature}),
+                        });
                     }
                 }
                 _ => {}

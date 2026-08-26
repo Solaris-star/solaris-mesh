@@ -159,26 +159,26 @@ async fn e4_variable_substitution() {
 }
 
 // ---------------------------------------------------------------------------
-// E5: Shell command expansion
+// E5: Embedded shell must not bypass the EffectRequest pipeline
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[cfg(not(windows))] // Shell expansion uses Unix commands; skip on Windows
-async fn e5_shell_expansion() {
+async fn e5_embedded_shell_is_refused_even_when_the_skill_is_allowed() {
     let (_guard, root) = make_project();
     let skills = load_all_skills(&root, &[], false, None).await;
-    let tool = make_tool(skills, &root);
+    let tool = SkillTool::new(
+        Arc::new(skills),
+        root.clone(),
+        SkillPermissionChecker::new(vec![], vec!["shell-demo".into()], false),
+    );
 
     let result = tool.execute(json!({"skill": "shell-demo"})).await;
-    assert!(!result.is_error, "E5 FAIL: error: {}", result.content);
-
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    assert!(result.is_error, "E5 FAIL: embedded shell must not execute directly");
     assert!(
-        result.content.contains(&today),
-        "E5 FAIL: shell expansion did not produce today's date. Got: {}",
+        result.content.contains("EffectRequest"),
+        "E5 FAIL: got: {}",
         result.content
     );
-    println!("E5 PASS: shell expansion produced today's date ({})", today);
 }
 
 // ---------------------------------------------------------------------------

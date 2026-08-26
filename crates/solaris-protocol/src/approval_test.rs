@@ -4,109 +4,57 @@ use super::*;
 mod tests {
     use super::*;
 
-    // --- SessionMode: default mode ---
-
     #[test]
-    fn default_mode_does_not_auto_approve_any_category() {
+    fn auto_mode_does_not_bypass_any_capability() {
         let mgr = ToolApprovalManager::new();
-        assert!(!mgr.is_auto_approved("info"));
-        assert!(!mgr.is_auto_approved("edit"));
-        assert!(!mgr.is_auto_approved("exec"));
-        assert!(!mgr.is_auto_approved("mcp"));
+        assert!(!mgr.is_auto_approved("Read"));
+        assert!(!mgr.is_auto_approved("Write"));
+        assert!(!mgr.is_auto_approved("ExecCommand"));
+        assert_eq!(mgr.current_mode(), "auto");
     }
 
     #[test]
-    fn default_mode_current_mode_string() {
+    fn plan_mode_does_not_bypass_approval_keys() {
         let mgr = ToolApprovalManager::new();
-        assert_eq!(mgr.current_mode(), "default");
-    }
-
-    // --- SessionMode: auto_edit mode ---
-
-    #[test]
-    fn auto_edit_mode_approves_info_and_edit() {
-        let mgr = ToolApprovalManager::new();
-        mgr.set_mode(SessionMode::AutoEdit);
-        assert!(mgr.is_auto_approved("info"));
-        assert!(mgr.is_auto_approved("edit"));
+        mgr.set_mode(SessionMode::Plan);
+        assert!(!mgr.is_auto_approved("Read"));
+        assert!(!mgr.is_auto_approved("Write"));
+        assert!(!mgr.is_auto_approved("ExecCommand"));
+        assert_eq!(mgr.current_mode(), "plan");
     }
 
     #[test]
-    fn auto_edit_mode_requires_approval_for_exec_and_mcp() {
+    fn bypass_mode_skips_interactive_approval_for_all_keys() {
         let mgr = ToolApprovalManager::new();
-        mgr.set_mode(SessionMode::AutoEdit);
-        assert!(!mgr.is_auto_approved("exec"));
-        assert!(!mgr.is_auto_approved("mcp"));
+        mgr.set_mode(SessionMode::Bypass);
+        assert!(mgr.is_auto_approved("Read"));
+        assert!(mgr.is_auto_approved("Write"));
+        assert!(mgr.is_auto_approved("ExecCommand"));
+        assert!(mgr.is_auto_approved("mcp:tool"));
+        assert_eq!(mgr.current_mode(), "bypass");
     }
 
     #[test]
-    fn auto_edit_mode_current_mode_string() {
+    fn switching_mode_changes_only_interactive_bypass_behavior() {
         let mgr = ToolApprovalManager::new();
-        mgr.set_mode(SessionMode::AutoEdit);
-        assert_eq!(mgr.current_mode(), "auto_edit");
+        assert!(!mgr.is_auto_approved("Edit"));
+        mgr.set_mode(SessionMode::Plan);
+        assert!(!mgr.is_auto_approved("Edit"));
+        mgr.set_mode(SessionMode::Bypass);
+        assert!(mgr.is_auto_approved("Edit"));
+        mgr.set_mode(SessionMode::Auto);
+        assert!(!mgr.is_auto_approved("Edit"));
     }
-
-    // --- SessionMode: yolo mode ---
-
-    #[test]
-    fn yolo_mode_approves_all_categories() {
-        let mgr = ToolApprovalManager::new();
-        mgr.set_mode(SessionMode::Yolo);
-        assert!(mgr.is_auto_approved("info"));
-        assert!(mgr.is_auto_approved("edit"));
-        assert!(mgr.is_auto_approved("exec"));
-        assert!(mgr.is_auto_approved("mcp"));
-    }
-
-    #[test]
-    fn yolo_mode_current_mode_string() {
-        let mgr = ToolApprovalManager::new();
-        mgr.set_mode(SessionMode::Yolo);
-        assert_eq!(mgr.current_mode(), "yolo");
-    }
-
-    // --- Mode switching ---
-
-    #[test]
-    fn switching_mode_changes_approval_behavior() {
-        let mgr = ToolApprovalManager::new();
-
-        // Start in default
-        assert!(!mgr.is_auto_approved("edit"));
-
-        // Switch to auto_edit
-        mgr.set_mode(SessionMode::AutoEdit);
-        assert!(mgr.is_auto_approved("edit"));
-        assert!(!mgr.is_auto_approved("exec"));
-
-        // Switch to yolo
-        mgr.set_mode(SessionMode::Yolo);
-        assert!(mgr.is_auto_approved("exec"));
-
-        // Switch back to default
-        mgr.set_mode(SessionMode::Default);
-        assert!(!mgr.is_auto_approved("edit"));
-        assert!(!mgr.is_auto_approved("exec"));
-    }
-
-    // --- Mode + user "always" approval coexistence ---
 
     #[test]
     fn user_always_approval_persists_across_mode_changes() {
         let mgr = ToolApprovalManager::new();
-
-        // User manually approves "exec" category with "always"
-        mgr.add_auto_approve("exec");
-        assert!(mgr.is_auto_approved("exec"));
-
-        // Switch to auto_edit: exec still approved via user "always"
-        mgr.set_mode(SessionMode::AutoEdit);
-        assert!(mgr.is_auto_approved("exec"));
-        assert!(mgr.is_auto_approved("info")); // from mode
-
-        // Switch back to default: exec still approved via user "always"
-        mgr.set_mode(SessionMode::Default);
-        assert!(mgr.is_auto_approved("exec"));
-        assert!(!mgr.is_auto_approved("info")); // mode no longer provides this
+        mgr.add_auto_approve("ExecCommand");
+        assert!(mgr.is_auto_approved("ExecCommand"));
+        mgr.set_mode(SessionMode::Plan);
+        assert!(mgr.is_auto_approved("ExecCommand"));
+        assert!(!mgr.is_auto_approved("Read"));
+        mgr.set_mode(SessionMode::Auto);
+        assert!(mgr.is_auto_approved("ExecCommand"));
     }
 }

@@ -56,6 +56,21 @@ mod tests {
     }
 
     #[test]
+    fn response_parser_ignores_server_notifications() {
+        let message = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"secret":"value"}}"#;
+
+        assert!(parse_jsonrpc_response_message(message).unwrap().is_none());
+    }
+
+    #[test]
+    fn response_parser_preserves_a_missing_id_for_strict_validation() {
+        let message = br#"{"jsonrpc":"2.0","result":{}}"#;
+
+        let response = parse_jsonrpc_response_message(message).unwrap().unwrap();
+        assert_eq!(response.id, None);
+    }
+
+    #[test]
     fn test_mcp_tool_def_deserialization() {
         // Deserialize a McpToolDef including the camelCase inputSchema rename
         let json_str = r#"{

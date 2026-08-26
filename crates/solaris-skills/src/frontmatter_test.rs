@@ -302,6 +302,21 @@ Do the thing.
         let meta = parse_skill_fields(&fm, body, "x", SkillSource::User, LoadedFrom::Skills, None);
         assert_eq!(meta.content_length, body.len());
     }
+
+    #[test]
+    fn test_network_configuration_reaches_skill_metadata() {
+        let parsed = parse_frontmatter("---\nnetwork:\n  network_domains:\n    - api.example.com\n---\nbody");
+        let meta = parse_skill_fields(
+            &parsed.frontmatter,
+            &parsed.content,
+            "networked",
+            SkillSource::User,
+            LoadedFrom::Skills,
+            None,
+        );
+
+        assert_eq!(meta.network.network_domains, ["api.example.com"]);
+    }
 }
 
 // Supplemental tests live in a separate file to keep this file under 800 lines.

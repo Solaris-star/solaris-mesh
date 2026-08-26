@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::context_modifier::effort_to_string;
-use crate::shell::{ShellExecutionError, execute_shell_commands};
+use crate::shell::{ShellExecutionError, SkillShellExecutor, execute_shell_commands_with};
 use crate::substitution::substitute_arguments;
 use crate::types::{ExecutionContext, SkillMetadata};
 use solaris_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
@@ -20,8 +20,22 @@ pub async fn prepare_inline_content(
     session_id: Option<&str>,
     cwd: &Path,
 ) -> Result<String, ShellExecutionError> {
-    // Prepend base directory header so the model can resolve relative paths
-    // (e.g. `./schemas/foo.json`). Matches TS `processPromptSlashCommand`.
+    prepare_inline_content_with_shell(skill, args, session_id, cwd, None).await
+}
+
+pub async fn prepare_inline_content_with_shell(
+    skill: &SkillMetadata,
+    args: Option<&str>,
+    session_id: Option<&str>,
+    cwd: &Path,
+    shell_executor: Option<&dyn SkillShellExecutor>,
+) -> Result<String, ShellExecutionError> {
+    let substituted = substituted_inline_content(skill, args, session_id);
+
+    execute_shell_commands_with(&substituted, skill.loaded_from, cwd, shell_executor).await
+}
+
+pub fn substituted_inline_content(skill: &SkillMetadata, args: Option<&str>, session_id: Option<&str>) -> String {
     let base = match skill.skill_root.as_deref() {
         Some(root) => {
             let normalized = normalize_path_separators(root);
@@ -29,16 +43,13 @@ pub async fn prepare_inline_content(
         }
         None => skill.content.clone(),
     };
-
-    let substituted = substitute_arguments(
+    substitute_arguments(
         &base,
         args,
         &skill.argument_names,
         skill.skill_root.as_deref(),
         session_id,
-    );
-
-    execute_shell_commands(&substituted, skill.loaded_from, cwd).await
+    )
 }
 
 /// Normalize path separators to forward slashes.
@@ -81,8 +92,19 @@ pub async fn execute_fork(
     cwd: &Path,
     spawner: &dyn Spawner,
 ) -> Result<String, String> {
+    execute_fork_with_shell(skill, args, session_id, cwd, spawner, None).await
+}
+
+pub async fn execute_fork_with_shell(
+    skill: &SkillMetadata,
+    args: Option<&str>,
+    session_id: Option<&str>,
+    cwd: &Path,
+    spawner: &dyn Spawner,
+    shell_executor: Option<&dyn SkillShellExecutor>,
+) -> Result<String, String> {
     // Prepare content (substitution + shell) — same pipeline as inline mode
-    let prompt = prepare_inline_content(skill, args, session_id, cwd)
+    let prompt = prepare_inline_content_with_shell(skill, args, session_id, cwd, shell_executor)
         .await
         .map_err(|e: ShellExecutionError| e.to_string())?;
 
@@ -98,6 +120,10 @@ pub async fn execute_fork(
         model: skill.model.clone(),
         effort: skill.effort.map(effort_to_string),
         allowed_tools: skill.allowed_tools.clone(),
+        inherit_capabilities: false,
+        collaboration: None,
+        workflow: None,
+        execution_boundary: None,
     };
 
     let result = spawner.spawn_fork(sub_config, overrides).await;

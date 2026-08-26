@@ -1,6 +1,6 @@
 # Core Concepts
 
-This document defines the runtime units used by Solaris CLI. These terms matter
+This document defines the runtime units used by Solaris Mesh. These terms matter
 because user-facing protocol events, model calls, and tool execution operate at
 different levels.
 
@@ -80,7 +80,7 @@ sequenceDiagram
 
 ## Example
 
-If a user asks Solaris CLI to inspect and edit a file, one run might contain:
+If a user asks Solaris Mesh to inspect and edit a file, one run might contain:
 
 ```text
 Turn 1:

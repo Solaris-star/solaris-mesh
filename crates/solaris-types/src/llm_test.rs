@@ -72,4 +72,20 @@ mod tests {
             _ => panic!("expected ThinkingSignature"),
         }
     }
+
+    #[test]
+    fn test_llm_event_provider_metadata_preserves_namespace() {
+        let event = LlmEvent::ProviderMetadata {
+            namespace: "custom".to_owned(),
+            value: json!({"opaque": true}),
+        };
+
+        match event {
+            LlmEvent::ProviderMetadata { namespace, value } => {
+                assert_eq!(namespace, "custom");
+                assert_eq!(value, json!({"opaque": true}));
+            }
+            _ => panic!("expected ProviderMetadata"),
+        }
+    }
 }

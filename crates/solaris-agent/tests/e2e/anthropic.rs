@@ -41,6 +41,7 @@ fn anthropic_config(api_key: &str) -> Config {
             directory: "/tmp".to_string(),
             max_sessions: 1,
         },
+        memory: Default::default(),
         compact: solaris_config::compact::CompactConfig::default(),
         plan: solaris_config::plan::PlanConfig::default(),
         shell: solaris_config::shell::ShellConfig::default(),
@@ -50,6 +51,7 @@ fn anthropic_config(api_key: &str) -> Config {
         vertex: None,
         mcp: McpConfig::default(),
         logging: solaris_config::logging::LoggingConfig::default(),
+        multi_agent: Default::default(),
     }
 }
 
@@ -99,7 +101,7 @@ async fn test_anthropic_tool_use() {
     let provider = create_provider(&config);
     let output: Arc<dyn OutputSink> = Arc::new(TerminalSink::new(true));
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(ReadTool::new(None)));
+    registry.register(Box::new(ReadTool::new_with_workspace_root(None, std::env::temp_dir())));
 
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
     let prompt = format!(

@@ -32,6 +32,34 @@ fn silent_output() -> Arc<dyn OutputSink> {
     Arc::new(TerminalSink::new(true))
 }
 
+#[derive(Default)]
+struct RecordingDiagnosticOutput {
+    diagnostics: Mutex<Vec<(String, String)>>,
+    errors: Mutex<Vec<String>>,
+}
+
+impl OutputSink for RecordingDiagnosticOutput {
+    fn emit_text_delta(&self, _: &str, _: &str) {}
+    fn emit_thinking(&self, _: &str, _: &str) {}
+    fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+    fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+    fn emit_stream_start(&self, _: &str) {}
+    fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+
+    fn emit_error(&self, message: &str) {
+        self.errors.lock().unwrap().push(message.to_owned());
+    }
+
+    fn emit_protocol_diagnostic(&self, msg_id: &str, message: &str) {
+        self.diagnostics
+            .lock()
+            .unwrap()
+            .push((msg_id.to_owned(), message.to_owned()));
+    }
+
+    fn emit_info(&self, _: &str) {}
+}
+
 /// A mock provider that returns configurable per-turn events.
 /// Tracks the number of stream() calls for order verification.
 struct CompactMockProvider {
@@ -771,6 +799,7 @@ async fn tc_2_6_e2e_03_circuit_breaker_stops_retries() {
     let mut config = test_config();
     config.compact = CompactConfig {
         max_failures: 3,
+        autocompact_threshold_pct: Some(30),
         // Set emergency very high so it doesn't interfere
         context_window: 500_000,
         emergency_buffer: 3_000,
@@ -780,10 +809,28 @@ async fn tc_2_6_e2e_03_circuit_breaker_stops_retries() {
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(common::MockTool::new("mock_tool", "result", false)));
-    let output = silent_output();
+    let output = Arc::new(RecordingDiagnosticOutput::default());
 
-    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output.clone(), std::env::temp_dir());
     let result = engine.run("Work", "msg-1").await.expect("should succeed");
 
     assert_eq!(result.text, "Final");
+    assert!(output.errors.lock().unwrap().is_empty());
+    assert_eq!(
+        output.diagnostics.lock().unwrap().as_slice(),
+        [
+            (
+                "msg-1".to_owned(),
+                "Automatic context compaction failed; continuing without compaction.".to_owned(),
+            ),
+            (
+                "msg-1".to_owned(),
+                "Automatic context compaction failed; continuing without compaction.".to_owned(),
+            ),
+            (
+                "msg-1".to_owned(),
+                "Automatic context compaction failed; continuing without compaction.".to_owned(),
+            ),
+        ]
+    );
 }

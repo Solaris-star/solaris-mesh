@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde::{Deserialize, Serialize};
+use solaris_process::configure_safe_process_environment;
+use solaris_process::executable_path_identity;
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,31 +82,25 @@ fn default_shell_default() -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
-    #[error(
-        "unsupported shell '{0}'; supported shells are auto, pwsh, powershell, cmd, bash, zsh, sh, or a path to one of those executables"
-    )]
+    #[error("unsupported shell request ({0})")]
     UnsupportedShell(String),
-    #[error("configured shell '{0}' was recognized as {1}, but no executable was found")]
+    #[error("configured {1} executable was unavailable ({0})")]
     ShellUnavailable(String, &'static str),
-    #[error("configured shell path '{0}' does not exist or is not a file")]
+    #[error("configured shell path was unavailable ({0})")]
     PathUnavailable(String),
 }
 
 pub fn resolve_shell_config(config: &ShellConfig) -> Result<ResolvedShell, ShellError> {
     let shell = resolve_shell(Some(config.default.as_str()));
     if let Ok(shell) = &shell {
-        tracing::info!(
-            target: "solaris_config::shell",
-            shell_kind = shell.kind.name(),
-            shell_path = %shell.path.display(),
-            "resolved configured shell"
-        );
+        log_configured_shell(shell);
     }
     shell
 }
 
 pub fn resolve_shell(requested: Option<&str>) -> Result<ResolvedShell, ShellError> {
     let requested = requested.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("auto");
+    let request_identity = || executable_path_identity(Path::new(requested));
 
     if requested.eq_ignore_ascii_case("auto") {
         return Ok(default_shell());
@@ -118,31 +114,44 @@ pub fn resolve_shell(requested: Option<&str>) -> Result<ResolvedShell, ShellErro
                 shell_kind = kind.name(),
                 "configured shell executable was not found"
             );
-            ShellError::ShellUnavailable(requested.to_string(), kind.name())
+            ShellError::ShellUnavailable(request_identity(), kind.name())
         });
     }
 
     let path = PathBuf::from(requested);
     if path.components().count() > 1 || path.is_absolute() || requested.contains('\\') {
-        let kind = detect_shell_kind(&path).ok_or_else(|| ShellError::UnsupportedShell(requested.to_string()))?;
+        let kind = detect_shell_kind(&path).ok_or_else(|| ShellError::UnsupportedShell(request_identity()))?;
         if !path.is_file() {
-            return Err(ShellError::PathUnavailable(requested.to_string()));
+            return Err(ShellError::PathUnavailable(request_identity()));
         }
         return Ok(ResolvedShell::new(kind, path));
     }
 
-    Err(ShellError::UnsupportedShell(requested.to_string()))
+    Err(ShellError::UnsupportedShell(request_identity()))
 }
 
 pub fn default_shell() -> ResolvedShell {
     let shell = default_shell_from_user_shell(user_shell_path());
+    log_default_shell(&shell);
+    shell
+}
+
+fn log_configured_shell(shell: &ResolvedShell) {
+    tracing::info!(
+        target: "solaris_config::shell",
+        shell_kind = shell.kind.name(),
+        shell_path_redacted = true,
+        "resolved configured shell"
+    );
+}
+
+fn log_default_shell(shell: &ResolvedShell) {
     tracing::debug!(
         target: "solaris_config::shell",
         shell_kind = shell.kind.name(),
-        shell_path = %shell.path.display(),
+        shell_path_redacted = true,
         "resolved default shell"
     );
-    shell
 }
 
 pub fn detect_shell_kind(path: impl AsRef<Path>) -> Option<ShellKind> {
@@ -158,6 +167,7 @@ pub fn detect_shell_kind(path: impl AsRef<Path>) -> Option<ShellKind> {
 
 pub fn shell_command_builder(shell: &ResolvedShell, command_str: &str, login: bool) -> Command {
     let mut cmd = Command::new(&shell.path);
+    configure_safe_process_environment(&mut cmd);
     cmd.args(shell.derive_exec_args(command_str, login));
     cmd
 }

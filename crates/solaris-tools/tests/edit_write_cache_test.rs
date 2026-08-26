@@ -47,8 +47,8 @@ async fn tc_5_4_01_read_then_edit() {
     std::fs::write(&file, "hello world").unwrap();
 
     let cache = make_cache();
-    let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache), dir.path());
 
     read_file(&read_tool, &file).await;
 
@@ -71,7 +71,7 @@ async fn tc_5_4_02_edit_without_read() {
     std::fs::write(&file, "content").unwrap();
 
     let cache = make_cache();
-    let edit_tool = EditTool::new(Some(cache));
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache), dir.path());
 
     let input = json!({
         "file_path": file.to_str().unwrap(),
@@ -98,8 +98,8 @@ async fn tc_5_4_03_external_modification_detected() {
     std::fs::write(&file, "original content").unwrap();
 
     let cache = make_cache();
-    let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache), dir.path());
 
     read_file(&read_tool, &file).await;
 
@@ -130,8 +130,8 @@ async fn tc_5_4_04_edit_then_edit() {
     std::fs::write(&file, "aaa bbb ccc").unwrap();
 
     let cache = make_cache();
-    let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache), dir.path());
 
     read_file(&read_tool, &file).await;
 
@@ -163,7 +163,7 @@ async fn tc_5_4_05_no_cache_edit_bypasses_guard() {
     let file = dir.path().join("nocache.txt");
     std::fs::write(&file, "hello").unwrap();
 
-    let edit_tool = EditTool::new(None);
+    let edit_tool = EditTool::new_with_workspace_root(None, dir.path());
 
     let input = json!({
         "file_path": file.to_str().unwrap(),
@@ -188,8 +188,8 @@ async fn tc_5_4_06_replace_all_updates_cache() {
     std::fs::write(&file, "x-x-x-x").unwrap();
 
     let cache = make_cache();
-    let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache.clone()));
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache.clone()), dir.path());
 
     read_file(&read_tool, &file).await;
 
@@ -222,8 +222,8 @@ async fn tc_5_4_w01_write_then_read_dedup() {
     let file = dir.path().join("write_read.txt");
 
     let cache = make_cache();
-    let write_tool = WriteTool::new(Some(cache.clone()));
-    let read_tool = ReadTool::new(Some(cache));
+    let write_tool = WriteTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     // Write creates file and populates cache.
     let write_input = json!({
@@ -252,8 +252,8 @@ async fn tc_5_4_w02_write_then_edit() {
     let file = dir.path().join("write_edit.txt");
 
     let cache = make_cache();
-    let write_tool = WriteTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let write_tool = WriteTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache), dir.path());
 
     let write_input = json!({
         "file_path": file.to_str().unwrap(),
@@ -279,8 +279,8 @@ async fn tc_5_4_w03_write_overwrite_then_read() {
     let file = dir.path().join("overwrite.txt");
 
     let cache = make_cache();
-    let write_tool = WriteTool::new(Some(cache.clone()));
-    let read_tool = ReadTool::new(Some(cache));
+    let write_tool = WriteTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache), dir.path());
 
     // First write.
     let w1 = json!({
@@ -328,8 +328,8 @@ async fn read_edit_read_dedup() {
     std::fs::write(&file, "alpha beta").unwrap();
 
     let cache = make_cache();
-    let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache), dir.path());
 
     // Read.
     read_file(&read_tool, &file).await;

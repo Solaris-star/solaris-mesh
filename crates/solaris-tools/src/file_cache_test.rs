@@ -160,6 +160,30 @@ mod tests {
     }
 
     #[test]
+    fn entry_larger_than_the_total_budget_is_not_cached() {
+        let config = make_config(100, 4);
+        let mut cache = FileStateCache::new(&config);
+
+        cache.insert(PathBuf::from("/too-large"), make_state("12345", 1));
+
+        assert!(cache.get(Path::new("/too-large")).is_none());
+        assert_eq!(cache.current_size_bytes(), 0);
+    }
+
+    #[test]
+    fn oversized_replacement_removes_the_stale_cached_value() {
+        let config = make_config(100, 4);
+        let mut cache = FileStateCache::new(&config);
+        let path = PathBuf::from("/changing");
+        cache.insert(path.clone(), make_state("old", 1));
+
+        cache.insert(path.clone(), make_state("oversized", 2));
+
+        assert!(cache.get(&path).is_none());
+        assert_eq!(cache.current_size_bytes(), 0);
+    }
+
+    #[test]
     fn overwrite_same_key() {
         let config = make_config(10, 1_000_000);
         let mut cache = FileStateCache::new(&config);
@@ -241,5 +265,62 @@ mod tests {
         let got = cache.get(Path::new("/file")).unwrap();
         assert_eq!(got.offset, Some(10));
         assert_eq!(got.limit, Some(20));
+    }
+
+    #[test]
+    fn opened_match_ignores_legacy_mtime_but_requires_identity_and_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let cached_path = directory.path().join("cached.txt");
+        let other_path = directory.path().join("other.txt");
+        std::fs::write(&cached_path, "same content").unwrap();
+        std::fs::write(&other_path, "same content").unwrap();
+        let cached_identity =
+            Arc::new(OpenedFileIdentity::from_owned_file(std::fs::File::open(&cached_path).unwrap()).unwrap());
+        let reopened_identity =
+            OpenedFileIdentity::from_owned_file(std::fs::File::open(&cached_path).unwrap()).unwrap();
+        let other_identity = OpenedFileIdentity::from_owned_file(std::fs::File::open(&other_path).unwrap()).unwrap();
+        let digest = content_digest(b"same content");
+        let mut cache = FileStateCache::new(&make_config(10, 1_000_000));
+        cache.insert_opened(
+            cached_path.clone(),
+            make_state("same content", 1),
+            cached_identity,
+            digest,
+        );
+
+        assert_eq!(
+            cache.matches_opened(&cached_path, &reopened_identity, &digest, None, None),
+            Some(true),
+            "the legacy millisecond timestamp is not part of the strong match"
+        );
+        assert_eq!(
+            cache.matches_opened(
+                &cached_path,
+                &reopened_identity,
+                &content_digest(b"changed content"),
+                None,
+                None,
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            cache.matches_opened(&cached_path, &other_identity, &digest, None, None),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn legacy_cache_entry_cannot_satisfy_an_opened_object_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.txt");
+        std::fs::write(&path, "legacy").unwrap();
+        let identity = OpenedFileIdentity::from_owned_file(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut cache = FileStateCache::new(&make_config(10, 1_000_000));
+        cache.insert(path.clone(), make_state("legacy", 1));
+
+        assert_eq!(
+            cache.matches_opened(&path, &identity, &content_digest(b"legacy"), None, None),
+            Some(false)
+        );
     }
 }

@@ -16,6 +16,10 @@ pub enum AgentError {
     Provider(#[from] ProviderError),
     #[error("User aborted the session")]
     UserAborted,
+    #[error("durable task '{task_key}' requires reconciliation before it can continue (call_id={call_id:?})")]
+    ReconciliationRequired { task_key: String, call_id: Option<String> },
+    #[error("Solaris Mesh resource budget exceeded: {0}")]
+    ResourceBudgetExceeded(String),
     #[error("Context window nearly full ({input_tokens} tokens used, limit {limit})")]
     ContextTooLong { input_tokens: u64, limit: usize },
 }

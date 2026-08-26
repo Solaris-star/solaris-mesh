@@ -130,6 +130,31 @@ solaris --json-stream \
 only sent on the Anthropic wire path. OpenAI-compatible requests currently send
 only `thinking.type`, so any configured budget is ignored by that provider path.
 
+## Token accounting and prices
+
+`ProviderContract` keeps billing semantics independent from provider names. The
+wire protocol declares whether cache tokens are included in `input_tokens`, and
+the resolved compat settings may override that declaration for a custom
+protocol. Prices are configured per one million tokens:
+
+```toml
+[providers.my-service.compat]
+cache_token_accounting = "included_in_input"
+input_cost_per_million = 2.0
+cache_read_cost_per_million = 0.2
+cache_write_cost_per_million = 2.5
+output_cost_per_million = 8.0
+```
+
+Valid accounting values are `included_in_input` and `separate_from_input`.
+OpenAI protocols default to `included_in_input`; Anthropic Messages defaults to
+`separate_from_input`. Solaris reports uncached input, cache read, cache write,
+and output separately and does not charge an included cache token a second time.
+Every non-zero category needs its own configured price. If any required price is
+missing, Solaris reports the cost as unknown instead of inventing a zero or
+reusing the input price. A configured cost budget fails closed while the cost is
+unknown.
+
 ---
 
 ## AWS Bedrock

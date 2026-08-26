@@ -25,10 +25,10 @@ fn make_cache() -> Arc<RwLock<FileStateCache>> {
 #[tokio::test]
 async fn read_dedup_returns_stub_on_second_read() {
     let cache = make_cache();
-    let read_tool = ReadTool::new(Some(cache.clone()));
 
     // Create a temporary file with known content.
     let dir = tempfile::tempdir().unwrap();
+    let read_tool = ReadTool::new_with_workspace_root(Some(cache.clone()), dir.path());
     let file_path = dir.path().join("dedup_test.txt");
     std::fs::write(&file_path, "line one\nline two\nline three\n").unwrap();
     let path_str = file_path.to_str().unwrap();
@@ -63,10 +63,9 @@ async fn read_dedup_returns_stub_on_second_read() {
 #[tokio::test]
 async fn write_then_edit_chain_succeeds() {
     let cache = make_cache();
-    let write_tool = WriteTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache.clone()));
-
     let dir = tempfile::tempdir().unwrap();
+    let write_tool = WriteTool::new_with_workspace_root(Some(cache.clone()), dir.path());
+    let edit_tool = EditTool::new_with_workspace_root(Some(cache.clone()), dir.path());
     let file_path = dir.path().join("write_edit_chain.txt");
     let path_str = file_path.to_str().unwrap();
 

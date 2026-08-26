@@ -212,7 +212,13 @@ with YAML frontmatter (name, description, type). MEMORY.md is the index — one 
 line per entry, never write content directly into it.
 
 Before saving, read existing memories to avoid duplicates. \
-Verify file/function names from memory still exist before recommending them.";
+Verify file/function names from memory still exist before recommending them.
+
+Do not save code patterns, file paths, implementation details, task progress, \
+temporary verification results, or other facts that can be recovered from the \
+workspace. Unless the user explicitly asks you to remember something, reserve \
+memory for durable user preferences or non-code context that will matter in \
+future conversations.";
 
 // ===========================================================================
 // Public API

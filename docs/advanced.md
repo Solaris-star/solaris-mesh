@@ -1,8 +1,12 @@
 # Advanced Features
 
-## Sub-Agent Spawning
+## Multi-agent collaboration
 
-The LLM can use the Spawn tool to create independent sub-agents that run tasks in parallel. Each sub-agent has its own conversation context and full tool set, but shares the parent agent's LLM provider (connection pool reuse).
+The LLM can use the Spawn tool to create durable Child Agent tasks. Each Child
+Agent has its own conversation context and inherits the parent Agent's current
+provider, permission state, workspace boundary, and tool policy. The scheduler
+shares one Run-wide resource budget, while task identities and outcomes are
+kept in the collaboration runtime for restart recovery.
 
 ### Use Cases
 
@@ -14,22 +18,78 @@ The LLM can use the Spawn tool to create independent sub-agents that run tasks i
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Max parallel sub-agents | 5 | Prevents resource exhaustion |
-| Sub-agent max turns | 10 | Per sub-agent run turn limit |
-| Sub-agent max tokens | 4096 | Per sub-agent response token limit |
+| Automatic active Child Agents | 2–8 | CPU-based default, bounded to avoid resource exhaustion |
+| Explicit active Child Agents | unset | `--max-active-agents` accepts 1–64 |
+| Tasks per Run | 32 | `--max-agent-tasks` accepts 1–256 |
+| Child Agent max turns | 200 | Per task unless its budget supplies a lower value |
+| Child Agent max tokens | 4096 | Per response unless its budget supplies a lower value |
 
 ### Behavior
 
-- Sub-agents auto-approve all tool calls (no confirmation prompts)
-- Sub-agents do not save sessions
-- Sub-agents run silently (no stdout output)
-- All results are merged and returned to the parent agent
+- `Disabled` rejects every Spawn request, including explicit requests.
+- `OnDemand` is the default and allows a child only for an explicit request or a concrete need in the current task. Older `explicit` and `adaptive` values migrate to `OnDemand`.
+- `Proactive` also allows the agent to create children on its own when independent work benefits from parallel execution.
+- Child Agents use the current Run permission state and cannot independently elevate it; Spawn is itself permission-checked.
+- Root and child sessions use fenced SQLite ownership and keep their shared Run reference
+- Child Agents run through the durable task path and return a typed
+  `CollaborationRunSummary` in tool metadata. The summary includes task
+  status, stable Agent IDs, durations, four token counters, useful-call rate,
+  and any `outcome_unknown` work that needs manual verification.
+- A failed prerequisite is durably marked `Skipped`; it is never silently
+  executed during a later recovery.
+
+### Strategies and task flow
+
+`single`, `fanout`, `supervisor`, `team`, and `independent_reviewer` are
+available in addition to `auto`. `auto` selects `single` for one task, fanout
+for independent tasks, and supervisor ordering when dependencies are present.
+For a Spawn request, `single` means the parent Agent keeps the work and no
+Child Agent is created; workflow nodes may still use their ordinary single
+executor. Task IDs are checked before execution; duplicate IDs, missing
+dependencies, self-dependencies, and cycles are rejected as one request.
+
+The CLI also exposes the settings directly:
+
+```text
+solaris --multi-agent-policy on_demand \
+  --collaboration-strategy supervisor \
+  --max-active-agents 4 --max-agent-tasks 64
+```
+
+`solaris acp` exposes the same policy, strategy, and intensity options as ACP
+session configuration values. ACP `session/new`, `session/load`, `session/prompt`,
+`session/cancel`, `session/close`, and configuration updates are handled by the
+same Engine and durable session store.
+
+---
+
+## Permission and process isolation
+
+Auto is a permission mode shared by files, network access, MCP, plugins, hooks, skills, and child processes. A process sandbox is only the platform executor used by Auto. Strict Auto accepts a Full executor only; Partial or Unavailable denies the process operation without disabling Auto file tools, and there is no Ambient fallback.
+
+The Linux Full runner requires Bubblewrap at `/usr/bin/bwrap` or `/bin/bwrap`, the packaged `solaris-process-sandbox-helper` beside the Solaris executable, Landlock ABI v3 or newer, and a successful real startup handshake. Missing prerequisites are reported as `BubblewrapUnavailable`, `HelperUnavailable`, or `LandlockUnavailable`; preparation and handshake failures are reported as `SetupFailed` or `StartConfirmationFailed`. Any of these results denies the process operation before Solaris returns a running child.
+
+The Linux sandbox exposes the workspace and private `HOME`, temporary, and runtime-state directories as writable. Its supported read-only host toolchain roots are `/bin`, `/usr`, `/lib`, `/lib64`, `/sbin`, and `/nix/store` when present, plus a small fixed set of `/etc` loader, identity, certificate, resolver, host, and timezone files. Toolchains or runtime dependencies stored under `/opt`, the real user home, or another host path are not advertised as supported and may fail inside the sandbox. Solaris does not mount the complete host root because a read-only mount would still expose pathname Unix sockets.
+
+The Windows Full runner uses the packaged helper to create an AppContainer target with no network capabilities. Temporary ACL leases grant only the launch profile access to the workspace and private directories, keep Runtime state unavailable, and remain correct for concurrent launches in one Solaris process. The outer helper and all descendants remain in a kill-on-close Job Object, which is terminated immediately when the sandbox target completes so background descendants cannot outlive the operation. A real probe verifies the AppContainer token, Job membership, and startup handshake before Full is cached.
+
+The macOS Full runner uses the fixed `/usr/bin/sandbox-exec`, a restrictive Seatbelt profile, and the packaged helper. It retains the opened workspace directory identity through managed-child cleanup, checks that the configured path still names that object immediately before spawn, and rejects protected aliases, external hardlinks, sockets, and FIFOs before target execution. A guardian owns the target process group and verifies descendant termination; Seatbelt denies `setsid`, `setpgid`, and `posix_spawn` so a managed descendant cannot detach. Auto processes have no direct network access. Exact approved HTTP(S) destinations are available only through the per-launch Host proxy, which revalidates DNS and destination IPs. Full is cached only after a real probe verifies workspace writes, external file and non-proxy loopback denial, target startup, and the helper handshake. The implementation and native CI suite are present, but the current change still has no macOS runtime evidence.
+
+Other Unix platforms may use the [external strict-Auto runner contract](external-sandbox-runner.md) with an explicitly configured absolute binary path and exact SHA-256. Solaris pins that binary and requires versioned request, capability, digest, and single-use-token confirmation before and after target startup. This verifies which trusted implementation answered; it does not independently attest the implementation's OCI runtime or VM. Missing, malformed, Partial, or Unavailable results deny the process and never fall back to Ambient. Other non-Unix platforms remain Unavailable.
+
+Auto child processes have no direct network access. On Linux and macOS, a process may reach an exact approved HTTP(S) host and port only through the per-launch Host proxy. The proxy rejects IP literals, wildcards, user information, metadata names, private or special-use DNS results, and malformed or oversized proxy requests; it resolves the name again before connecting. An empty domain declaration starts no proxy and exposes no proxy environment variables. Windows rejects Auto process launches that declare network domains until a verified process-isolated proxy runner is available; it does not grant `internetClient`, install a system loopback exemption, or rely on `HTTP_PROXY`. The denial is a request-level typed `SandboxReport` with backend `WindowsAppContainer`, enforcement `Unavailable`, and reason `NetworkProxyUnavailable`; it is preserved through ToolResult and Host protocol events. The private PSEC probe is based on Microsoft `mxc` commit [`b497fd48653e01c846c6ef225e0af1c859b70122`](https://github.com/microsoft/mxc/commit/b497fd48653e01c846c6ef225e0af1c859b70122), but version or export checks alone never produce Full.
+
+Bypass uses the complete host access available to the current OS user. Explicit deny rules and blocking hooks can still refuse an operation. Bypass does not claim to prevent destructive host actions.
 
 ---
 
 ## Hook System
 
 Event-driven hooks execute shell commands at specific points in the tool lifecycle, enabling auto-formatting, linting, auditing, and more.
+
+Hooks read the same permission mode as the triggering tool. A process-backed hook in strict Auto requires a Full executor. A non-zero `pre_tool_use` hook remains a blocking decision in every mode, including Bypass.
+
+A Hook that needs network access declares exact destinations under `network.network_domains`. Skill frontmatter, Skill-owned command hooks, executable plugins, and stdio MCP use the same declaration and final process-spawn authorization. The declaration never enables direct child network access.
 
 ### Hook Types
 
@@ -210,7 +270,7 @@ grep '"session_id":"abc-123"' 2026-05-13.solaris.log | jq .
 
 ### Library Integration
 
-When Solaris CLI is used as a library (e.g. embedded in a backend server), the `create_file_layer()` API provides a composable tracing layer:
+When Solaris Mesh is embedded in a native Host or backend server, the `create_file_layer()` API provides a composable tracing layer:
 
 ```rust
 use solaris_config::logging::{ResolvedLogging, create_file_layer};
@@ -225,11 +285,11 @@ let (layer, guard) = create_file_layer(&resolved)?;
 // Compose with your existing subscriber
 tracing_subscriber::registry()
     .with(your_app_layer)
-    .with(layer)  // Solaris CLI logs → separate solaris.log file
+    .with(layer)  // Solaris Mesh logs → separate solaris.log file
     .init();
 ```
 
-The host application owns the global subscriber; Solaris CLI library crates only emit tracing events and never initialize a subscriber themselves.
+The host application owns the global subscriber; Solaris Mesh library crates only emit tracing events and never initialize a subscriber themselves.
 
 ---
 
@@ -265,13 +325,13 @@ my-workspace/
         └── AGENTS.md  ← server-specific rules
 ```
 
-Running Solaris CLI in `packages/server/` produces a system prompt containing both files, workspace first, then server.
+Running the `solaris` CLI in `packages/server/` produces a system prompt containing both files, workspace first, then server.
 
 ---
 
 ## Memory System
 
-Persistent, file-based memory that allows the agent to retain project-specific knowledge across sessions. Memory is automatically loaded into the system prompt at conversation start.
+Persistent memory is optional and is disabled by default. When enabled, Solaris freezes a read-only snapshot at session start. Changes made during the session become visible to the next session, so a running conversation cannot silently change the context it started with.
 
 ### Memory Types
 
@@ -282,19 +342,20 @@ Persistent, file-based memory that allows the agent to retain project-specific k
 | `project` | Ongoing work context not derivable from code/git |
 | `reference` | Pointers to external systems and resources |
 
-### Storage
+### Storage and migration
 
-Memory files live in a per-project directory under the global config:
+Memory is stored in a per-project SQLite database under the global config:
 
 ```
 <config_dir>/solaris/projects/<sanitized-project-path>/memory/
-├── MEMORY.md              # Index (auto-loaded into prompt, max 200 lines)
-├── user_role.md
-├── feedback_testing.md
-└── project_auth_rewrite.md
+└── memory.sqlite3
 ```
 
-Each memory file uses YAML frontmatter:
+The database uses WAL mode, full synchronous writes, versioned records, proposals, and FTS5 search. Search returns at most 8 records and at most 32 KiB of content.
+
+Older `MEMORY.md` and Markdown record files are kept in place. On the first enabled start they are imported once through a bounded, identity-checked migration. Solaris does not delete or rewrite those files, and it does not read them while Memory is disabled.
+
+Legacy files may use YAML frontmatter such as:
 
 ```markdown
 ---
@@ -308,7 +369,15 @@ Auth middleware rewrite is driven by legal/compliance requirements.
 
 ### Configuration
 
-Memory is enabled by default with no configuration required. The memory directory is auto-resolved from the current working directory.
+Enable Memory explicitly in the user or project configuration:
+
+```toml
+[memory]
+enabled = true
+review = false
+```
+
+`review = true` routes root-agent changes through proposals. Review is off by default. Child agents can only submit proposals and cannot approve, edit, or delete records directly.
 
 Override the base directory via environment variable:
 
@@ -318,10 +387,11 @@ export SOLARIS_MEMORY_DIR=/custom/path
 
 ### How It Works
 
-1. Agent starts → memory directory resolved from project path
-2. `MEMORY.md` index loaded into system prompt (truncated at 200 lines / 25 KB)
-3. Agent reads/writes memory files using standard Read/Write tools
-4. Agent maintains the `MEMORY.md` index as memories are added or removed
+1. When enabled, Solaris opens the project database and imports eligible legacy files once.
+2. Solaris freezes the current record metadata for the session prompt. Record bodies are not copied into the prompt.
+3. The dedicated `Memory` tool provides bounded search, list, create, edit, delete, proposal, and review operations.
+4. Root-agent writes apply directly only when review is disabled. Child-agent writes always create proposals.
+5. New or changed records are visible to sessions started afterward.
 
 ---
 
@@ -332,8 +402,12 @@ A read-only exploration mode where the agent focuses on understanding the codeba
 ### How It Works
 
 1. Agent calls `EnterPlanMode` → tool access restricted to read-only (Read, Grep, Glob)
-2. Agent explores code, designs approach, writes a structured plan in its response
-3. Agent calls `ExitPlanMode` → full tool access restored, plan optionally saved to disk
+2. Agent explores code, designs the approach, and prepares complete Markdown beginning with an H1 heading
+3. Agent calls `ExitPlanMode` with that Markdown → Solaris durably records a versioned `PlanArtifact` before leaving Plan mode
+
+Entering Plan mode permanently disables every MCP manager attached to the
+current Run. `ExitPlanMode` does not reconnect or re-enable MCP. Start a new
+Run and authorize the connections again when MCP access is needed.
 
 ### Configuration
 
@@ -343,6 +417,8 @@ enabled = true                    # Register Plan Mode tools (default: true)
 plan_directory = ".solaris/plans"  # Where plan files are saved
 ```
 
+`plan_directory` remains readable for legacy plan files, but new plans are stored in the Runtime Ledger. Each artifact has a stable ID, revision, Markdown digest, Run/message references, and timestamps. JSON stream Hosts can query artifacts with `get_plan_artifacts`; `runtime_snapshot.plan_artifact_refs` provides the latest references without copying full Markdown into every snapshot.
+
 ### Workflow Phases
 
 When in plan mode, the agent follows a structured 4-phase process:
@@ -350,7 +426,7 @@ When in plan mode, the agent follows a structured 4-phase process:
 1. **Understand** — Explore the codebase with read-only tools
 2. **Design** — Identify files to modify, code to reuse
 3. **Write the plan** — Compose a clear, actionable implementation plan
-4. **Submit** — Call `ExitPlanMode` to restore full tool access
+4. **Submit** — Call `ExitPlanMode` with the complete Markdown plan; persistence must succeed before the mode changes, and MCP remains disabled for the current Run
 
 ---
 
@@ -394,9 +470,11 @@ micro_keep_recent = 5       # Keep N most recent tool results
 
 An LRU cache that tracks files the agent has recently accessed, enabling read deduplication and automatic cache updates on writes.
 
-- **Read dedup**: When the agent reads a file it has already seen (and the file hasn't changed), the cache provides the content without re-reading from disk.
-- **Write/Edit auto-update**: After Write or Edit operations, the cache is updated immediately with the new content.
+- **Read dedup**: A repeated Read reopens the file and verifies both the opened object identity and the selected-content digest. When both match, the tool returns a short unchanged marker instead of repeating the content in the model context.
+- **Edit guard**: Edit requires a prior full-file Read of the same opened object and content. A partial Read does not authorize a whole-file edit.
+- **Write/Edit auto-update**: After an atomic Write or Edit, the cache is bound to the newly opened object and content digest. Millisecond modification time is retained only for compatibility and is not used as the validity check.
 - **Dual eviction**: Entries are evicted when either the entry count limit or the total byte size limit is reached.
+- **Oversized entries**: A single entry larger than `max_size_bytes` is not inserted and does not evict unrelated cached files.
 
 ### Configuration
 

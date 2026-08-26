@@ -82,6 +82,11 @@ permissions:
   deny:
     - "ExecCommand(rm *)"
 
+# Optional — exact HTTP(S) destinations for embedded shell commands
+network:
+  network_domains:
+    - "https://api.example.com"
+
 # Optional — hooks registered when the skill is active
 hooks:
   PreToolUse:
@@ -107,6 +112,7 @@ Skill body goes here.
 | `allowedTools` | string[] | Restrict tools to this list when the skill is running. |
 | `permissions.allow` | string[] | Tool patterns that are always allowed. |
 | `permissions.deny` | string[] | Tool patterns that are always denied (highest priority). |
+| `network.network_domains` | string[] | Exact HTTP(S) destinations available to embedded Skill shell commands through the Auto Host proxy. |
 | `hooks.PreToolUse` | string[] | Shell commands run before each tool call. |
 | `hooks.PostToolUse` | string[] | Shell commands run after each tool call. |
 | `hooks.Stop` | string[] | Shell commands run when the session ends. |
@@ -150,6 +156,8 @@ Current branch: !`git rev-parse --abbrev-ref HEAD`
 Recent commits:
 !`git log --oneline -5`
 ```
+
+Embedded commands use the same final process-spawn authorization as ExecCommand, executable plugins, Hooks, and stdio MCP. They do not inherit ambient proxy variables. With no `network.network_domains` declaration, no Host proxy is started for the Skill command.
 
 ## Conditional Activation
 

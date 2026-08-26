@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::provider_contract::ProviderNativeMetadata;
+
 /// Unique identifier for a tool call
 pub type ToolUseId = String;
 
@@ -49,6 +51,10 @@ pub enum ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    /// Opaque protocol/provider data required for exact round trips.
+    /// Agent Core persists this map but does not interpret unknown namespaces.
+    #[serde(default, skip_serializing_if = "ProviderNativeMetadata::is_empty")]
+    pub provider_metadata: ProviderNativeMetadata,
     /// When this message was created.  Used by microcompact to decide
     /// whether old tool results should be cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +67,7 @@ impl Message {
         Self {
             role,
             content,
+            provider_metadata: ProviderNativeMetadata::new(),
             timestamp: None,
         }
     }
@@ -70,8 +77,14 @@ impl Message {
         Self {
             role,
             content,
+            provider_metadata: ProviderNativeMetadata::new(),
             timestamp: Some(Utc::now()),
         }
+    }
+
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderNativeMetadata) -> Self {
+        self.provider_metadata = provider_metadata;
+        self
     }
 }
 
@@ -85,7 +98,8 @@ pub enum Role {
 }
 
 /// Why the model stopped generating
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// Model finished naturally
     EndTurn,
@@ -98,7 +112,7 @@ pub enum StopReason {
 }
 
 /// Token usage statistics
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,

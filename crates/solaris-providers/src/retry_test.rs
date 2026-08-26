@@ -118,11 +118,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initial_http_5xx_retry_succeeds_after_server_errors() {
+    async fn test_initial_http_retry_succeeds_after_server_errors() {
         tokio::time::pause();
 
         let counter = Arc::new(AtomicU32::new(0));
-        let result = with_initial_http_5xx_retry(|| {
+        let result = with_initial_http_retry(|| {
             let counter = Arc::clone(&counter);
             async move {
                 let attempt = counter.fetch_add(1, Ordering::SeqCst);
@@ -143,11 +143,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initial_http_5xx_retry_exhausts_after_five_retries() {
+    async fn test_initial_http_retry_exhausts_after_five_server_retries() {
         tokio::time::pause();
 
         let counter = Arc::new(AtomicU32::new(0));
-        let result = with_initial_http_5xx_retry(|| {
+        let result = with_initial_http_retry(|| {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -164,9 +164,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initial_http_5xx_retry_does_not_retry_4xx() {
+    async fn test_initial_http_retry_does_not_retry_other_4xx() {
         let counter = Arc::new(AtomicU32::new(0));
-        let result = with_initial_http_5xx_retry(|| {
+        let result = with_initial_http_retry(|| {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -183,9 +183,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initial_http_5xx_retry_does_not_retry_rate_limit() {
+    async fn test_initial_http_retry_succeeds_after_rate_limit() {
+        tokio::time::pause();
+
         let counter = Arc::new(AtomicU32::new(0));
-        let result = with_initial_http_5xx_retry(|| {
+        let result = with_initial_http_retry(|| {
+            let counter = Arc::clone(&counter);
+            async move {
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    Err(ProviderError::RateLimited {
+                        retry_after_ms: 5000,
+                        body: None,
+                    })
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_initial_connect_retry_retries_send_failure_before_response() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("test listener should bind");
+        let address = listener.local_addr().expect("test listener should have an address");
+        let server = tokio::spawn(async move {
+            for _ in 0..=MAX_INITIAL_CONNECT_RETRIES {
+                let (stream, _) = listener.accept().await.expect("test server should accept");
+                drop(stream);
+            }
+        });
+        let counter = Arc::new(AtomicU32::new(0));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test client should build");
+        let url = format!("http://{address}/chat/completions");
+
+        let result = with_initial_connect_retry(|| {
+            let client = client.clone();
+            let counter = Arc::clone(&counter);
+            let url = url.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                client
+                    .post(url)
+                    .body("request")
+                    .send()
+                    .await
+                    .map_err(ProviderError::Http)
+            }
+        })
+        .await;
+
+        let attempts = counter.load(Ordering::SeqCst);
+        server.abort();
+        assert!(
+            matches!(result, Err(ProviderError::Http(_))),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(attempts, MAX_INITIAL_CONNECT_RETRIES + 1);
+    }
+
+    #[tokio::test]
+    async fn test_initial_http_retry_exhausts_after_two_rate_limit_retries() {
+        tokio::time::pause();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let result = with_initial_http_retry(|| {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -197,14 +268,8 @@ mod tests {
         })
         .await;
 
-        assert!(matches!(
-            result.unwrap_err(),
-            ProviderError::RateLimited {
-                retry_after_ms: 5000,
-                body: None,
-            }
-        ));
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(matches!(result.unwrap_err(), ProviderError::RateLimited { .. }));
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
     }
 
     // --- backoff_sleep tests ---

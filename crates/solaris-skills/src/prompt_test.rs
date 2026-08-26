@@ -30,6 +30,7 @@ mod tests {
             effort: None,
             shell: None,
             paths: vec![],
+            network: Default::default(),
             hooks_raw: None,
             source: if bundled {
                 SkillSource::Bundled

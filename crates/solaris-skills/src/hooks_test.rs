@@ -19,6 +19,7 @@ mod tests {
             command: command.to_string(),
             matcher: matcher.map(|s| s.to_string()),
             timeout_secs,
+            network: Default::default(),
         }
     }
 
@@ -37,6 +38,23 @@ mod tests {
         assert_eq!(config.pre_tool_use.len(), 1);
         assert_eq!(config.post_tool_use.len(), 1);
         assert_eq!(config.stop.len(), 1);
+    }
+
+    #[test]
+    fn command_hook_network_configuration_reaches_hook_definition() {
+        let raw = json!({
+            "PreToolUse": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": "echo pre",
+                    "network": {"network_domains": ["api.example.com"]}
+                }]
+            }]
+        });
+        let config = parse_skill_hooks(Some(&raw), "networked", SkillSource::User).unwrap();
+        let definitions = to_hook_defs(&config, "networked");
+
+        assert_eq!(definitions.pre_tool_use[0].network.network_domains, ["api.example.com"]);
     }
 
     // -----------------------------------------------------------------------

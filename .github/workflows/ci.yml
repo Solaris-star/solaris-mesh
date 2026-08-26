@@ -42,6 +42,31 @@ jobs:
         with:
           tool: cargo-audit
 
+      - name: Install strict Linux Auto prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
+
+      - name: Probe Bubblewrap, Landlock, handshake, and cleanup
+        if: runner.os == 'Linux'
+        shell: bash
+        run: vx cargo test -p solaris-process --all-features --test linux_sandbox -- --test-threads=1
+
+      - name: Probe AppContainer, ACLs, Job containment, and cleanup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: vx cargo test -p solaris-process --all-features --test windows_sandbox -- --test-threads=1
+
+      - name: Probe Seatbelt, workspace identity, file, network, handshake, and cleanup
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test -x /usr/bin/sandbox-exec
+          vx cargo test -p solaris-process --all-features --test macos_sandbox -- --test-threads=1
+
       - name: Check formatting
         run: vx just fmt-check
 
@@ -51,9 +76,21 @@ jobs:
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
 
+      - name: Run package tests serially and retain logs
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: ./scripts/test-workspace-serial.ps1
+
+      - name: Upload serial package logs
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: serial-test-logs-${{ matrix.os }}
+          path: target/serial-test-logs
+          if-no-files-found: warn
+
       - name: Security audit
         run: vx cargo audit
-        continue-on-error: true
 
       - name: Upload nextest JUnit report
         if: always()
@@ -111,9 +148,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }} -p solaris-cli
+            cross build --release --target ${{ matrix.target }} -p solaris-cli -p solaris-process
           else
-            vx cargo build --release --target ${{ matrix.target }} -p solaris-cli
+            vx cargo build --release --target ${{ matrix.target }} -p solaris-cli -p solaris-process
           fi
 
   # ── Annotate PR / commit with test results ────────────────────────────

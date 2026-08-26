@@ -1,6 +1,6 @@
 use clap::{CommandFactory, Parser};
 
-use super::{Cli, Commands, ConfigAction};
+use super::{Cli, Commands, ConfigAction, SandboxAction};
 
 #[test]
 fn cli_definition_is_valid() {
@@ -26,6 +26,17 @@ fn config_init_parses_to_config_action() {
 }
 
 #[test]
+fn sandbox_verify_package_parses_to_sandbox_action() {
+    let cli = Cli::try_parse_from(["solaris", "sandbox", "verify-package"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Sandbox {
+            action: SandboxAction::VerifyPackage
+        })
+    ));
+}
+
+#[test]
 fn thinking_flags_parse() {
     let cli = Cli::try_parse_from([
         "solaris",
@@ -40,6 +51,28 @@ fn thinking_flags_parse() {
     assert_eq!(cli.thinking.as_deref(), Some("enabled"));
     assert_eq!(cli.thinking_budget, Some(16_000));
     assert_eq!(cli.prompt, vec!["hello"]);
+}
+
+#[test]
+fn multi_agent_flags_parse() {
+    let cli = Cli::try_parse_from([
+        "solaris",
+        "--multi-agent-policy",
+        "proactive",
+        "--collaboration-strategy",
+        "supervisor",
+        "--max-active-agents",
+        "6",
+        "--max-agent-tasks",
+        "64",
+        "inspect",
+    ])
+    .unwrap();
+    assert_eq!(cli.multi_agent_policy.as_deref(), Some("proactive"));
+    assert_eq!(cli.collaboration_strategy.as_deref(), Some("supervisor"));
+    assert_eq!(cli.max_active_agents, Some(6));
+    assert_eq!(cli.max_agent_tasks, Some(64));
+    assert_eq!(cli.prompt, vec!["inspect"]);
 }
 
 #[test]

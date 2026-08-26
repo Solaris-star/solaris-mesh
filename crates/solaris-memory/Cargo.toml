@@ -1,6 +1,6 @@
 [package]
 name = "solaris-memory"
-description = "Long-term memory system for Solaris CLI: cross-session storage of user preferences, feedback, project context, and external references"
+description = "Long-term cross-session memory system for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,9 +11,13 @@ solaris-config.workspace = true
 
 tracing.workspace    = true
 serde.workspace      = true
+serde_json.workspace = true
 serde_yaml.workspace = true
 chrono.workspace     = true
 thiserror.workspace  = true
+rusqlite.workspace   = true
+uuid.workspace       = true
+sha2.workspace       = true
 workspace-hack.workspace = true
 
 [dev-dependencies]

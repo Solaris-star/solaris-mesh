@@ -303,4 +303,19 @@ mod tests {
             "None timestamp should be omitted via skip_serializing_if"
         );
     }
+
+    #[test]
+    fn provider_metadata_preserves_unknown_namespaces() {
+        let mut metadata = crate::provider_contract::ProviderNativeMetadata::new();
+        metadata.insert(
+            "future-provider".into(),
+            json!({"opaque": {"continuation": "secret-token"}}),
+        );
+        let msg = Message::new(Role::Assistant, vec![]).with_provider_metadata(metadata.clone());
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: Message = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.provider_metadata, metadata);
+    }
 }

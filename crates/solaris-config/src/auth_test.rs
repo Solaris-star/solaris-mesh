@@ -9,7 +9,7 @@ mod tests {
 
     fn test_manager(dir: &std::path::Path) -> OAuthManager {
         OAuthManager {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
             config: AuthConfig::default(),
             credentials_path: dir.join("auth.json"),
         }
@@ -81,7 +81,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         let manager = OAuthManager {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
             config: AuthConfig {
                 auth_url: mock_server.uri(),
                 token_url: format!("{}/token", mock_server.uri()),

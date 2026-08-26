@@ -6,6 +6,32 @@ mod tests {
     use crate::shell::{ShellKind, default_shell};
     use serde_json::json;
 
+    struct TestExecutor;
+
+    #[async_trait]
+    impl HookExecutor for TestExecutor {
+        async fn execute(&self, invocation: HookInvocation) -> Result<HookExecutionResult, HookError> {
+            if invocation.command.contains("sleep 10") {
+                return Err(HookError::Timeout {
+                    timeout_ms: invocation.timeout_ms,
+                    output: String::new(),
+                });
+            }
+            let success = invocation.command.trim() != "exit 1";
+            let output = if invocation.command.contains("done") {
+                "done".to_owned()
+            } else {
+                String::new()
+            };
+            Ok(HookExecutionResult { success, output })
+        }
+    }
+
+    fn with_test_executor(mut engine: HookEngine) -> HookEngine {
+        engine.set_executor(Arc::new(TestExecutor));
+        engine
+    }
+
     fn make_hook(name: &str, tool_match: Vec<&str>, command: &str) -> HookDef {
         HookDef {
             name: name.to_string(),
@@ -13,20 +39,7 @@ mod tests {
             file_match: vec![],
             command: command.to_string(),
             timeout_ms: 30_000,
-        }
-    }
-
-    fn slow_stdout_command(message: &str) -> String {
-        match default_shell().kind {
-            ShellKind::PowerShell => {
-                format!(
-                    "[Console]::Out.WriteLine('{message}'); [Console]::Out.Flush(); while ($true) {{ [Threading.Thread]::Sleep(100) }}"
-                )
-            }
-            ShellKind::Cmd => format!("echo {message} & ping -n 6 127.0.0.1 > nul"),
-            ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => {
-                format!("printf '{message}\\n'; sleep 5")
-            }
+            network: Default::default(),
         }
     }
 
@@ -80,7 +93,7 @@ mod tests {
             post_tool_use: vec![],
             stop: vec![],
         };
-        let engine = HookEngine::new(config, std::env::temp_dir());
+        let engine = with_test_executor(HookEngine::new(config, std::env::temp_dir()));
         assert!(engine.has_hooks());
     }
 
@@ -93,31 +106,54 @@ mod tests {
             post_tool_use: vec![],
             stop: vec![],
         };
-        let engine = HookEngine::new(config, std::env::temp_dir());
+        let engine = with_test_executor(HookEngine::new(config, std::env::temp_dir()));
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn test_pre_hook_receives_runtime_env() {
+    async fn test_pre_hook_receives_resource_limit_env() {
         let config = HooksConfig {
             pre_tool_use: vec![make_hook(
                 "runtime-env",
                 vec!["Read"],
-                &env_equals_command("SOLARIS_RUNTIME_ENV_TEST", "hook-value"),
+                &env_equals_command("SOLARIS_MAX_ACTIVE_AGENTS", "4"),
             )],
             post_tool_use: vec![],
             stop: vec![],
         };
-        let engine = HookEngine::new_with_env(
+        let engine = with_test_executor(HookEngine::new_with_env(
             config,
             std::env::temp_dir(),
-            vec![("SOLARIS_RUNTIME_ENV_TEST".to_string(), "hook-value".to_string())],
+            vec![("SOLARIS_MAX_ACTIVE_AGENTS".to_string(), "4".to_string())],
+        ));
+
+        assert_eq!(
+            engine.runtime_env.get("SOLARIS_MAX_ACTIVE_AGENTS").map(String::as_str),
+            Some("4")
         );
 
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_hook_runtime_env_rejects_arbitrary_and_invalid_resource_values() {
+        let engine = HookEngine::new_with_env(
+            HooksConfig::default(),
+            std::env::temp_dir(),
+            vec![
+                ("API_KEY".to_string(), "must-not-spread".to_string()),
+                ("SOLARIS_MAX_RUN_COST".to_string(), "secret-in-safe-key".to_string()),
+                ("SOLARIS_MAX_ACTIVE_AGENTS".to_string(), "4".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            engine.runtime_env,
+            HashMap::from([("SOLARIS_MAX_ACTIVE_AGENTS".to_string(), "4".to_string())])
+        );
     }
 
     #[tokio::test]
@@ -131,11 +167,11 @@ mod tests {
             post_tool_use: vec![],
             stop: vec![],
         };
-        let engine = HookEngine::new_with_env(
+        let engine = with_test_executor(HookEngine::new_with_env(
             config,
             std::env::temp_dir(),
             vec![("TOOL_NAME".to_string(), "from-runtime".to_string())],
-        );
+        ));
 
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
 
@@ -149,7 +185,7 @@ mod tests {
             post_tool_use: vec![],
             stop: vec![],
         };
-        let engine = HookEngine::new(config, std::env::temp_dir());
+        let engine = with_test_executor(HookEngine::new(config, std::env::temp_dir()));
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), HookError::Blocked { .. }));
@@ -162,7 +198,7 @@ mod tests {
             post_tool_use: vec![make_hook("post", vec!["Read"], "echo done")],
             stop: vec![],
         };
-        let engine = HookEngine::new(config, std::env::temp_dir());
+        let engine = with_test_executor(HookEngine::new(config, std::env::temp_dir()));
         let messages = engine.run_post_tool_use("Read", &json!({}), "output").await;
         assert!(!messages.is_empty());
         assert!(messages[0].contains("done"));
@@ -177,36 +213,128 @@ mod tests {
                 file_match: vec![],
                 command: "sleep 10".to_string(),
                 timeout_ms: 100,
+                network: Default::default(),
             }],
             post_tool_use: vec![],
             stop: vec![],
         };
-        let engine = HookEngine::new(config, std::env::temp_dir());
+        let engine = with_test_executor(HookEngine::new(config, std::env::temp_dir()));
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), HookError::Timeout { .. }));
     }
 
     #[tokio::test]
-    async fn test_hook_timeout_preserves_stdout_emitted_before_timeout() {
-        let command = slow_stdout_command("hook_stdout_before_timeout");
-        let timeout_ms = if cfg!(windows) { 1500 } else { 100 };
-
-        let result = run_hook_command(&command, &HashMap::new(), timeout_ms, &std::env::temp_dir()).await;
-
-        let err = match result {
-            Ok(_) => panic!("hook command should time out"),
-            Err(err) => err,
+    async fn hook_without_effect_executor_fails_closed() {
+        let config = HooksConfig {
+            pre_tool_use: vec![make_hook("unsafe", vec!["Read"], "echo must-not-run")],
+            post_tool_use: vec![],
+            stop: vec![],
         };
-        let message = err.to_string();
-        assert!(
-            message.contains(&format!("Hook timed out after {timeout_ms}ms")),
-            "timeout message missing: {message}"
+        let engine = HookEngine::new(config, std::env::temp_dir());
+        let error = engine.run_pre_tool_use("Read", &json!({})).await.unwrap_err();
+        assert!(matches!(error, HookError::EffectExecutorUnavailable));
+    }
+
+    struct CapturingExecutor {
+        invocations: Arc<std::sync::Mutex<Vec<HookInvocation>>>,
+        outcome_unknown: bool,
+    }
+
+    #[async_trait]
+    impl HookExecutor for CapturingExecutor {
+        async fn execute(&self, invocation: HookInvocation) -> Result<HookExecutionResult, HookError> {
+            self.invocations.lock().unwrap().push(invocation.clone());
+            if self.outcome_unknown {
+                return Err(HookError::OutcomeUnknown {
+                    hook_name: invocation.hook_name,
+                    reason: "durable history unavailable".to_owned(),
+                });
+            }
+            Ok(HookExecutionResult {
+                success: true,
+                output: String::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_tool_hook_methods_supply_parent_stage_and_definition_identity() {
+        let pre = make_hook("pre", vec!["Read"], "echo pre");
+        let post = make_hook("post", vec!["Read"], "echo post");
+        let invocations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut engine = HookEngine::new(
+            HooksConfig {
+                pre_tool_use: vec![pre.clone()],
+                post_tool_use: vec![post.clone()],
+                stop: Vec::new(),
+            },
+            std::env::temp_dir(),
         );
-        assert!(
-            message.contains("hook_stdout_before_timeout"),
-            "stdout emitted before timeout should be preserved, got: {message}"
+        engine.set_executor(Arc::new(CapturingExecutor {
+            invocations: Arc::clone(&invocations),
+            outcome_unknown: false,
+        }));
+
+        engine
+            .run_pre_tool_use_for_call("parent-call", "Read", &json!({"path": "a"}))
+            .await
+            .unwrap();
+        engine
+            .run_post_tool_use_for_call("parent-call", "Read", &json!({"path": "a"}), "done")
+            .await
+            .unwrap();
+
+        let invocations = invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 2);
+        assert_eq!(invocations[0].definition, pre);
+        assert_eq!(invocations[1].definition, post);
+        assert_eq!(invocations[0].identity.as_ref().unwrap().parent_call_id, "parent-call");
+        assert_eq!(invocations[0].identity.as_ref().unwrap().stage, HookStage::PreToolUse);
+        assert_eq!(invocations[1].identity.as_ref().unwrap().stage, HookStage::PostToolUse);
+        assert_eq!(invocations[0].identity.as_ref().unwrap().ordinal, 0);
+        assert_eq!(invocations[1].identity.as_ref().unwrap().ordinal, 0);
+        assert_eq!(invocations[1].effective_input["tool_output"], "done");
+    }
+
+    #[tokio::test]
+    async fn durable_post_hook_propagates_outcome_unknown() {
+        let invocations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut engine = HookEngine::new(
+            HooksConfig {
+                post_tool_use: vec![make_hook("post", vec!["Read"], "echo post")],
+                ..Default::default()
+            },
+            std::env::temp_dir(),
         );
+        engine.set_executor(Arc::new(CapturingExecutor {
+            invocations,
+            outcome_unknown: true,
+        }));
+
+        let error = engine
+            .run_post_tool_use_for_call("parent-call", "Read", &json!({}), "done")
+            .await
+            .unwrap_err();
+
+        assert!(error.is_outcome_unknown());
+    }
+
+    #[test]
+    fn hook_config_snapshot_and_replace_preserve_exact_configuration() {
+        let original = HooksConfig {
+            pre_tool_use: vec![make_hook("pre", vec!["Read"], "echo pre")],
+            ..Default::default()
+        };
+        let replacement = HooksConfig {
+            post_tool_use: vec![make_hook("post", vec!["Write"], "echo post")],
+            ..Default::default()
+        };
+        let mut engine = HookEngine::new(original.clone(), std::env::temp_dir());
+
+        assert_eq!(engine.config_snapshot(), original);
+        engine.replace_config(replacement.clone());
+        assert_eq!(engine.config_snapshot(), replacement);
     }
 }
 
@@ -225,6 +353,7 @@ mod phase11_tests {
             file_match: vec![],
             command: "echo ok".to_string(),
             timeout_ms: 30_000,
+            network: Default::default(),
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "solaris-protocol"
-description = "JSON stream protocol (events, commands, approval manager) for Solaris CLI host integration"
+description = "Host protocol, events, commands, and approval transport for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,10 +8,13 @@ repository.workspace = true
 
 [dependencies]
 solaris-types.workspace = true
+solaris-compact.workspace = true
 
 tracing.workspace    = true
 serde.workspace      = true
 serde_json.workspace = true
+sha2.workspace       = true
+thiserror.workspace  = true
 tokio.workspace      = true
 workspace-hack.workspace = true
 

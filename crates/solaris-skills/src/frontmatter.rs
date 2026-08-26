@@ -86,6 +86,7 @@ pub fn parse_skill_fields(
         effort,
         shell: frontmatter.shell.clone(),
         paths,
+        network: frontmatter.network.clone(),
         hooks_raw,
         source,
         loaded_from,

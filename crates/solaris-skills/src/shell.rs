@@ -1,11 +1,14 @@
-use futures::future::join_all;
 use regex::Regex;
-use std::path::Path;
 use std::sync::OnceLock;
 
+use async_trait::async_trait;
+use futures::future::join_all;
+#[cfg(test)]
 use solaris_process::{CommandRunner, DEFAULT_TIMEOUT};
 
 use crate::types::LoadedFrom;
+
+const MAX_EMBEDDED_SHELL_COMMANDS: usize = 1;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -16,46 +19,85 @@ use crate::types::LoadedFrom;
 /// Block pattern:  ```!\n<commands>\n```
 /// Inline pattern: !`<command>` (preceded by start-of-line or whitespace)
 ///
-/// All matched commands are executed in parallel.
+/// Content containing more than one matched command is rejected.
 /// MCP skills are silently skipped (content returned unchanged).
 /// Command output replaces the original pattern in content.
 pub async fn execute_shell_commands(
     content: &str,
     loaded_from: LoadedFrom,
-    cwd: &Path,
+    cwd: &std::path::Path,
 ) -> Result<String, ShellExecutionError> {
+    execute_shell_commands_with(content, loaded_from, cwd, None).await
+}
+
+#[async_trait]
+pub trait SkillShellExecutor: Send + Sync {
+    async fn execute(&self, command: &str, cwd: &std::path::Path) -> Result<String, ShellExecutionError>;
+}
+
+pub async fn execute_shell_commands_with(
+    content: &str,
+    loaded_from: LoadedFrom,
+    cwd: &std::path::Path,
+    executor: Option<&dyn SkillShellExecutor>,
+) -> Result<String, ShellExecutionError> {
+    let matches = extract_shell_matches(content);
+    if matches.len() > MAX_EMBEDDED_SHELL_COMMANDS {
+        return Err(ShellExecutionError::TooManyCommands {
+            count: matches.len(),
+            limit: MAX_EMBEDDED_SHELL_COMMANDS,
+        });
+    }
     if loaded_from == LoadedFrom::Mcp {
         return Ok(content.to_owned());
     }
 
-    let matches = extract_shell_matches(content);
     if matches.is_empty() {
         return Ok(content.to_owned());
     }
-
-    // Execute all commands in parallel
-    let futures: Vec<_> = matches.iter().map(|m| execute_command(&m.command, cwd)).collect();
+    let futures: Vec<_> = matches
+        .iter()
+        .map(|matched| async {
+            if let Some(executor) = executor {
+                executor.execute(&matched.command, cwd).await
+            } else {
+                #[cfg(test)]
+                {
+                    execute_command(&matched.command, cwd).await
+                }
+                #[cfg(not(test))]
+                {
+                    Err(ShellExecutionError::EffectPipelineRequired)
+                }
+            }
+        })
+        .collect();
     let outputs: Vec<Result<String, ShellExecutionError>> = join_all(futures).await;
-
-    // Pair matches with outputs; fail-fast on first error
     let mut pairs: Vec<(usize, usize, String)> = Vec::with_capacity(matches.len());
-    for (m, result) in matches.iter().zip(outputs) {
-        let output = result.map_err(|e| ShellExecutionError::CommandFailed {
-            pattern: m.full_match.clone(),
-            output: e.to_string(),
+    for (matched, result) in matches.iter().zip(outputs) {
+        let output = result.map_err(|error| ShellExecutionError::CommandFailed {
+            pattern: matched.full_match.clone(),
+            output: error.to_string(),
         })?;
-        pairs.push((m.start, m.end, output));
+        pairs.push((matched.start, matched.end, output));
     }
-
-    // Replace from back to front to preserve byte offsets
-    pairs.sort_by_key(|p| std::cmp::Reverse(p.0));
-
+    pairs.sort_by_key(|pair| std::cmp::Reverse(pair.0));
     let mut result = content.to_owned();
     for (start, end, output) in pairs {
         result.replace_range(start..end, &output);
     }
-
     Ok(result)
+}
+
+pub fn contains_shell_commands(content: &str) -> bool {
+    !extract_shell_matches(content).is_empty()
+}
+
+pub fn shell_commands(content: &str) -> Vec<String> {
+    extract_shell_matches(content)
+        .into_iter()
+        .map(|matched| matched.command)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +107,17 @@ pub async fn execute_shell_commands(
 /// Errors that can occur during shell command execution.
 #[derive(Debug, thiserror::Error)]
 pub enum ShellExecutionError {
+    #[error("Skill contains {count} embedded shell commands; the limit is {limit}")]
+    TooManyCommands { count: usize, limit: usize },
+
     #[error("Shell command failed for pattern \"{pattern}\": {output}")]
     CommandFailed { pattern: String, output: String },
 
     #[error("Shell execution blocked for MCP skill")]
     McpBlocked,
+
+    #[error("Embedded Skill shell commands are disabled unless an EffectRequest executor is provided")]
+    EffectPipelineRequired,
 }
 
 // ---------------------------------------------------------------------------
@@ -182,52 +230,7 @@ fn extract_shell_matches(content: &str) -> Vec<ShellMatch> {
     deduped
 }
 
-// ---------------------------------------------------------------------------
-// execute_command
-// ---------------------------------------------------------------------------
-
-/// Execute a single shell command and return its combined stdout/stderr output.
-async fn execute_command(command: &str, cwd: &Path) -> Result<String, ShellExecutionError> {
-    let shell = solaris_config::shell::default_shell();
-    let mut command_builder = solaris_config::shell::shell_command_builder(&shell, command, false);
-    command_builder.current_dir(cwd);
-
-    let result = CommandRunner::new(command_builder)
-        .run()
-        .await
-        .map_err(|e| ShellExecutionError::CommandFailed {
-            pattern: command.to_owned(),
-            output: e.to_string(),
-        })?;
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    let formatted = format_output(stdout.trim_end(), stderr.trim_end());
-
-    if result.timed_out {
-        let output = if formatted.is_empty() {
-            format!("timed out after {}ms", DEFAULT_TIMEOUT.as_millis())
-        } else {
-            format!("timed out after {}ms\n{formatted}", DEFAULT_TIMEOUT.as_millis())
-        };
-        return Err(ShellExecutionError::CommandFailed {
-            pattern: command.to_owned(),
-            output,
-        });
-    }
-
-    if result.exit_code != Some(0) && stdout.is_empty() && stderr.is_empty() {
-        return Err(ShellExecutionError::CommandFailed {
-            pattern: command.to_owned(),
-            output: format!("exit code {}", result.exit_code.unwrap_or(-1)),
-        });
-    }
-
-    Ok(formatted)
-}
-
-/// Format stdout and stderr into a single string.
-/// stderr is prefixed with `[stderr]\n` when non-empty.
+#[cfg(test)]
 fn format_output(stdout: &str, stderr: &str) -> String {
     match (stdout.is_empty(), stderr.is_empty()) {
         (false, false) => format!("{stdout}\n[stderr]\n{stderr}"),
@@ -235,6 +238,37 @@ fn format_output(stdout: &str, stderr: &str) -> String {
         (true, false) => format!("[stderr]\n{stderr}"),
         (true, true) => String::new(),
     }
+}
+
+#[cfg(test)]
+async fn execute_command(command: &str, cwd: &std::path::Path) -> Result<String, ShellExecutionError> {
+    let shell = solaris_config::shell::default_shell();
+    let mut command_builder = solaris_config::shell::shell_command_builder(&shell, command, false);
+    command_builder.current_dir(cwd);
+    let result =
+        CommandRunner::new(command_builder)
+            .run()
+            .await
+            .map_err(|error| ShellExecutionError::CommandFailed {
+                pattern: command.to_owned(),
+                output: error.to_string(),
+            })?;
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let formatted = format_output(stdout.trim_end(), stderr.trim_end());
+    if result.timed_out {
+        return Err(ShellExecutionError::CommandFailed {
+            pattern: command.to_owned(),
+            output: format!("timed out after {}ms\n{formatted}", DEFAULT_TIMEOUT.as_millis()),
+        });
+    }
+    if result.exit_code != Some(0) && stdout.is_empty() && stderr.is_empty() {
+        return Err(ShellExecutionError::CommandFailed {
+            pattern: command.to_owned(),
+            output: format!("exit code {}", result.exit_code.unwrap_or(-1)),
+        });
+    }
+    Ok(formatted)
 }
 
 #[cfg(test)]

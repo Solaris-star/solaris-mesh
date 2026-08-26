@@ -30,6 +30,7 @@ mod tests {
             effort: None,
             shell: None,
             paths: Vec::new(),
+            network: Default::default(),
             hooks_raw: None,
             source: SkillSource::User,
             loaded_from: LoadedFrom::Skills,
@@ -45,6 +46,56 @@ mod tests {
             PathBuf::from("/tmp"),
             SkillPermissionChecker::new(vec![], vec![], false),
         )
+    }
+
+    #[test]
+    fn implementation_identity_changes_with_hooks_and_network_policy() {
+        let original = tool_with(vec![make_skill("durable", "instructions")]);
+        let original_digest = original.implementation_identity().unwrap().digest.unwrap();
+
+        let mut changed = make_skill("durable", "instructions");
+        changed.network.network_domains = vec!["api.example.com".to_owned()];
+        changed.hooks_raw = Some(json!({
+            "PostToolUse": [{
+                "matcher": "Write",
+                "hooks": [{
+                    "type": "command",
+                    "command": "verify-output",
+                    "timeout": 17,
+                    "network": {"network_domains": ["hooks.example.com"]}
+                }]
+            }]
+        }));
+        let changed_digest = tool_with(vec![changed])
+            .implementation_identity()
+            .unwrap()
+            .digest
+            .unwrap();
+
+        assert_ne!(original_digest, changed_digest);
+    }
+
+    struct TestBypassSpawnAuthorizer;
+
+    impl solaris_process::ProcessSpawnAuthorizer for TestBypassSpawnAuthorizer {
+        fn authorize_and_spawn(
+            &self,
+            spawn: solaris_process::ProcessSpawn,
+        ) -> std::io::Result<solaris_process::ManagedChild> {
+            spawn(ProcessLaunchPolicy::Ambient)
+        }
+    }
+
+    fn test_prepared_shell_executor(command_count: usize) -> PreparedSkillShellExecutor {
+        let identity = skill_shell_executable_identity().unwrap();
+        let executables = (0..command_count)
+            .map(|_| solaris_process::pin_executable(identity.canonical_path(), &identity).unwrap())
+            .collect();
+        PreparedSkillShellExecutor {
+            executables: Mutex::new(executables),
+            launch_policy: ProcessLaunchPolicy::Ambient,
+            spawn_authorization: ProcessSpawnAuthorization::new(Arc::new(TestBypassSpawnAuthorizer)),
+        }
     }
 
     #[tokio::test]
@@ -65,6 +116,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_catalog_removes_only_mcp_skills() {
+        let local = make_skill("local-review", "local content");
+        let mut mcp = make_skill("remote-review", "remote content");
+        mcp.source = SkillSource::Mcp;
+        mcp.loaded_from = LoadedFrom::Mcp;
+        let catalog = SharedSkillCatalog::new(Arc::new(vec![local, mcp]));
+        let tool = SkillTool::with_shared_catalog_and_spawner(
+            catalog.clone(),
+            PathBuf::from("/tmp"),
+            SkillPermissionChecker::new(vec![], vec![], false),
+            None,
+            None,
+        );
+
+        let before = tool.execute(json!({ "skill": "remote-review" })).await;
+        assert!(!before.is_error);
+        assert_eq!(catalog.remove_mcp(), 1);
+
+        let local = tool.execute(json!({ "skill": "local-review" })).await;
+        assert!(!local.is_error);
+        assert_eq!(local.content, "local content");
+        let mcp = tool.execute(json!({ "skill": "remote-review" })).await;
+        assert!(mcp.is_error);
+        assert!(mcp.content.contains("not found"));
+    }
+
+    #[tokio::test]
     async fn test_leading_slash_stripped() {
         let tool = tool_with(vec![make_skill("commit", "body")]);
         let result = tool.execute(json!({ "skill": "/commit" })).await;
@@ -79,12 +157,688 @@ mod tests {
         assert!(result.content.contains("Missing required parameter"));
     }
 
+    #[test]
+    fn multiple_embedded_shell_commands_are_rejected_before_process_authorization() {
+        let tool = tool_with(vec![make_skill("multi-shell", "!`echo first`\n!`echo second`")]);
+        let input = json!({"skill": "multi-shell"});
+
+        let error = match tool.prepare_effect("multi-shell-effect", &input) {
+            Ok(_) => panic!("one durable Process intent must not authorize two root spawns"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("contains 2 embedded shell commands"), "{error}");
+        assert!(error.contains("limit is 1"), "{error}");
+    }
+
     #[tokio::test]
     async fn test_args_substituted() {
         let tool = tool_with(vec![make_skill("greet", "Hello $ARGUMENTS!")]);
         let result = tool.execute(json!({ "skill": "greet", "args": "world" })).await;
         assert!(!result.is_error);
         assert_eq!(result.content, "Hello world!");
+    }
+
+    #[tokio::test]
+    async fn embedded_shell_uses_the_outer_host_approval_effect() {
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::message::ContentBlock;
+        use solaris_types::permission::{ExecutionBoundary, PermissionCeiling};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::execution_context::EffectExecutionContext;
+        use crate::orchestration::execute_tool_calls_with_approval_context;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+        use solaris_protocol::commands::ApprovalScope;
+        use solaris_protocol::writer::{ProtocolEmitter, ProtocolWriter};
+        use solaris_protocol::{ApprovalResolution, ToolApprovalManager};
+        use solaris_tools::registry::ToolRegistry;
+
+        let command = match solaris_config::shell::default_shell().kind {
+            solaris_config::shell::ShellKind::PowerShell => "Write-Output skill_effect",
+            solaris_config::shell::ShellKind::Cmd => "echo skill_effect",
+            _ => "printf skill_effect",
+        };
+        let mut skill = make_skill("shell", &format!("Result: !`{command}`"));
+        skill.network.network_domains.push("api.example.com".to_owned());
+        let workspace = tempfile::tempdir().unwrap();
+        let run_id = RunId::from("skill-shell-run");
+        let ledger = Arc::new(InMemoryRuntimeLedger::default());
+        let permissions = PermissionContext::from_auto_approve(false);
+        permissions.set_boundary(ExecutionBoundary::workspace(workspace.path().to_string_lossy()));
+        let context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("skill-shell-agent"),
+            ledger.clone(),
+            permissions,
+            OperationEnvironmentSnapshot::default(),
+        );
+        let tool = SkillTool::new(
+            Arc::new(vec![skill]),
+            workspace.path().to_path_buf(),
+            SkillPermissionChecker::new(vec![], vec![], false),
+        )
+        .with_shell_executor(Arc::new(EffectSkillShellExecutor::new(context.clone())));
+        let input = json!({"skill": "shell"});
+        let descriptor = tool.describe_effect(&input);
+        assert!(
+            descriptor
+                .resources
+                .external_resources
+                .iter()
+                .any(|resource| resource.starts_with("skill-shell-executable:sha256:"))
+        );
+        assert_eq!(descriptor.resources.network_domains, ["api.example.com"]);
+        let serialized = serde_json::to_string(&descriptor).unwrap();
+        assert!(!serialized.contains(command));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(tool));
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let approvals = Arc::clone(&approval_manager);
+        let approval_task = tokio::spawn(async move {
+            loop {
+                if approvals.approve("skill-call", ApprovalScope::Once) == ApprovalResolution::Applied {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let writer: Arc<dyn ProtocolEmitter> = Arc::new(ProtocolWriter::new());
+        let outcome = execute_tool_calls_with_approval_context(
+            &registry,
+            &[ContentBlock::ToolUse {
+                id: "skill-call".into(),
+                name: "Skill".into(),
+                input,
+                extra: None,
+            }],
+            &approval_manager,
+            &writer,
+            "skill-message",
+            false,
+            &[],
+            PermissionCeiling::unrestricted(),
+            &context,
+            None,
+            solaris_compact::CompactLevel::Off,
+            false,
+        )
+        .await
+        .expect("approved Skill should execute");
+        approval_task.await.unwrap();
+        let ContentBlock::ToolResult { content, is_error, .. } = &outcome.results[0] else {
+            panic!("Skill execution did not return a tool result");
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert!(!is_error, "{content}");
+            assert!(content.contains("skill_effect"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                is_error,
+                "Windows must reject approved-domain Auto processes without a verified proxy runner"
+            );
+            assert!(content.contains("approved-domain proxy"), "{content}");
+        }
+        let records = ledger.records_for_run(&run_id).unwrap();
+        assert!(records.iter().any(|record| record.record_type == "permission_decision"));
+        assert!(records.iter().any(|record| record.record_type == "effect_intent"));
+        assert!(records.iter().any(|record| record.record_type == "effect_outcome"));
+        assert!(!serde_json::to_string(&records).unwrap().contains("SkillShell"));
+    }
+
+    #[tokio::test]
+    async fn completed_dynamic_skill_shell_call_reuses_output_without_running_again() {
+        use solaris_config::shell::ShellKind;
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::message::ContentBlock;
+        use solaris_types::permission::{PermissionCeiling, PermissionMode};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::confirm::ToolConfirmer;
+        use crate::execution_context::EffectExecutionContext;
+        use crate::orchestration::execute_tool_calls_with_policy_context;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+        use solaris_tools::registry::ToolRegistry;
+
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("skill-recovery-marker.txt");
+        let command = match solaris_config::shell::default_shell().kind {
+            ShellKind::PowerShell => format!(
+                "Add-Content -LiteralPath '{}' -Value run; Write-Output reusable_skill",
+                marker.to_string_lossy().replace('\'', "''")
+            ),
+            ShellKind::Cmd => format!("echo run>>\"{}\" & echo reusable_skill", marker.display()),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => format!(
+                "printf 'run\\n' >> '{}'; printf reusable_skill",
+                marker.to_string_lossy().replace('\'', "'\\''")
+            ),
+        };
+        let skill = make_skill("dynamic-reuse", &format!("Result: !`{command}`"));
+        let run_id = RunId::from("skill-recovery-implementation-run");
+        let ledger = Arc::new(InMemoryRuntimeLedger::default());
+        let context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("skill-agent"),
+            ledger.clone(),
+            PermissionContext::new(PermissionMode::Bypass, PermissionCeiling::unrestricted()),
+            OperationEnvironmentSnapshot::default(),
+        );
+        let tool = tool_with(vec![skill]).with_shell_executor(Arc::new(EffectSkillShellExecutor::new(context.clone())));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(tool));
+        let call = ContentBlock::ToolUse {
+            id: "same-skill-call".into(),
+            name: "Skill".into(),
+            input: json!({"skill": "dynamic-reuse"}),
+            extra: None,
+        };
+        let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, Vec::new())));
+
+        for _ in 0..2 {
+            let outcome = execute_tool_calls_with_policy_context(
+                &registry,
+                std::slice::from_ref(&call),
+                &confirmer,
+                PermissionMode::Bypass,
+                PermissionCeiling::unrestricted(),
+                &context,
+                None,
+                solaris_compact::CompactLevel::Off,
+                false,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                &outcome.results[0],
+                ContentBlock::ToolResult { is_error: false, content, .. } if content.contains("reusable_skill")
+            ));
+        }
+
+        assert_eq!(std::fs::read_to_string(marker).unwrap().lines().count(), 1);
+        let records = ledger.records_for_run(&run_id).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_type == "effect_intent")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_skill_content_does_not_reuse_same_shell_outcome_across_contexts() {
+        use solaris_config::shell::ShellKind;
+        use solaris_types::effect::EffectReplayPolicy;
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::message::ContentBlock;
+        use solaris_types::permission::{PermissionCeiling, PermissionMode};
+        use solaris_types::runtime::{OperationEnvironmentSnapshot, ToolImplementationSnapshot};
+
+        use crate::confirm::ToolConfirmer;
+        use crate::execution_context::EffectExecutionContext;
+        use crate::orchestration::execute_tool_calls_with_policy_context;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+        use solaris_tools::registry::ToolRegistry;
+
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("changed-skill-recovery-marker.txt");
+        let command = match solaris_config::shell::default_shell().kind {
+            ShellKind::PowerShell => format!(
+                "Add-Content -LiteralPath '{}' -Value run; Write-Output stable_shell",
+                marker.to_string_lossy().replace('\'', "''")
+            ),
+            ShellKind::Cmd => format!("echo run>>\"{}\" & echo stable_shell", marker.display()),
+            ShellKind::Bash | ShellKind::Zsh | ShellKind::Sh => format!(
+                "printf 'run\\n' >> '{}'; printf stable_shell",
+                marker.to_string_lossy().replace('\'', "'\\''")
+            ),
+        };
+        let input = json!({"skill": "versioned-shell"});
+        let call = ContentBlock::ToolUse {
+            id: "versioned-skill-call".into(),
+            name: "Skill".into(),
+            input: input.clone(),
+            extra: None,
+        };
+        let run_id = RunId::from("changed-skill-recovery-run");
+        let ledger = Arc::new(InMemoryRuntimeLedger::default());
+        let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, Vec::new())));
+
+        let first_tool = tool_with(vec![make_skill(
+            "versioned-shell",
+            &format!("text A\nResult: !`{command}`"),
+        )]);
+        let first_implementation = first_tool.implementation_identity().unwrap();
+        let first_context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("skill-agent"),
+            ledger.clone(),
+            PermissionContext::new(PermissionMode::Bypass, PermissionCeiling::unrestricted()),
+            OperationEnvironmentSnapshot {
+                tools: vec![ToolImplementationSnapshot {
+                    name: "Skill".into(),
+                    implementation: first_implementation,
+                    schema_digest: None,
+                    replay_policy: EffectReplayPolicy::Never,
+                }],
+                ..Default::default()
+            },
+        );
+        let mut first_registry = ToolRegistry::new();
+        first_registry.register(Box::new(first_tool));
+        let first = execute_tool_calls_with_policy_context(
+            &first_registry,
+            std::slice::from_ref(&call),
+            &confirmer,
+            PermissionMode::Bypass,
+            PermissionCeiling::unrestricted(),
+            &first_context,
+            None,
+            solaris_compact::CompactLevel::Off,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &first.results[0],
+            ContentBlock::ToolResult { is_error: false, .. }
+        ));
+
+        let second_tool = tool_with(vec![make_skill(
+            "versioned-shell",
+            &format!("text B\nResult: !`{command}`"),
+        )]);
+        let second_implementation = second_tool.implementation_identity().unwrap();
+        let second_context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("skill-agent"),
+            ledger.clone(),
+            PermissionContext::new(PermissionMode::Bypass, PermissionCeiling::unrestricted()),
+            OperationEnvironmentSnapshot {
+                tools: vec![ToolImplementationSnapshot {
+                    name: "Skill".into(),
+                    implementation: second_implementation,
+                    schema_digest: None,
+                    replay_policy: EffectReplayPolicy::Never,
+                }],
+                ..Default::default()
+            },
+        );
+        let mut second_registry = ToolRegistry::new();
+        second_registry.register(Box::new(second_tool));
+        let second = execute_tool_calls_with_policy_context(
+            &second_registry,
+            &[call],
+            &confirmer,
+            PermissionMode::Bypass,
+            PermissionCeiling::unrestricted(),
+            &second_context,
+            None,
+            solaris_compact::CompactLevel::Off,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            &second.results[0],
+            ContentBlock::ToolResult { is_error: true, content, .. }
+                if content.contains("environment changed")
+        ));
+        assert_eq!(std::fs::read_to_string(marker).unwrap().lines().count(), 1);
+        let records = ledger.records_for_run(&run_id).unwrap();
+        let intent = records
+            .iter()
+            .find(|record| record.record_type == "effect_intent")
+            .unwrap();
+        let environment: OperationEnvironmentSnapshot =
+            serde_json::from_value(intent.payload["environment"].clone()).unwrap();
+        assert!(environment.tools.iter().any(|tool| tool.name == "Skill"));
+        assert!(environment.tools.iter().any(|tool| tool.name.ends_with("/Skill")));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.record_type == "effect_intent")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn seventeen_shell_commands_fail_before_inspection_or_execution() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::message::ContentBlock;
+        use solaris_types::permission::{PermissionCeiling, PermissionMode};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::confirm::ToolConfirmer;
+        use crate::execution_context::EffectExecutionContext;
+        use crate::orchestration::execute_tool_calls_with_policy_context;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+        use solaris_tools::registry::ToolRegistry;
+
+        struct ObservableInvalidShell(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl SkillShellExecutor for ObservableInvalidShell {
+            async fn execute(&self, _command: &str, _cwd: &Path) -> Result<String, ShellExecutionError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(ShellExecutionError::CommandFailed {
+                    pattern: "invalid shell".into(),
+                    output: "observable pin failure".into(),
+                })
+            }
+        }
+
+        let content = (0..17).map(|_| "!`echo x`").collect::<Vec<_>>().join("\n");
+        let skill = make_skill("too-many-shells", &content);
+        let executions = Arc::new(AtomicUsize::new(0));
+        let tool =
+            tool_with(vec![skill]).with_shell_executor(Arc::new(ObservableInvalidShell(Arc::clone(&executions))));
+        let direct_error = match tool.prepare_execution(
+            json!({"skill": "too-many-shells"}),
+            ToolExecutionContext::new("too-many-direct"),
+        ) {
+            Ok(_) => panic!("seventeen commands must fail before execution preparation"),
+            Err(error) => error,
+        };
+        assert!(direct_error.contains("limit is 1"), "{direct_error}");
+        assert!(!direct_error.contains("pin"));
+
+        let run_id = RunId::from("skill-command-limit-run");
+        let ledger = Arc::new(InMemoryRuntimeLedger::default());
+        let context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("skill-agent"),
+            ledger.clone(),
+            PermissionContext::new(PermissionMode::Bypass, PermissionCeiling::unrestricted()),
+            OperationEnvironmentSnapshot::default(),
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(tool));
+        let call = ContentBlock::ToolUse {
+            id: "too-many-shell-call".into(),
+            name: "Skill".into(),
+            input: json!({"skill": "too-many-shells"}),
+            extra: None,
+        };
+        let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, Vec::new())));
+
+        let outcome = execute_tool_calls_with_policy_context(
+            &registry,
+            &[call],
+            &confirmer,
+            PermissionMode::Bypass,
+            PermissionCeiling::unrestricted(),
+            &context,
+            None,
+            solaris_compact::CompactLevel::Off,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            &outcome.results[0],
+            ContentBlock::ToolResult { is_error: true, content, .. }
+                if content.contains("limit is 1") && !content.contains("pin")
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert!(
+            ledger
+                .records_for_run(&run_id)
+                .unwrap()
+                .iter()
+                .all(|record| record.record_type != "effect_intent")
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_outer_skill_approval_never_starts_embedded_shell() {
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::message::ContentBlock;
+        use solaris_types::permission::{ExecutionBoundary, PermissionCeiling};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::execution_context::EffectExecutionContext;
+        use crate::orchestration::execute_tool_calls_with_approval_context;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+        use solaris_protocol::writer::{ProtocolEmitter, ProtocolWriter};
+        use solaris_protocol::{ApprovalResolution, ToolApprovalManager, ToolApprovalResult};
+        use solaris_tools::registry::ToolRegistry;
+
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("denied-skill-shell.txt");
+        let command = match solaris_config::shell::default_shell().kind {
+            solaris_config::shell::ShellKind::PowerShell => {
+                format!("Set-Content -LiteralPath '{}' -Value denied", marker.display())
+            }
+            solaris_config::shell::ShellKind::Cmd => format!("echo denied>\"{}\"", marker.display()),
+            _ => format!("printf denied > '{}'", marker.display()),
+        };
+        let run_id = RunId::from("skill-shell-denied-run");
+        let ledger = Arc::new(InMemoryRuntimeLedger::default());
+        let permissions = PermissionContext::from_auto_approve(false);
+        permissions.set_boundary(ExecutionBoundary::workspace(temp.path().to_string_lossy()));
+        let context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("skill-shell-denied-agent"),
+            ledger.clone(),
+            permissions,
+            OperationEnvironmentSnapshot::default(),
+        );
+        let input = json!({"skill": "denied-shell"});
+        let tool = tool_with(vec![make_skill("denied-shell", &format!("!`{command}`"))])
+            .with_shell_executor(Arc::new(EffectSkillShellExecutor::new(context.clone())));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(tool));
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let approvals = Arc::clone(&approval_manager);
+        let approval_task = tokio::spawn(async move {
+            loop {
+                if approvals.resolve(
+                    "skill-denied-call",
+                    ToolApprovalResult::Denied {
+                        reason: "test denial".into(),
+                    },
+                ) == ApprovalResolution::Applied
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let writer: Arc<dyn ProtocolEmitter> = Arc::new(ProtocolWriter::new());
+        let outcome = execute_tool_calls_with_approval_context(
+            &registry,
+            &[ContentBlock::ToolUse {
+                id: "skill-denied-call".into(),
+                name: "Skill".into(),
+                input,
+                extra: None,
+            }],
+            &approval_manager,
+            &writer,
+            "skill-denied-message",
+            false,
+            &[],
+            PermissionCeiling::unrestricted(),
+            &context,
+            None,
+            solaris_compact::CompactLevel::Off,
+            false,
+        )
+        .await
+        .expect("denial should return a tool result");
+        approval_task.await.unwrap();
+
+        assert!(matches!(
+            &outcome.results[0],
+            ContentBlock::ToolResult { is_error: true, .. }
+        ));
+        assert!(!marker.exists());
+        assert!(
+            !ledger
+                .records_for_run(&run_id)
+                .unwrap()
+                .iter()
+                .any(|record| record.record_type == "effect_intent")
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_denies_embedded_skill_shell_before_process_start() {
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::permission::{PermissionCeiling, PermissionDecision, PermissionMode};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::execution_context::EffectExecutionContext;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("must-not-exist.txt");
+        let command = match solaris_config::shell::default_shell().kind {
+            solaris_config::shell::ShellKind::PowerShell => {
+                format!("Set-Content -LiteralPath '{}' -Value denied", marker.display())
+            }
+            solaris_config::shell::ShellKind::Cmd => format!("echo denied>\"{}\"", marker.display()),
+            _ => format!("printf denied > '{}'", marker.display()),
+        };
+        let skill = make_skill("denied-shell", &format!("!`{command}`"));
+        let run_id = RunId::from("skill-shell-plan-run");
+        let ledger = Arc::new(InMemoryRuntimeLedger::default());
+        let context = EffectExecutionContext::new(
+            run_id.clone(),
+            AgentId::from("skill-shell-plan-agent"),
+            ledger.clone(),
+            PermissionContext::new(PermissionMode::Plan, PermissionCeiling::plan()),
+            OperationEnvironmentSnapshot::default(),
+        );
+        let tool = tool_with(vec![skill]).with_shell_executor(Arc::new(EffectSkillShellExecutor::new(context.clone())));
+        let input = json!({"skill": "denied-shell"});
+        let request = context.effect_request("skill-plan-call", "Skill", &input, tool.describe_effect(&input));
+        let evaluation = context.evaluate(&request);
+
+        assert_eq!(evaluation.decision, PermissionDecision::Deny);
+        assert!(!marker.exists());
+        assert!(
+            !ledger
+                .records_for_run(&run_id)
+                .unwrap()
+                .iter()
+                .any(|record| record.record_type == "effect_intent")
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_skill_shell_kills_stdout_and_stderr_floods() {
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::execution_context::EffectExecutionContext;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::InMemoryRuntimeLedger;
+
+        let context = EffectExecutionContext::new(
+            RunId::from("skill-shell-output-limit"),
+            AgentId::from("skill-shell-output-agent"),
+            Arc::new(InMemoryRuntimeLedger::default()),
+            PermissionContext::new(
+                solaris_types::permission::PermissionMode::Bypass,
+                solaris_types::permission::PermissionCeiling::unrestricted(),
+            ),
+            OperationEnvironmentSnapshot::default(),
+        );
+        let _ = context;
+        let executor = test_prepared_shell_executor(2);
+        let shell = solaris_config::shell::default_shell();
+        let (stdout_command, stderr_command) = match shell.kind {
+            solaris_config::shell::ShellKind::PowerShell => (
+                "[Console]::Out.Write('x' * 600000)".to_owned(),
+                "[Console]::Error.Write('x' * 200000)".to_owned(),
+            ),
+            solaris_config::shell::ShellKind::Cmd => (
+                "powershell -NoProfile -Command \"[Console]::Out.Write('x' * 600000)\"".to_owned(),
+                "powershell -NoProfile -Command \"[Console]::Error.Write('x' * 200000)\"".to_owned(),
+            ),
+            _ => (
+                "yes x | head -c 600000".to_owned(),
+                "yes x | head -c 200000 >&2".to_owned(),
+            ),
+        };
+
+        let stdout_error = executor
+            .execute(&stdout_command, &std::env::temp_dir())
+            .await
+            .expect_err("stdout flood must be terminated")
+            .to_string();
+        assert!(stdout_error.contains("combined output exceeded"), "{stdout_error}");
+        let stderr_error = executor
+            .execute(&stderr_command, &std::env::temp_dir())
+            .await
+            .expect_err("stderr flood must be terminated")
+            .to_string();
+        assert!(stderr_error.contains("combined output exceeded"), "{stderr_error}");
+    }
+
+    #[tokio::test]
+    async fn embedded_skill_output_limit_kills_background_descendant() {
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::execution_context::EffectExecutionContext;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::InMemoryRuntimeLedger;
+
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("descendant-must-not-survive");
+        let context = EffectExecutionContext::new(
+            RunId::from("skill-shell-descendant-limit"),
+            AgentId::from("skill-shell-descendant-agent"),
+            Arc::new(InMemoryRuntimeLedger::default()),
+            PermissionContext::new(
+                solaris_types::permission::PermissionMode::Bypass,
+                solaris_types::permission::PermissionCeiling::unrestricted(),
+            ),
+            OperationEnvironmentSnapshot::default(),
+        );
+        let _ = context;
+        let executor = test_prepared_shell_executor(1);
+        let shell = solaris_config::shell::default_shell();
+        let command = match shell.kind {
+            solaris_config::shell::ShellKind::PowerShell => format!(
+                "$p = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-Command', \"Start-Sleep -Seconds 2; Set-Content -LiteralPath '{}' -Value survived\" -PassThru -WindowStyle Hidden; [Console]::Out.Write('x' * 600000)",
+                marker.to_string_lossy().replace('\'', "''")
+            ),
+            solaris_config::shell::ShellKind::Cmd => format!(
+                "start /b cmd /c \"ping -n 3 127.0.0.1 >nul & echo survived>\\\"{}\\\"\" & powershell -NoProfile -Command \"[Console]::Out.Write('x' * 600000)\"",
+                marker.display()
+            ),
+            _ => format!(
+                "(sleep 2; printf survived > '{}') & yes x | head -c 600000",
+                marker.to_string_lossy().replace('\'', "'\\''")
+            ),
+        };
+
+        let error = executor
+            .execute(&command, directory.path())
+            .await
+            .expect_err("output overflow must terminate the skill process tree")
+            .to_string();
+        assert!(error.contains("combined output exceeded"), "{error}");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(!marker.exists(), "background descendant survived output termination");
     }
 
     #[tokio::test]
@@ -129,920 +883,41 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod supplemental_tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use serde_json::json;
-
-    use solaris_skills::permissions::SkillPermissionChecker;
-    use solaris_skills::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
-
-    use super::SkillTool;
-    use solaris_tools::Tool;
-
-    fn make_skill(name: &str, content: &str) -> SkillMetadata {
-        SkillMetadata {
-            name: name.to_string(),
-            display_name: None,
-            description: format!("desc of {name}"),
-            has_user_specified_description: true,
-            allowed_tools: Vec::new(),
-            argument_hint: None,
-            argument_names: Vec::new(),
-            when_to_use: None,
-            version: None,
-            model: None,
-            disable_model_invocation: false,
-            user_invocable: true,
-            execution_context: ExecutionContext::Inline,
-            agent: None,
-            effort: None,
-            shell: None,
-            paths: Vec::new(),
-            hooks_raw: None,
-            source: SkillSource::User,
-            loaded_from: LoadedFrom::Skills,
-            content: content.to_string(),
-            content_length: content.len(),
-            skill_root: None,
-        }
-    }
-
-    fn tool_with(skills: Vec<SkillMetadata>) -> SkillTool {
-        SkillTool::new(
-            Arc::new(skills),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-        )
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-11.x: find_skill
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_11_1_exact_match_found() {
-        let tool = tool_with(vec![make_skill("commit", "body")]);
-        // Access find_skill through execute to verify behavior indirectly
-        // (find_skill is private, tested via execute)
-        // Direct check via available_names() not exposed, so we verify via execute.
-        // Verified in tc_13_1 instead. This test just verifies construction.
-        assert_eq!(tool.name(), "Skill");
-    }
-
-    #[test]
-    fn tc_11_4_case_sensitive_no_match() {
-        // "Commit" (capital C) should not match "commit"
-        let tool = tool_with(vec![make_skill("commit", "body")]);
-        // Verified via execute in tc_13.x
-        let _ = tool;
-    }
-
-    #[test]
-    fn tc_11_5_empty_skills_list_no_panic() {
-        let tool = tool_with(vec![]);
-        assert_eq!(tool.name(), "Skill"); // just verifies no panic
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-12.x: name, schema, is_concurrency_safe
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_12_1_name_is_skill() {
-        let tool = tool_with(vec![]);
-        assert_eq!(tool.name(), "Skill");
-    }
-
-    #[test]
-    fn tc_12_2_schema_skill_required() {
-        let tool = tool_with(vec![]);
-        let schema = tool.input_schema();
-        let required = schema["required"].as_array().unwrap();
-        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(names.contains(&"skill"), "schema required must contain 'skill'");
-    }
-
-    #[test]
-    fn tc_12_3_schema_args_not_required() {
-        let tool = tool_with(vec![]);
-        let schema = tool.input_schema();
-        // args should be in properties
-        assert!(schema["properties"]["args"].is_object(), "args should be in properties");
-        // args should NOT be in required
-        let required = schema["required"].as_array().unwrap();
-        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(!names.contains(&"args"), "args should not be in required");
-    }
-
-    #[test]
-    fn tc_12_4_is_concurrency_safe_false() {
-        let tool = tool_with(vec![]);
-        assert!(!tool.is_concurrency_safe(&json!({})));
-        assert!(!tool.is_concurrency_safe(&json!({"skill": "foo"})));
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-13.x: execute (async)
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn tc_13_1_successful_inline_execution() {
-        let tool = tool_with(vec![make_skill("my-skill", "Run $ARGUMENTS")]);
-        let result = tool.execute(json!({"skill": "my-skill", "args": "foo"})).await;
-        assert!(!result.is_error);
-        assert_eq!(result.content, "Run foo");
-    }
-
-    #[tokio::test]
-    async fn tc_13_2_skill_not_found_is_error() {
-        let tool = tool_with(vec![make_skill("commit", "body")]);
-        let result = tool.execute(json!({"skill": "nonexistent"})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("not found") || result.content.contains("Skill"));
-    }
-
-    #[tokio::test]
-    async fn tc_13_3_not_found_error_lists_available_skills() {
-        let tool = tool_with(vec![make_skill("commit", "body"), make_skill("review", "body")]);
-        let result = tool.execute(json!({"skill": "missing"})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("commit"));
-        assert!(result.content.contains("review"));
-    }
-
-    #[tokio::test]
-    async fn tc_13_4_fork_skill_returns_error() {
-        let mut skill = make_skill("fork-skill", "body");
-        skill.execution_context = ExecutionContext::Fork;
-        let tool = tool_with(vec![skill]);
-        let result = tool.execute(json!({"skill": "fork-skill"})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("fork"));
-    }
-
-    #[tokio::test]
-    async fn tc_13_5_no_args_field_still_works() {
-        let tool = tool_with(vec![make_skill("my-skill", "Just content.")]);
-        let result = tool.execute(json!({"skill": "my-skill"})).await;
-        assert!(!result.is_error);
-        assert_eq!(result.content, "Just content.");
-    }
-
-    #[tokio::test]
-    async fn tc_13_6_leading_slash_stripped() {
-        let tool = tool_with(vec![make_skill("my-skill", "body")]);
-        let result = tool.execute(json!({"skill": "/my-skill"})).await;
-        assert!(!result.is_error);
-    }
-
-    #[tokio::test]
-    async fn tc_13_7_missing_skill_field_returns_error() {
-        let tool = tool_with(vec![]);
-        let result = tool.execute(json!({"args": "foo"})).await;
-        assert!(result.is_error);
-        assert!(result.content.to_lowercase().contains("missing") || result.content.contains("skill"));
-    }
-
-    #[tokio::test]
-    async fn tc_13_8_full_variable_substitution_integration() {
-        let mut skill = make_skill("my-skill", "Run ${SOLARIS_SKILL_DIR}/tool.sh $ARGUMENTS[0]");
-        skill.skill_root = Some("/my/skill".to_string());
-        let tool = tool_with(vec![skill]);
-        let result = tool.execute(json!({"skill": "my-skill", "args": "alpha"})).await;
-        assert!(!result.is_error);
-        // base dir header is prepended, then substitution applied
-        assert!(result.content.contains("/my/skill/tool.sh alpha"));
-    }
-
-    #[tokio::test]
-    async fn tc_13_x_case_sensitive_no_match() {
-        // "Commit" does not match "commit"
-        let tool = tool_with(vec![make_skill("commit", "body")]);
-        let result = tool.execute(json!({"skill": "Commit"})).await;
-        assert!(
-            result.is_error,
-            "case-sensitive lookup: 'Commit' should not match 'commit'"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-14.x: description
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_14_1_description_is_non_empty() {
-        let tool = tool_with(vec![make_skill("commit", "body"), make_skill("review", "body")]);
-        assert!(!tool.description().is_empty());
-    }
-
-    #[test]
-    fn tc_14_2_empty_skills_description_no_panic() {
-        let tool = tool_with(vec![]);
-        assert!(!tool.description().is_empty());
-    }
-}
+#[path = "skill_tool_supplemental_test.rs"]
+mod supplemental_tests;
 
 // ---------------------------------------------------------------------------
 // Phase 6 supplemental tests — context_modifier_for() and session_id
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod supplemental_tests_p6 {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use serde_json::json;
-
-    use solaris_skills::permissions::SkillPermissionChecker;
-    use solaris_skills::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
-    use solaris_tools::Tool;
-
-    use super::SkillTool;
-
-    fn base_skill(name: &str) -> SkillMetadata {
-        SkillMetadata {
-            name: name.to_string(),
-            display_name: None,
-            description: format!("desc of {name}"),
-            has_user_specified_description: true,
-            allowed_tools: vec![],
-            argument_hint: None,
-            argument_names: vec![],
-            when_to_use: None,
-            version: None,
-            model: None,
-            disable_model_invocation: false,
-            user_invocable: true,
-            execution_context: ExecutionContext::Inline,
-            agent: None,
-            effort: None,
-            shell: None,
-            paths: vec![],
-            hooks_raw: None,
-            source: SkillSource::User,
-            loaded_from: LoadedFrom::Skills,
-            content: "body".to_string(),
-            content_length: 4,
-            skill_root: None,
-        }
-    }
-
-    fn tool_with(skills: Vec<SkillMetadata>) -> SkillTool {
-        SkillTool::new(
-            Arc::new(skills),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-        )
-    }
-
-    // TC-6.14: skill name not in registry → None
-    #[test]
-    fn tc_6_14_skill_not_found_returns_none() {
-        let tool = tool_with(vec![base_skill("commit")]);
-        assert!(tool.context_modifier_for(&json!({"skill": "nonexistent"})).is_none());
-    }
-
-    // TC-6.15: input missing skill field → None
-    #[test]
-    fn tc_6_15_missing_skill_field_returns_none() {
-        let tool = tool_with(vec![base_skill("commit")]);
-        assert!(tool.context_modifier_for(&json!({})).is_none());
-    }
-
-    // TC-6.16: skill exists but no override fields → None
-    #[test]
-    fn tc_6_16_skill_no_override_returns_none() {
-        let tool = tool_with(vec![base_skill("no-override")]);
-        assert!(tool.context_modifier_for(&json!({"skill": "no-override"})).is_none());
-    }
-
-    // TC-6.17: skill has model override → Some with correct model
-    #[test]
-    fn tc_6_17_skill_with_model_returns_some() {
-        let mut skill = base_skill("model-skill");
-        skill.model = Some("test-model".to_string());
-        let tool = tool_with(vec![skill]);
-
-        let modifier = tool.context_modifier_for(&json!({"skill": "model-skill"}));
-        assert!(modifier.is_some());
-        let m = modifier.unwrap();
-        assert_eq!(m.model.as_deref(), Some("test-model"));
-        assert!(m.effort.is_none());
-        assert!(m.allowed_tools.is_empty());
-    }
-
-    // TC-6.18: skill has effort override → Some with correct effort
-    #[test]
-    fn tc_6_18_skill_with_effort_returns_some() {
-        let mut skill = base_skill("effort-skill");
-        skill.effort = Some(EffortLevel::High);
-        let tool = tool_with(vec![skill]);
-
-        let modifier = tool.context_modifier_for(&json!({"skill": "effort-skill"}));
-        assert!(modifier.is_some());
-        let m = modifier.unwrap();
-        assert_eq!(m.effort, Some(EffortLevel::High));
-        assert!(m.model.is_none());
-    }
-
-    // TC-6.19: skill has allowed_tools override → Some with correct tools
-    #[test]
-    fn tc_6_19_skill_with_allowed_tools_returns_some() {
-        let mut skill = base_skill("tools-skill");
-        skill.allowed_tools = vec!["ExecCommand".to_string(), "Read".to_string()];
-        let tool = tool_with(vec![skill]);
-
-        let modifier = tool.context_modifier_for(&json!({"skill": "tools-skill"}));
-        assert!(modifier.is_some());
-        let m = modifier.unwrap();
-        assert_eq!(m.allowed_tools, vec!["ExecCommand", "Read"]);
-    }
-
-    // TC-6.19b: leading slash is stripped before lookup
-    #[test]
-    fn tc_6_19b_leading_slash_stripped_in_context_modifier_for() {
-        let mut skill = base_skill("slash-skill");
-        skill.model = Some("m".to_string());
-        let tool = tool_with(vec![skill]);
-
-        // /slash-skill should resolve to slash-skill
-        let modifier = tool.context_modifier_for(&json!({"skill": "/slash-skill"}));
-        assert!(modifier.is_some());
-    }
-
-    // TC-6.20: with_session_id() stores session_id; new() defaults to None
-    #[test]
-    fn tc_6_20_session_id_stored_correctly() {
-        let skills = Arc::new(vec![]);
-
-        // new() → session_id is None
-        let tool_no_session = SkillTool::new(
-            skills.clone(),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-        );
-        assert!(tool_no_session.session_id.is_none());
-
-        // with_session_id() → session_id is set
-        let tool_with_session = SkillTool::with_session_id(
-            skills,
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-            Some("sess-abc".to_string()),
-        );
-        assert_eq!(tool_with_session.session_id.as_deref(), Some("sess-abc"));
-    }
-
-    // TC-6.20b: with_session_id(None) stores None
-    #[test]
-    fn tc_6_20b_session_id_none_when_not_provided() {
-        let tool = SkillTool::with_session_id(
-            Arc::new(vec![]),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-            None,
-        );
-        assert!(tool.session_id.is_none());
-    }
-
-    // TC-6.17b: context_modifier_for() is independent of execute() — pure lookup, no side effects
-    #[test]
-    fn tc_6_17b_context_modifier_for_does_not_mutate_tool() {
-        let mut skill = base_skill("pure-skill");
-        skill.model = Some("model-x".to_string());
-        let tool = tool_with(vec![skill]);
-
-        // Call twice — result must be identical (no state mutation)
-        let m1 = tool.context_modifier_for(&json!({"skill": "pure-skill"}));
-        let m2 = tool.context_modifier_for(&json!({"skill": "pure-skill"}));
-        assert_eq!(m1.unwrap().model, m2.unwrap().model);
-    }
-}
+#[path = "skill_tool_context_modifier_test.rs"]
+mod supplemental_tests_p6;
 
 // ---------------------------------------------------------------------------
 // Permission integration tests (P5-11, P5-12)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod permission_tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use serde_json::json;
-
-    use solaris_skills::permissions::SkillPermissionChecker;
-    use solaris_skills::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
-
-    use super::SkillTool;
-    use solaris_tools::Tool;
-
-    fn make_skill(name: &str, content: &str) -> SkillMetadata {
-        SkillMetadata {
-            name: name.to_string(),
-            display_name: None,
-            description: format!("desc of {name}"),
-            has_user_specified_description: true,
-            allowed_tools: vec![],
-            argument_hint: None,
-            argument_names: vec![],
-            when_to_use: None,
-            version: None,
-            model: None,
-            disable_model_invocation: false,
-            user_invocable: true,
-            execution_context: ExecutionContext::Inline,
-            agent: None,
-            effort: None,
-            shell: None,
-            paths: vec![],
-            hooks_raw: None,
-            source: SkillSource::User,
-            loaded_from: LoadedFrom::Skills,
-            content: content.to_string(),
-            content_length: content.len(),
-            skill_root: None,
-        }
-    }
-
-    // P5-11: SkillTool returns error for a denied skill.
-    #[tokio::test]
-    async fn p5_11_denied_skill_returns_error() {
-        let checker = SkillPermissionChecker::new(vec!["dangerous".to_string()], vec![], false);
-        let tool = SkillTool::new(
-            Arc::new(vec![make_skill("dangerous", "rm -rf /")]),
-            PathBuf::from("/tmp"),
-            checker,
-        );
-        let result = tool.execute(json!({"skill": "dangerous"})).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("denied"), "content: {}", result.content);
-    }
-
-    // P5-12: SkillTool returns informative message for a skill that needs approval.
-    #[tokio::test]
-    async fn p5_12_ask_skill_returns_approval_prompt() {
-        let checker = SkillPermissionChecker::new(vec![], vec![], false);
-        let mut skill = make_skill("hooked", "body");
-        skill.hooks_raw = Some(serde_json::json!({ "pre": "echo hi" }));
-        let tool = SkillTool::new(Arc::new(vec![skill]), PathBuf::from("/tmp"), checker);
-        let result = tool.execute(json!({"skill": "hooked"})).await;
-        assert!(result.is_error);
-        assert!(
-            result.content.contains("approval") || result.content.contains("approve"),
-            "content should mention approval: {}",
-            result.content
-        );
-    }
-}
+#[path = "skill_tool_permission_test.rs"]
+mod permission_tests;
 
 // ---------------------------------------------------------------------------
 // Phase 7 tests — SkillTool fork branch, context_modifier_for fork=None, permissions
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod phase7_tests {
-    use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-    use serde_json::json;
-
-    use crate::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
-    use solaris_skills::permissions::SkillPermissionChecker;
-    use solaris_skills::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
-    use solaris_tools::Tool;
-    use solaris_types::message::TokenUsage;
-
-    use super::SkillTool;
-
-    // ---------------------------------------------------------------------------
-    // MockSpawner — returns preset result, captures args
-    // ---------------------------------------------------------------------------
-
-    struct MockSpawner {
-        is_error: bool,
-        text: String,
-        captured_config: Mutex<Option<SubAgentConfig>>,
-        captured_overrides: Mutex<Option<ForkOverrides>>,
-    }
-
-    impl MockSpawner {
-        fn success(text: &str) -> Arc<Self> {
-            Arc::new(Self {
-                is_error: false,
-                text: text.to_string(),
-                captured_config: Mutex::new(None),
-                captured_overrides: Mutex::new(None),
-            })
-        }
-
-        #[allow(dead_code)]
-        fn error(text: &str) -> Arc<Self> {
-            Arc::new(Self {
-                is_error: true,
-                text: text.to_string(),
-                captured_config: Mutex::new(None),
-                captured_overrides: Mutex::new(None),
-            })
-        }
-
-        #[allow(dead_code)]
-        fn take_config(&self) -> SubAgentConfig {
-            self.captured_config
-                .lock()
-                .unwrap()
-                .take()
-                .expect("spawn_fork was not called")
-        }
-
-        #[allow(dead_code)]
-        fn take_overrides(&self) -> ForkOverrides {
-            self.captured_overrides
-                .lock()
-                .unwrap()
-                .take()
-                .expect("spawn_fork was not called")
-        }
-    }
-
-    #[async_trait]
-    impl Spawner for MockSpawner {
-        async fn spawn_fork(&self, config: SubAgentConfig, overrides: ForkOverrides) -> SubAgentResult {
-            *self.captured_config.lock().unwrap() = Some(config.clone());
-            *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
-            SubAgentResult {
-                name: config.name.clone(),
-                text: self.text.clone(),
-                usage: TokenUsage::default(),
-                turns: 1,
-                is_error: self.is_error,
-            }
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------
-
-    fn make_fork_skill(name: &str, content: &str) -> SkillMetadata {
-        SkillMetadata {
-            name: name.to_string(),
-            display_name: None,
-            description: format!("desc of {name}"),
-            has_user_specified_description: true,
-            allowed_tools: Vec::new(),
-            argument_hint: None,
-            argument_names: Vec::new(),
-            when_to_use: None,
-            version: None,
-            model: None,
-            disable_model_invocation: false,
-            user_invocable: true,
-            execution_context: ExecutionContext::Fork,
-            agent: None,
-            effort: None,
-            shell: None,
-            paths: Vec::new(),
-            hooks_raw: None,
-            source: SkillSource::User,
-            loaded_from: LoadedFrom::Skills,
-            content: content.to_string(),
-            content_length: content.len(),
-            skill_root: None,
-        }
-    }
-
-    fn make_inline_skill(name: &str, content: &str) -> SkillMetadata {
-        SkillMetadata {
-            execution_context: ExecutionContext::Inline,
-            name: name.to_string(),
-            display_name: None,
-            description: format!("desc of {name}"),
-            has_user_specified_description: true,
-            allowed_tools: Vec::new(),
-            argument_hint: None,
-            argument_names: Vec::new(),
-            when_to_use: None,
-            version: None,
-            model: None,
-            disable_model_invocation: false,
-            user_invocable: true,
-            agent: None,
-            effort: None,
-            shell: None,
-            paths: Vec::new(),
-            hooks_raw: None,
-            source: SkillSource::User,
-            loaded_from: LoadedFrom::Skills,
-            content: content.to_string(),
-            content_length: content.len(),
-            skill_root: None,
-        }
-    }
-
-    fn tool_with_spawner(skills: Vec<SkillMetadata>, spawner: Option<Arc<dyn Spawner>>) -> SkillTool {
-        SkillTool::with_spawner(
-            Arc::new(skills),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-            None,
-            spawner,
-        )
-    }
-
-    fn tool_no_spawner(skills: Vec<SkillMetadata>) -> SkillTool {
-        tool_with_spawner(skills, None)
-    }
-
-    // ---------------------------------------------------------------------------
-    // TC-7.20: inline skill takes inline path — spawner NOT called
-    // ---------------------------------------------------------------------------
-    #[tokio::test]
-    async fn tc_7_20_inline_skill_takes_inline_path() {
-        let spawner = MockSpawner::success("should not be called");
-        let tool = tool_with_spawner(
-            vec![make_inline_skill("inline-skill", "inline content")],
-            Some(spawner.clone() as Arc<dyn Spawner>),
-        );
-        let result = tool.execute(json!({"skill": "inline-skill"})).await;
-        assert!(!result.is_error, "inline skill should succeed: {}", result.content);
-        assert_eq!(result.content, "inline content");
-        // spawn_fork should NOT have been called
-        assert!(
-            spawner.captured_config.lock().unwrap().is_none(),
-            "spawner should not have been called for inline skill"
-        );
-    }
-
-    // TC-7.21: fork skill takes fork path — spawner IS called
-    #[tokio::test]
-    async fn tc_7_21_fork_skill_takes_fork_path() {
-        let spawner = MockSpawner::success("fork result");
-        let tool = tool_with_spawner(
-            vec![make_fork_skill("fork-skill", "fork content")],
-            Some(spawner.clone() as Arc<dyn Spawner>),
-        );
-        let result = tool.execute(json!({"skill": "fork-skill"})).await;
-        assert!(!result.is_error, "fork skill should succeed: {}", result.content);
-        assert_eq!(result.content, "fork result");
-        // spawn_fork should have been called exactly once
-        assert!(
-            spawner.captured_config.lock().unwrap().is_some(),
-            "spawner should have been called for fork skill"
-        );
-    }
-
-    // TC-7.12: no spawner — fork skill returns clear error message
-    #[tokio::test]
-    async fn tc_7_12_fork_skill_no_spawner_returns_error() {
-        let tool = tool_no_spawner(vec![make_fork_skill("needs-spawner", "content")]);
-        let result = tool.execute(json!({"skill": "needs-spawner"})).await;
-        assert!(result.is_error, "should be error without spawner");
-        assert!(
-            result.content.contains("fork execution context"),
-            "error message should mention 'fork execution context': {}",
-            result.content
-        );
-    }
-
-    // TC-7.23: context_modifier_for() returns None for fork skill
-    #[test]
-    fn tc_7_23_context_modifier_for_fork_returns_none() {
-        // Fork skill with model/effort overrides — still returns None
-        let mut skill = make_fork_skill("fork-with-model", "content");
-        skill.model = Some("claude-opus-4-6".to_string());
-        skill.effort = Some(EffortLevel::High);
-        skill.allowed_tools = vec!["ExecCommand".to_string()];
-        let tool = tool_no_spawner(vec![skill]);
-        let modifier = tool.context_modifier_for(&json!({"skill": "fork-with-model"}));
-        assert!(
-            modifier.is_none(),
-            "fork skill should return None from context_modifier_for"
-        );
-    }
-
-    // TC-7.22: context_modifier_for() returns Some for inline skill with overrides
-    #[test]
-    fn tc_7_22_context_modifier_for_inline_returns_some() {
-        let mut skill = make_inline_skill("inline-with-model", "content");
-        skill.model = Some("my-model".to_string());
-        let tool = tool_no_spawner(vec![skill]);
-        let modifier = tool.context_modifier_for(&json!({"skill": "inline-with-model"}));
-        assert!(
-            modifier.is_some(),
-            "inline skill with model override should return Some"
-        );
-        assert_eq!(modifier.unwrap().model.as_deref(), Some("my-model"));
-    }
-
-    // TC-7.24: fork skill no spawner — returns error without panic
-    #[tokio::test]
-    async fn tc_7_24_fork_no_spawner_no_panic() {
-        let tool = tool_no_spawner(vec![make_fork_skill("no-spawn", "content")]);
-        // Should not panic, must return Err
-        let result = tool.execute(json!({"skill": "no-spawn"})).await;
-        assert!(result.is_error);
-        assert!(!result.content.is_empty());
-    }
-
-    // TC-7.30: fork skill — permission allow — proceeds to fork execution
-    #[tokio::test]
-    async fn tc_7_30_fork_skill_permission_allow_proceeds() {
-        let spawner = MockSpawner::success("fork ok");
-        let tool = SkillTool::with_spawner(
-            Arc::new(vec![make_fork_skill("fork-allowed", "content")]),
-            PathBuf::from("/tmp"),
-            // deny_list empty, allow_list empty = allow all
-            SkillPermissionChecker::new(vec![], vec![], false),
-            None,
-            Some(spawner as Arc<dyn Spawner>),
-        );
-        let result = tool.execute(json!({"skill": "fork-allowed"})).await;
-        assert!(
-            !result.is_error,
-            "allowed fork skill should succeed: {}",
-            result.content
-        );
-        assert_eq!(result.content, "fork ok");
-    }
-
-    // TC-7.31: fork skill — permission deny — blocked before fork execution
-    #[tokio::test]
-    async fn tc_7_31_fork_skill_permission_deny_blocked() {
-        let spawner = MockSpawner::success("should not reach here");
-        let tool = SkillTool::with_spawner(
-            Arc::new(vec![make_fork_skill("fork-denied", "content")]),
-            PathBuf::from("/tmp"),
-            // deny "fork-denied"
-            SkillPermissionChecker::new(vec!["fork-denied".to_string()], vec![], false),
-            None,
-            Some(spawner.clone() as Arc<dyn Spawner>),
-        );
-        let result = tool.execute(json!({"skill": "fork-denied"})).await;
-        assert!(result.is_error, "denied fork skill should return error");
-        assert!(
-            result.content.contains("denied"),
-            "error should mention 'denied': {}",
-            result.content
-        );
-        // spawner should NOT have been called since permission check happens first
-        assert!(
-            spawner.captured_config.lock().unwrap().is_none(),
-            "spawner should not be called when skill is denied"
-        );
-    }
-
-    // with_spawner() constructor stores spawner correctly
-    #[test]
-    fn tc_7_with_spawner_constructor() {
-        let spawner: Arc<dyn Spawner> = MockSpawner::success("ok");
-        let tool = SkillTool::with_spawner(
-            Arc::new(vec![]),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-            Some("sess-1".to_string()),
-            Some(spawner),
-        );
-        // Verify session_id was also stored
-        assert_eq!(tool.session_id.as_deref(), Some("sess-1"));
-        // Verify spawner is Some
-        assert!(tool.spawner.is_some());
-    }
-
-    // new() constructor leaves spawner as None
-    #[test]
-    fn tc_7_new_constructor_spawner_is_none() {
-        let tool = SkillTool::new(
-            Arc::new(vec![]),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-        );
-        assert!(tool.spawner.is_none());
-    }
-}
+#[path = "skill_tool_fork_test.rs"]
+mod phase7_tests;
 
 // ---------------------------------------------------------------------------
 // Phase 11 tests — skill_hooks_for() (TC-11.40 ~ TC-11.45)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod phase11_tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
+#[path = "skill_tool_hooks_test.rs"]
+mod phase11_tests;
 
-    use serde_json::json;
-
-    use solaris_skills::permissions::SkillPermissionChecker;
-    use solaris_skills::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
-    use solaris_tools::Tool;
-
-    use super::SkillTool;
-
-    fn base_skill(name: &str, source: SkillSource, hooks_raw: Option<serde_json::Value>) -> SkillMetadata {
-        SkillMetadata {
-            name: name.to_string(),
-            display_name: None,
-            description: format!("desc of {name}"),
-            has_user_specified_description: true,
-            allowed_tools: vec![],
-            argument_hint: None,
-            argument_names: vec![],
-            when_to_use: None,
-            version: None,
-            model: None,
-            disable_model_invocation: false,
-            user_invocable: true,
-            execution_context: ExecutionContext::Inline,
-            agent: None,
-            effort: None,
-            shell: None,
-            paths: vec![],
-            hooks_raw,
-            source,
-            loaded_from: LoadedFrom::Skills,
-            content: "body".to_string(),
-            content_length: 4,
-            skill_root: None,
-        }
-    }
-
-    fn tool_with(skills: Vec<SkillMetadata>) -> SkillTool {
-        SkillTool::new(
-            Arc::new(skills),
-            PathBuf::from("/tmp"),
-            SkillPermissionChecker::new(vec![], vec![], false),
-        )
-    }
-
-    fn valid_hooks_json() -> serde_json::Value {
-        json!({
-            "PreToolUse": [{"hooks": [{"type": "command", "command": "echo pre"}]}]
-        })
-    }
-
-    // TC-11.40: skill with valid hooks_raw returns Some(HooksConfig)
-    #[test]
-    fn tc_11_40_skill_with_hooks_returns_some() {
-        let skill = base_skill("my-skill", SkillSource::User, Some(valid_hooks_json()));
-        let tool = tool_with(vec![skill]);
-        let result = tool.skill_hooks_for(&json!({"skill": "my-skill"}));
-        assert!(result.is_some(), "TC-11.40: skill with valid hooks must return Some");
-        let config = result.unwrap();
-        assert!(
-            !config.pre_tool_use.is_empty(),
-            "TC-11.40: pre_tool_use must be non-empty"
-        );
-    }
-
-    // TC-11.41: skill without hooks_raw returns None
-    #[test]
-    fn tc_11_41_skill_without_hooks_returns_none() {
-        let skill = base_skill("no-hooks", SkillSource::User, None);
-        let tool = tool_with(vec![skill]);
-        let result = tool.skill_hooks_for(&json!({"skill": "no-hooks"}));
-        assert!(result.is_none(), "TC-11.41: skill without hooks must return None");
-    }
-
-    // TC-11.42: nonexistent skill name returns None
-    #[test]
-    fn tc_11_42_nonexistent_skill_returns_none() {
-        let tool = tool_with(vec![]);
-        let result = tool.skill_hooks_for(&json!({"skill": "nonexistent"}));
-        assert!(result.is_none(), "TC-11.42: nonexistent skill must return None");
-    }
-
-    // TC-11.43: input missing skill field returns None
-    #[test]
-    fn tc_11_43_missing_skill_field_returns_none() {
-        let skill = base_skill("my-skill", SkillSource::User, Some(valid_hooks_json()));
-        let tool = tool_with(vec![skill]);
-        assert!(
-            tool.skill_hooks_for(&json!({})).is_none(),
-            "TC-11.43: no skill field → None"
-        );
-        assert!(
-            tool.skill_hooks_for(&json!({"foo": "bar"})).is_none(),
-            "TC-11.43: wrong field → None"
-        );
-    }
-
-    // TC-11.44: MCP source skill with hooks_raw returns None
-    #[test]
-    fn tc_11_44_mcp_source_returns_none() {
-        let skill = base_skill("mcp-skill", SkillSource::Mcp, Some(valid_hooks_json()));
-        let tool = tool_with(vec![skill]);
-        let result = tool.skill_hooks_for(&json!({"skill": "mcp-skill"}));
-        assert!(result.is_none(), "TC-11.44: MCP source must return None");
-    }
-
-    // TC-11.45: invalid hooks_raw (array, not object) returns None without panic
-    #[test]
-    fn tc_11_45_invalid_hooks_raw_returns_none() {
-        let skill = base_skill("bad-hooks", SkillSource::User, Some(json!([1, 2, 3])));
-        let tool = tool_with(vec![skill]);
-        let result = tool.skill_hooks_for(&json!({"skill": "bad-hooks"}));
-        assert!(result.is_none(), "TC-11.45: invalid hooks_raw (array) must return None");
-    }
-}
+#[cfg(test)]
+#[path = "skill_tool_process_policy_test.rs"]
+mod process_policy_tests;

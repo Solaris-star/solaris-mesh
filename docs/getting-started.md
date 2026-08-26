@@ -10,6 +10,18 @@ cargo build --release
 ./target/release/solaris
 ```
 
+For a Windows release ZIP, extract the complete archive and run the included
+installer from PowerShell before starting Solaris:
+
+```powershell
+.\install-solaris.cmd
+```
+
+The installer verifies the helper digest, replaces inherited writable DACLs on
+the helper and manifest, and runs `solaris sandbox verify-package`. A failed ACL,
+digest, or strict sandbox check exits with an error; do not use an extracted ZIP
+whose installer did not finish successfully.
+
 ## Command Format
 
 ```
@@ -34,6 +46,8 @@ subcommand runs its action and exits — it does not start the agent main flow.
 | `solaris auth logout` | Logout (remove saved OAuth credentials) |
 | `solaris session list` | List saved sessions |
 | `solaris skills path` | Print skill directory paths |
+| `solaris sandbox verify-package` | Verify the packaged helper and strict process sandbox |
+| `solaris acp` | Serve Solaris Mesh as an Agent Client Protocol agent over stdio |
 
 ### Key Parameters
 
@@ -47,7 +61,11 @@ subcommand runs its action and exits — it does not start the agent main flow.
 | `--max-turns <n>` | Broad model-turn limit per run; unset by default, `0` disables |
 | `--max-tool-call-malformed-turns <n>` | Stop after repeated same tool-call-malformed rounds; `0` disables |
 | `--max-tool-call-failure-turns <n>` | Stop after repeated tool-call-failure rounds; `0` disables |
-| `--auto-approve` | Skip all tool confirmations |
+| `--multi-agent-policy <mode>` | Multi-agent policy: `disabled`, `on_demand`, or `proactive` |
+| `--collaboration-strategy <name>` | Collaboration strategy: `auto`, `single`, `supervisor`, `team`, `fanout`, or `independent_reviewer` |
+| `--max-active-agents <n>` | Active Child Agent limit, from 1 to 64 |
+| `--max-agent-tasks <n>` | Per-Run task limit, from 1 to 256 |
+| `--auto-approve` | Legacy Auto prompt shortcut; skips ordinary prompts without selecting Bypass or bypassing permission checks |
 | `--json-stream` | JSON Lines mode for host integration |
 | `--resume <id>` | Resume a previous session |
 | `--log-dir <path>` | Enable file logging to the given directory |
@@ -69,7 +87,7 @@ CLI parameters / env vars        (highest priority)
 
 ### Migration from SolarisRS
 
-On first use, Solaris CLI copies existing data to the new locations when the
+On first use, the `solaris` CLI copies existing data to the new locations when the
 corresponding Solaris location does not exist:
 
 - `<config_dir>/solaris-mesh/` → `<config_dir>/solaris/`
@@ -155,6 +173,12 @@ enabled = true
 directory = ".solaris/sessions"
 max_sessions = 20
 
+[multi_agent]
+policy = "on_demand"       # disabled | on_demand | proactive
+strategy = "auto"           # auto | single | supervisor | team | fanout | independent_reviewer
+max_active_agents = 4       # optional, 1..=64
+max_tasks_per_run = 32       # 1..=256
+
 [compact]
 compaction = "safe"   # off | safe | full
 toon = false          # Enable TOON encoding for JSON arrays
@@ -163,6 +187,10 @@ toon = false          # Enable TOON encoding for JSON arrays
 [file_cache]
 enabled = true
 max_entries = 100
+
+[memory]
+enabled = false          # Opt in to persistent project memory
+review = false           # Route root-agent changes through proposals
 
 [plan]
 enabled = true
@@ -277,7 +305,7 @@ solaris "List all Rust files in this project"
 
 ## Tool Confirmation
 
-Destructive tools (Write, Edit, ExecCommand) prompt for confirmation before execution:
+When the current permission policy returns Ask, a mutating or process tool prompts for confirmation before execution:
 
 ```
 [tool] Write({"file_path": "/tmp/test.rs", "content": "..."})
@@ -288,18 +316,20 @@ Allow? [y]es / [n]o / [a]lways / [q]uit > y
 |--------|-------------|
 | `y` / `yes` / Enter | Allow this execution |
 | `n` / `no` | Deny — LLM receives a "denied" error |
-| `a` / `always` | Auto-approve this tool for the rest of the session |
+| `a` / `always` | Create a bounded session approval for the matching capability |
 | `q` / `quit` | Abort the entire agent run |
 
 - Read-only tools (Read, Grep, Glob) are auto-approved by default
-- `--auto-approve` skips all confirmations
+- `--auto-approve` skips ordinary prompts within Auto; explicit denies, resource checks, and strict process isolation still apply
 - `tools.allow_list` in config customizes the whitelist
+
+Auto and Bypass are different permission modes. Auto applies one permission state to file, network, MCP, plugin, hook, skill, and process operations. Bypass uses the complete host access available to the current OS user; explicit deny rules and blocking hooks can still refuse an operation. Bypass does not claim to prevent destructive host actions. See [Built-in Tools](tools.md#permission-modes) for the strict-Auto process status.
 
 ---
 
 ## Session Management
 
-Sessions auto-save to `.solaris/sessions/`.
+Sessions are stored transactionally in `.solaris/sessions/session.sqlite3`. The database uses WAL, full synchronous commits, owner leases, epochs, revisions, and heartbeats. Legacy JSON sessions are imported once and remain available through the read-only compatibility path for one version; the old files are not deleted.
 
 ```bash
 # List saved sessions
@@ -318,5 +348,6 @@ solaris --session-id my-conv-123
 - `--session-id` and `--resume` are mutually exclusive
 - `--session-id` errors if the ID already exists
 - Both flags work in interactive and `--json-stream` mode
-- Auto-saves after each tool round
-- Auto-cleans oldest sessions when exceeding `max_sessions`
+- Saves durable task phases and session state after each tool round
+- Keeps active sessions regardless of `max_sessions`
+- When visible inactive sessions exceed `max_sessions`, marks the oldest safe sessions with tombstones; referenced Ledger records and blobs are removed only by the delayed, restartable GC

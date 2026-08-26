@@ -68,15 +68,15 @@ mod tests {
 
     #[test]
     fn usage_includes_prompt_cache_hit_tokens() {
-        // DeepSeek reports prompt_cache_hit_tokens separately;
-        // input_tokens should be the sum of prompt_tokens + prompt_cache_hit_tokens
+        // DeepSeek reports prompt_tokens as the total, with hit and miss as subsets.
         let mut state = StreamState::new();
 
-        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":500,"completion_tokens":100,"prompt_cache_hit_tokens":999500}}"#;
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000000,"completion_tokens":100,"prompt_cache_hit_tokens":999500,"prompt_cache_miss_tokens":500}}"#;
         let _ = parse_sse_chunk(chunk, &mut state, false);
 
         assert_eq!(state.input_tokens, 1_000_000);
         assert_eq!(state.output_tokens, 100);
+        assert_eq!(state.cache_read_tokens, 999_500);
     }
 
     #[test]
@@ -91,6 +91,7 @@ mod tests {
         // prompt_tokens is already the full total for OpenAI
         assert_eq!(state.input_tokens, 1_000_000);
         assert_eq!(state.output_tokens, 100);
+        assert_eq!(state.cache_read_tokens, 999_000);
     }
 
     #[test]
@@ -133,6 +134,12 @@ mod tests {
             assert_eq!(name, "Skill");
             assert_eq!(input["skill"], "test");
         }
+        assert!(matches!(
+            &events2[0],
+            LlmEvent::ProviderMetadata { namespace, value }
+                if namespace == "openai"
+                    && value["tool_calls"]["call_abc123"]["extra_content"] == json!({})
+        ));
 
         // Done should be deferred with ToolUse stop reason
         let done = state.flush_done().unwrap();

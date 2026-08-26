@@ -66,7 +66,7 @@ async fn tc_ax_01_multi_feature_collaboration() {
         enabled: true,
     };
     let cache = Arc::new(RwLock::new(FileStateCache::new(&cache_config)));
-    let read_tool = ReadTool::new(Some(Arc::clone(&cache)));
+    let read_tool = ReadTool::new_with_workspace_root(Some(Arc::clone(&cache)), tmp.path());
 
     let test_file = tmp.path().join("test_read.txt");
     std::fs::write(&test_file, "line one\nline two\nline three\n").unwrap();

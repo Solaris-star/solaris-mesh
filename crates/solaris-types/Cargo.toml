@@ -1,6 +1,6 @@
 [package]
 name = "solaris-types"
-description = "Shared provider-neutral data types for Solaris CLI (LLM, message, tool)"
+description = "Shared provider-neutral runtime types for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,4 +11,5 @@ serde.workspace       = true
 serde_json.workspace  = true
 async-trait.workspace = true
 chrono.workspace      = true
+sha2.workspace        = true
 workspace-hack.workspace = true

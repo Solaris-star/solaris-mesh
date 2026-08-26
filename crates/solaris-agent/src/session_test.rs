@@ -25,8 +25,60 @@ mod tests {
         assert_eq!(session.model, "gpt-4");
         assert_eq!(session.cwd, "/tmp");
         assert!(session.messages.is_empty());
-        assert!(manager.state_path(&session.id).is_file());
+        assert!(session.run_id.as_deref().is_some_and(|run_id| !run_id.is_empty()));
+        assert!(dir.path().join("session.sqlite3").is_file());
+        assert!(!dir.path().join("sessions").exists());
         assert!(!dir.path().join("index.json").exists());
+    }
+
+    #[test]
+    fn test_deserializes_legacy_session_without_model() {
+        let legacy = serde_json::json!({
+            "id": "legacy-session",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "provider": "openai",
+            "cwd": "/tmp",
+            "total_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0
+            },
+            "messages": []
+        });
+
+        let session: Session = serde_json::from_value(legacy).unwrap();
+
+        assert!(session.model.is_empty());
+        assert!(session.runtime_state.is_none());
+    }
+
+    #[test]
+    fn runtime_state_round_trip_preserves_plan_effort_allow_list_and_hooks() {
+        let mut session = sample_session("runtime-state", "model");
+        session.runtime_state = Some(SessionRuntimeState {
+            reasoning_effort: Some("high".to_owned()),
+            allow_list: vec!["Read".to_owned(), "Grep".to_owned()],
+            plan_active: true,
+            pre_plan_allow_list: vec!["Write".to_owned()],
+            hooks: HooksConfig {
+                post_tool_use: vec![solaris_config::hooks::HookDef {
+                    name: "verify".to_owned(),
+                    tool_match: vec!["Write".to_owned()],
+                    file_match: Vec::new(),
+                    command: "verify-output".to_owned(),
+                    timeout_ms: 17_000,
+                    network: Default::default(),
+                }],
+                ..Default::default()
+            },
+            memory_snapshot: None,
+        });
+
+        let decoded: Session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+
+        assert_eq!(decoded.runtime_state, session.runtime_state);
     }
 
     #[test]
@@ -101,7 +153,22 @@ mod tests {
     }
 
     #[test]
-    fn test_load_legacy_session_migrates_to_current_layout() {
+    fn repeated_legacy_style_save_preserves_generated_run_identity() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = sample_session("compat-save", "first-model");
+
+        manager.save(&session).unwrap();
+        session.model = "second-model".to_owned();
+        manager.save(&session).unwrap();
+
+        let loaded = manager.load("compat-save").unwrap();
+        assert_eq!(loaded.model, "second-model");
+        assert!(loaded.run_id.as_deref().is_some_and(|run_id| !run_id.is_empty()));
+    }
+
+    #[test]
+    fn test_load_legacy_session_imports_without_rewriting_source() {
         let dir = tempdir().unwrap();
         let manager = SessionManager::new(dir.path().to_path_buf(), 10);
         let legacy = sample_session("legacy-session", "legacy model");
@@ -112,7 +179,8 @@ mod tests {
 
         assert_eq!(loaded.id, legacy.id);
         assert_eq!(loaded.model, legacy.model);
-        assert!(manager.state_path(&legacy.id).is_file());
+        assert!(dir.path().join("session.sqlite3").is_file());
+        assert!(!dir.path().join("sessions").exists());
         assert!(dir.path().join("2026-07-07_legacy-session.json").is_file());
         assert!(dir.path().join("index.json").is_file());
     }
@@ -154,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_current_skips_invalid_state_json() {
+    fn test_list_ignores_obsolete_invalid_state_json() {
         let dir = tempdir().unwrap();
         let manager = SessionManager::new(dir.path().to_path_buf(), 10);
         let valid = sample_session("valid-session", "current model");
@@ -181,7 +249,7 @@ mod tests {
         let session = manager.create("openai", "gpt-4", "/tmp", Some("new-session")).unwrap();
 
         assert_eq!(session.id, "new-session");
-        assert!(manager.state_path("new-session").is_file());
+        assert!(dir.path().join("session.sqlite3").is_file());
     }
 
     #[test]
@@ -220,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_old_sessions() {
+    fn test_session_limit_tombstones_without_deleting_state() {
         let dir = tempdir().unwrap();
         let manager = SessionManager::new(dir.path().to_path_buf(), 2);
 
@@ -230,6 +298,19 @@ mod tests {
 
         let list = manager.list().unwrap();
         assert_eq!(list.len(), 2);
+        let connection = rusqlite::Connection::open(dir.path().join("session.sqlite3")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM session_gc_jobs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -244,8 +325,8 @@ mod tests {
 
         assert!(dir.path().join("2026-07-07_legacy-session.json").is_file());
         let list = manager.list().unwrap();
-        assert_eq!(list.len(), 2);
-        assert!(list.iter().any(|meta| meta.id == "legacy-session"));
+        assert_eq!(list.len(), 1);
+        assert!(!list.iter().any(|meta| meta.id == "legacy-session"));
     }
 
     #[test]
@@ -257,25 +338,6 @@ mod tests {
         let parsed = Uuid::parse_str(&id1).unwrap();
         assert_eq!(id1.len(), 36);
         assert_eq!(parsed.get_version_num(), 7);
-    }
-
-    #[test]
-    fn test_session_lock_registry_prunes_unused_locks() {
-        let dir = tempdir().unwrap();
-        let old_path = dir.path().join("sessions").join("old-session");
-
-        {
-            let lock = session_lock(old_path.clone());
-            let _guard = lock.lock().unwrap();
-            assert!(session_lock_registry_contains(&old_path));
-        }
-
-        {
-            let new_path = dir.path().join("sessions").join("new-session");
-            let _lock = session_lock(new_path);
-        }
-
-        assert!(!session_lock_registry_contains(&old_path));
     }
 
     #[test]
@@ -301,12 +363,34 @@ mod tests {
 
         assert_eq!(success_count, 1);
         assert_eq!(error_count, 1);
-        assert!(manager.state_path("same-session").is_file());
+        assert!(manager.load("same-session").is_ok());
+    }
+
+    #[test]
+    fn session_run_id_is_backward_compatible_and_roundtrips() {
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "created_at": Utc::now(),
+            "updated_at": Utc::now(),
+            "provider": "test-provider",
+            "model": "model",
+            "cwd": "/tmp",
+            "total_usage": TokenUsage::default(),
+            "messages": []
+        });
+        let legacy: Session = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.run_id.is_none());
+
+        let mut current = sample_session("current", "model");
+        current.run_id = Some("run-123".into());
+        let decoded: Session = serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(decoded.run_id.as_deref(), Some("run-123"));
     }
 
     fn sample_session(id: &str, model: &str) -> Session {
         Session {
             id: id.to_string(),
+            run_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             provider: "test-provider".to_string(),
@@ -319,6 +403,7 @@ mod tests {
                     text: format!("summary for {id}"),
                 }],
             )],
+            runtime_state: None,
         }
     }
 

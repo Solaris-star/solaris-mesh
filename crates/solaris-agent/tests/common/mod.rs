@@ -14,6 +14,7 @@ use solaris_mcp::config::McpConfig;
 use solaris_protocol::events::ToolCategory;
 use solaris_providers::{LlmProvider, ProviderError};
 use solaris_tools::Tool;
+use solaris_types::effect::{EffectClass, EffectDescriptor, EffectReplayPolicy};
 use solaris_types::llm::{LlmEvent, LlmRequest};
 use solaris_types::message::{StopReason, TokenUsage};
 use solaris_types::tool::ToolResult;
@@ -175,6 +176,15 @@ impl Tool for MockTool {
         self.concurrent_safe
     }
 
+    fn describe_effect(&self, _input: &Value) -> EffectDescriptor {
+        EffectDescriptor {
+            class: EffectClass::ReadOnly,
+            action: format!("in-memory test tool: {}", self.tool_name),
+            resources: Default::default(),
+            replay_policy: EffectReplayPolicy::ReplaySafe,
+        }
+    }
+
     async fn execute(&self, _input: Value) -> ToolResult {
         self.result.lock().unwrap().clone()
     }
@@ -238,7 +248,7 @@ pub fn test_config() -> Config {
         provider_label: "anthropic".to_string(),
         provider: ProviderType::Anthropic,
         api_key: "test-key".to_string(),
-        base_url: "http://localhost:0".to_string(),
+        base_url: "https://provider.example.test/v1".to_string(),
         model: "test-model".to_string(),
         max_tokens: Some(4096),
         max_turns: Some(10),
@@ -258,6 +268,7 @@ pub fn test_config() -> Config {
             directory: "/tmp/solaris-test-sessions".to_string(),
             max_sessions: 5,
         },
+        memory: Default::default(),
         compact: solaris_config::compact::CompactConfig::default(),
         plan: solaris_config::plan::PlanConfig::default(),
         shell: solaris_config::shell::ShellConfig::default(),
@@ -267,6 +278,7 @@ pub fn test_config() -> Config {
         vertex: None,
         mcp: McpConfig::default(),
         logging: solaris_config::logging::LoggingConfig::default(),
+        multi_agent: Default::default(),
     }
 }
 

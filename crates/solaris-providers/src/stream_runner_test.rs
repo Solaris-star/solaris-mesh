@@ -394,6 +394,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_attempt_policy_never_sends_a_second_physical_request() {
+        let send_count = Arc::new(AtomicU32::new(0));
+        let mut rx = run_stream(
+            {
+                let send_count = Arc::clone(&send_count);
+                move || {
+                    let send_count = Arc::clone(&send_count);
+                    async move {
+                        send_count.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, ProviderError>(())
+                    }
+                }
+            },
+            move |(), _tx| async move { StreamOutcome::FailedEmpty(ProviderError::Connection("lost".into())) },
+            RetryPolicy::single_attempt(),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(LlmEvent::Error(_))));
+        assert!(rx.recv().await.is_none());
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_run_stream_does_not_retry_initial_connect_when_disabled() {
         tokio::time::pause();
 

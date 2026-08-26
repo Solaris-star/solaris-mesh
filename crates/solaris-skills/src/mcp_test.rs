@@ -31,7 +31,7 @@ mod tests {
 
     #[async_trait]
     impl McpTransport for MockTransport {
-        async fn request(&self, _req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+        async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
             let mut guard = self.responses.lock().unwrap();
             let value = if guard.is_empty() {
                 serde_json::json!(null)
@@ -40,7 +40,7 @@ mod tests {
             };
             Ok(JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
-                id: Some(1),
+                id: req.id,
                 result: Some(value),
                 error: None,
             })
@@ -241,13 +241,13 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl McpTransport for PartialErrorTransport {
-            async fn request(&self, _req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
                 let count = self.call_count.fetch_add(1, Ordering::Relaxed);
                 match count {
                     0 => Ok(JsonRpcResponse {
                         // resources/list
                         jsonrpc: "2.0".to_string(),
-                        id: Some(1),
+                        id: req.id,
                         result: Some(serde_json::json!({
                             "resources": [{"uri": "skill://good-skill"}, {"uri": "skill://bad-skill"}]
                         })),
@@ -256,7 +256,7 @@ mod tests {
                     1 => Ok(JsonRpcResponse {
                         // read good-skill
                         jsonrpc: "2.0".to_string(),
-                        id: Some(2),
+                        id: req.id,
                         result: Some(serde_json::json!({
                             "contents": [{"uri": "skill://good-skill", "text": "---\ndescription: Good\n---\n"}]
                         })),

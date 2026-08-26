@@ -7,7 +7,19 @@ use super::*;
 #[cfg(test)]
 mod tests {
     // Note: these are the implementer's tests; supplemental tests below.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    struct CountingExecutor(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl SkillShellExecutor for CountingExecutor {
+        async fn execute(&self, _command: &str, _cwd: &std::path::Path) -> Result<String, ShellExecutionError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(String::new())
+        }
+    }
 
     // Helper: run execute_shell_commands with LoadedFrom::Skills
     async fn run(content: &str) -> Result<String, ShellExecutionError> {
@@ -141,11 +153,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_inline_parallel() {
+    async fn test_multiple_inline_commands_are_rejected() {
         let content = "A: !`echo aaa` B: !`echo bbb`";
-        let result = run(content).await.unwrap();
-        assert!(result.contains("aaa"));
-        assert!(result.contains("bbb"));
+        let executor = CountingExecutor(AtomicUsize::new(0));
+        let error = execute_shell_commands_with(content, LoadedFrom::Skills, &std::env::temp_dir(), Some(&executor))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ShellExecutionError::TooManyCommands { count: 2, limit: 1 }
+        ));
+        assert_eq!(executor.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

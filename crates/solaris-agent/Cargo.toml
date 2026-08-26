@@ -1,6 +1,6 @@
 [package]
 name = "solaris-agent"
-description = "Agent engine, session management, output sinks, and orchestration for Solaris CLI"
+description = "Agent engine, collaboration runtime, sessions, and orchestration for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ solaris-mcp.workspace       = true
 solaris-skills.workspace    = true
 solaris-memory.workspace    = true
 solaris-compact.workspace   = true
+solaris-process.workspace   = true
 
 tracing.workspace     = true
 tokio.workspace       = true
@@ -29,12 +30,26 @@ glob.workspace        = true
 chrono.workspace      = true
 uuid.workspace        = true
 dirs.workspace        = true
+rusqlite.workspace    = true
 crossterm.workspace   = true
 is-terminal.workspace = true
+sha2.workspace          = true
+cap-std.workspace       = true
+which.workspace         = true
 workspace-hack.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
+solaris-process = { path = "../solaris-process", features = ["sandbox-test-fixtures"] }
+solaris-tools = { path = "../solaris-tools", features = ["sandbox-test-fixtures"] }
 solaris-mcp = { path = "../solaris-mcp", features = ["test-utils"] }
+rusqlite = { workspace = true, features = ["hooks"] }
+tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace    = true
 tokio-test.workspace  = true
 tempfile.workspace    = true

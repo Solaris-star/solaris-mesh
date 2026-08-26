@@ -178,6 +178,7 @@ fn definition_to_metadata(def: &BundledSkillDefinition) -> SkillMetadata {
         effort: None,
         shell: None,
         paths: Vec::new(),
+        network: Default::default(),
         hooks_raw: None,
         source: SkillSource::Bundled,
         loaded_from: LoadedFrom::Bundled,

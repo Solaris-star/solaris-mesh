@@ -1,14 +1,17 @@
 use crate::types::SkillSource;
 use solaris_config::hooks::{HookDef, HooksConfig};
+use solaris_types::permission::ProcessNetworkConfig;
 
 /// A single hook command extracted from skill frontmatter.
 /// Only command-type hooks are supported; prompt/http/agent are silently skipped.
+#[derive(Clone)]
 pub struct SkillHookCommand {
     pub command: String,
     /// Tool name glob pattern; None means match all tools.
     pub matcher: Option<String>,
     /// Timeout in seconds (converted to ms when building HookDef).
     pub timeout_secs: Option<u64>,
+    pub network: ProcessNetworkConfig,
 }
 
 /// Parsed hooks from a skill's frontmatter, grouped by event.
@@ -102,11 +105,23 @@ pub fn parse_skill_hooks(
                 };
 
                 let timeout_secs = hook["timeout"].as_u64();
+                let network = hook
+                    .get("network")
+                    .cloned()
+                    .and_then(|value| match serde_json::from_value(value) {
+                        Ok(config) => Some(config),
+                        Err(_) => {
+                            tracing::warn!(target: "solaris_skills", skill = %skill_name, "invalid hook network configuration; network denied");
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
 
                 target.push(SkillHookCommand {
                     command,
                     matcher: matcher_str.clone(),
                     timeout_secs,
+                    network,
                 });
             }
         }
@@ -145,6 +160,7 @@ fn build_defs(cmds: &[SkillHookCommand], skill_name: &str, event: &str) -> Vec<H
                 file_match: Vec::new(),
                 command: cmd.command.clone(),
                 timeout_ms,
+                network: cmd.network.clone(),
             }
         })
         .collect()

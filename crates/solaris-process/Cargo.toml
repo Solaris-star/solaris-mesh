@@ -1,22 +1,92 @@
 [package]
 name = "solaris-process"
-description = "Process execution helpers for Solaris CLI"
+description = "Process execution helpers for Solaris Mesh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+autobins = false
+
+[[bin]]
+name = "solaris-process-sandbox-helper"
+path = "src/bin/solaris-process-sandbox-helper.rs"
+
+[[bin]]
+name = "solaris-process-sandbox-test-helper"
+path = "src/bin/solaris-process-sandbox-test-helper.rs"
+required-features = ["sandbox-test-fixtures"]
+
+[[bin]]
+name = "solaris-windows-network-proxy"
+path = "src/bin/solaris-windows-network-proxy.rs"
+required-features = ["windows-packaged-network-proxy"]
+
+[[test]]
+name = "linux_sandbox"
+path = "tests/linux_sandbox.rs"
+required-features = ["sandbox-test-fixtures"]
+
+[[test]]
+name = "windows_sandbox"
+path = "tests/windows_sandbox.rs"
+required-features = ["sandbox-test-fixtures"]
+
+[features]
+sandbox-test-fixtures = []
+windows-packaged-network-proxy = []
 
 [dependencies]
+solaris-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 workspace-hack.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
+webpki-roots.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+cap-std.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+flatbuffers.workspace = true
+process_security_environment_spec.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
+webpki-roots.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_Console",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_SystemInformation",
     "Win32_System_JobObjects",
+    "Win32_System_Memory",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
 ] }
+zeroize.workspace = true

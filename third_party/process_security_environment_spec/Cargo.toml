@@ -1,0 +1,10 @@
+[package]
+name = "process_security_environment_spec"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Vendored Microsoft PSEC FlatBuffers bindings"
+
+[dependencies]
+flatbuffers = "=25.12.19"

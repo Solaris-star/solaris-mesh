@@ -1,7 +1,8 @@
 use super::{
-    AgentEngine, AgentError, CacheBreakDetector, CompactLevel, CompactState, ProviderCompat, merge_tool_results,
-    tool_call_malformed_fingerprint,
+    AgentEngine, AgentError, CacheBreakDetector, CompactLevel, CompactState, ProviderCompat,
+    runtime_configuration_state,
 };
+use crate::tool_call::{merge_tool_results, tool_call_malformed_fingerprint};
 
 // ---------------------------------------------------------------------------
 // set_config tests — apply_config_update()
@@ -12,14 +13,20 @@ mod tests_set_config {
     use std::sync::{Arc, Mutex};
 
     use solaris_config::compat::ReasoningCompat;
+    use solaris_config::hooks::{HookDef, HookEngine, HooksConfig};
     use solaris_providers::error::ProviderError;
     use solaris_providers::provider::LlmProvider;
     use solaris_tools::registry::ToolRegistry;
+    use solaris_types::config::{ConfigField, ConfigFieldStatus};
     use solaris_types::llm::{LlmEvent, LlmRequest};
+    use solaris_types::permission::PermissionMode;
+    use solaris_types::run_preset::Intensity;
+    use solaris_types::workflow::MultiAgentPolicy;
 
     use super::{CompactLevel, ProviderCompat};
-    use crate::confirm::ToolConfirmer;
+    use crate::confirm::{ConfirmResult, ToolConfirmer};
     use crate::output::OutputSink;
+    use crate::turn::TurnKind;
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -27,6 +34,29 @@ mod tests_set_config {
         fn emit_thinking(&self, _: &str, _: &str) {}
         fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
         fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+        fn emit_error(&self, _: &str) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    #[derive(Default)]
+    struct StatusOutput(Mutex<Vec<solaris_types::tool::ToolResultStatus>>);
+
+    impl OutputSink for StatusOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+        fn emit_tool_result_with_status(
+            &self,
+            _: &str,
+            _: &str,
+            status: solaris_types::tool::ToolResultStatus,
+            _: &str,
+        ) {
+            self.0.lock().unwrap().push(status);
+        }
         fn emit_stream_start(&self, _: &str) {}
         fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
         fn emit_error(&self, _: &str) {}
@@ -45,12 +75,25 @@ mod tests_set_config {
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            provider_label: "test-provider".to_owned(),
+            provider_effect: crate::bootstrap::provider_effect_descriptor("https://provider.test"),
             model: model.to_string(),
             max_tokens: Some(4096),
             thinking: None,
             compat: ProviderCompat::anthropic_defaults(),
             system_prompt: String::new(),
             reasoning_effort: None,
+            runtime_configuration: super::runtime_configuration_state(
+                "test-provider",
+                model,
+                solaris_types::permission::PermissionMode::Bypass,
+                &None,
+                CompactLevel::default(),
+            ),
+            multi_agent_policy: std::sync::Arc::new(std::sync::RwLock::new(
+                solaris_types::workflow::MultiAgentPolicy::default(),
+            )),
+            resources: crate::resource_manager::ResourceManager::new(Default::default()),
             messages: vec![],
             total_usage: Default::default(),
             msg_id: String::new(),
@@ -59,6 +102,8 @@ mod tests_set_config {
             max_tool_call_failure_turns: 3,
             tools: ToolRegistry::new(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
+            permission_context: crate::permission_engine::PermissionContext::from_auto_approve(true),
+            execution_context: None,
             allow_list: vec![],
             hooks: None,
             session_manager: None,
@@ -72,9 +117,113 @@ mod tests_set_config {
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
+            plan_mode_disable_handler: None,
             cache_detector: super::CacheBreakDetector::new(),
             commands: crate::commands::default_registry(),
         }
+    }
+
+    #[test]
+    fn session_runtime_state_restores_effort_allow_list_plan_and_dynamic_hooks() {
+        let dynamic_hooks = HooksConfig {
+            post_tool_use: vec![HookDef {
+                name: "verify".to_owned(),
+                tool_match: vec!["Read".to_owned()],
+                file_match: Vec::new(),
+                command: "verify-output".to_owned(),
+                timeout_ms: 9_000,
+                network: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let mut original = make_engine("model");
+        original.reasoning_effort = Some("high".to_owned());
+        original.allow_list = vec!["Read".to_owned()];
+        original.plan_state = crate::plan::state::PlanState {
+            is_active: true,
+            pre_plan_allow_list: vec!["Write".to_owned()],
+        };
+        original.hooks = Some(HookEngine::new(dynamic_hooks.clone(), std::env::temp_dir()));
+        let saved = original.session_runtime_state();
+
+        let mut restored = make_engine("model");
+        restored.confirmer = Arc::new(Mutex::new(ToolConfirmer::new(false, Vec::new())));
+        restored.hooks = Some(HookEngine::new(HooksConfig::default(), std::env::temp_dir()));
+        let plan_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        restored.set_plan_active_flag(Arc::clone(&plan_active));
+        restored.restore_session_runtime_state(Some(&saved));
+
+        assert_eq!(restored.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(restored.allow_list, ["Read"]);
+        assert!(restored.plan_state.is_active);
+        assert_eq!(restored.plan_state.pre_plan_allow_list, ["Write"]);
+        assert!(plan_active.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(restored.hooks.as_ref().unwrap().config_snapshot(), dynamic_hooks);
+        let configuration = restored.runtime_configuration_view().snapshot();
+        assert_eq!(configuration.effective_effort.as_deref(), Some("high"));
+        assert_eq!(configuration.permission, PermissionMode::Plan);
+        let mut confirmer = restored.confirmer.lock().unwrap();
+        confirmer.set_interactive(false);
+        assert_eq!(confirmer.check("Read", ""), ConfirmResult::ApprovedAlways);
+        assert_eq!(confirmer.check("Write", ""), ConfirmResult::Denied);
+    }
+
+    #[test]
+    fn session_runtime_state_keeps_the_durable_memory_snapshot_reference() {
+        let reference = crate::session::SessionMemorySnapshot {
+            format_version: 1,
+            digest_sha256: "a".repeat(64),
+            encoded_bytes: 123,
+            captured_at_ms: 456,
+        };
+        let mut engine = make_engine("model");
+        engine.current_session = Some(crate::session::Session {
+            id: "memory-session".to_owned(),
+            run_id: Some("memory-run".to_owned()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            provider: "test-provider".to_owned(),
+            model: "model".to_owned(),
+            cwd: "workspace".to_owned(),
+            total_usage: Default::default(),
+            messages: Vec::new(),
+            runtime_state: Some(crate::session::SessionRuntimeState {
+                memory_snapshot: Some(reference.clone()),
+                ..Default::default()
+            }),
+        });
+
+        assert_eq!(engine.session_runtime_state().memory_snapshot, Some(reference));
+    }
+
+    #[test]
+    fn tool_result_emission_preserves_explicit_status() {
+        let output = Arc::new(StatusOutput::default());
+        let mut engine = make_engine("test-model");
+        engine.output = output.clone();
+        let calls = vec![solaris_types::message::ContentBlock::ToolUse {
+            id: "cached-call".into(),
+            name: "Read".into(),
+            input: serde_json::json!({}),
+            extra: None,
+        }];
+        let results = vec![solaris_types::message::ContentBlock::ToolResult {
+            tool_use_id: "cached-call".into(),
+            content: "cached value".into(),
+            is_error: false,
+        }];
+
+        engine.emit_tool_results(
+            &calls,
+            &results,
+            &[solaris_types::tool::ToolResultStatus::CacheHit],
+            &std::collections::BTreeMap::new(),
+        );
+
+        assert_eq!(
+            *output.0.lock().unwrap(),
+            [solaris_types::tool::ToolResultStatus::CacheHit]
+        );
     }
 
     fn make_engine_with_compat(model: &str, compat: ProviderCompat) -> super::AgentEngine {
@@ -83,265 +232,627 @@ mod tests_set_config {
         engine
     }
 
-    // --- Cycle 1 tests (updated signature) ---
+    #[derive(Clone, Default)]
+    struct InfoLogBuffer(Arc<Mutex<String>>);
 
-    #[test]
-    fn set_config_changes_model() {
-        let mut engine = make_engine("old-model");
-        let changes = engine.apply_config_update(Some("new-model".into()), None, None, None, None);
-        assert_eq!(engine.model, "new-model");
-        assert_eq!(changes.len(), 1);
-        assert!(changes[0].contains("old-model"));
-        assert!(changes[0].contains("new-model"));
-    }
+    struct InfoSubscriber(InfoLogBuffer);
 
-    #[test]
-    fn set_config_none_model_no_change() {
-        let mut engine = make_engine("current");
-        let changes = engine.apply_config_update(None, None, None, None, None);
-        assert_eq!(engine.model, "current");
-        assert!(changes.is_empty());
-    }
+    struct InfoVisitor<'buffer>(&'buffer InfoLogBuffer);
 
-    #[test]
-    fn set_config_same_model_still_reports_change() {
-        let mut engine = make_engine("same");
-        let changes = engine.apply_config_update(Some("same".into()), None, None, None, None);
-        assert_eq!(changes.len(), 1);
-    }
+    impl tracing::field::Visit for InfoVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
 
-    #[test]
-    fn set_config_empty_string_model_accepted() {
-        let mut engine = make_engine("real-model");
-        engine.apply_config_update(Some(String::new()), None, None, None, None);
-        assert_eq!(engine.model, "");
-    }
-
-    #[test]
-    fn set_config_model_does_not_affect_other_state() {
-        let mut engine = make_engine("m");
-        engine.reasoning_effort = Some("high".into());
-        engine.apply_config_update(Some("new-m".into()), None, None, None, None);
-        assert_eq!(engine.model, "new-m");
-        assert_eq!(engine.reasoning_effort.as_deref(), Some("high"));
-    }
-
-    // --- Cycle 2: Effort config tests ---
-
-    #[test]
-    fn set_config_changes_effort() {
-        let mut engine = make_engine_with_compat("m", ProviderCompat::openai_defaults());
-        assert!(engine.reasoning_effort.is_none());
-        let changes = engine.apply_config_update(None, None, None, Some("high".into()), None);
-        assert_eq!(engine.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(changes.len(), 1);
-        assert!(changes[0].contains("high"));
-    }
-
-    #[test]
-    fn set_config_clears_effort_with_empty_string() {
-        let mut engine = make_engine("m");
-        engine.reasoning_effort = Some("high".into());
-        let changes = engine.apply_config_update(None, None, None, Some(String::new()), None);
-        assert!(engine.reasoning_effort.is_none());
-        assert_eq!(changes.len(), 1);
-    }
-
-    // --- Cycle 2: Thinking config tests ---
-
-    #[test]
-    fn set_config_enables_thinking() {
-        let mut engine = make_engine("m");
-        let changes = engine.apply_config_update(None, Some("enabled".into()), Some(16000), None, None);
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                assert_eq!(*budget_tokens, 16000);
-            }
-            other => panic!("expected Enabled, got: {other:?}"),
+            let _ = write!(self.0.0.lock().unwrap(), "{}={value:?} ", field.name());
         }
-        assert_eq!(changes.len(), 1);
     }
 
-    #[test]
-    fn set_config_disables_thinking() {
-        let mut engine = make_engine("m");
-        engine.thinking = Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 8000 });
-        let changes = engine.apply_config_update(None, Some("disabled".into()), None, None, None);
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Disabled) => {}
-            other => panic!("expected Disabled, got: {other:?}"),
+    impl tracing::Subscriber for InfoSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::INFO
         }
-        assert_eq!(changes.len(), 1);
-    }
 
-    #[test]
-    fn set_config_thinking_enabled_default_budget() {
-        let mut engine = make_engine("m");
-        let changes = engine.apply_config_update(None, Some("enabled".into()), None, None, None);
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                assert!(*budget_tokens > 0);
-            }
-            other => panic!("expected Enabled with default budget, got: {other:?}"),
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
         }
-        assert_eq!(changes.len(), 1);
-    }
 
-    #[test]
-    fn set_config_invalid_thinking_ignored() {
-        let mut engine = make_engine("m");
-        engine.thinking = Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 8000 });
-        let changes = engine.apply_config_update(None, Some("invalid_value".into()), None, None, None);
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                assert_eq!(*budget_tokens, 8000);
-            }
-            other => panic!("expected Enabled unchanged, got: {other:?}"),
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            event.record(&mut InfoVisitor(&self.0));
         }
-        assert_eq!(changes.len(), 1);
-        assert!(changes[0].contains("invalid") || changes[0].contains("ignored"));
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
     }
 
-    // --- Cycle 2: Combined fields test ---
+    struct SecretStopHookExecutor(&'static str);
 
-    #[test]
-    fn set_config_all_fields_at_once() {
-        let compat = ProviderCompat {
-            reasoning: ReasoningCompat {
-                supports_thinking: Some(true),
-                supports_effort: Some(true),
-                effort_levels: Some(vec!["low".into()]),
+    #[async_trait::async_trait]
+    impl solaris_config::hooks::HookExecutor for SecretStopHookExecutor {
+        async fn execute(
+            &self,
+            _invocation: solaris_config::hooks::HookInvocation,
+        ) -> Result<solaris_config::hooks::HookExecutionResult, solaris_config::hooks::HookError> {
+            Ok(solaris_config::hooks::HookExecutionResult {
+                success: true,
+                output: self.0.to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_hook_logs_only_length_and_digest() {
+        use solaris_config::hooks::{HookDef, HookEngine, HooksConfig};
+
+        const SECRET: &str = "stop-hook-secret-must-not-reach-info-log";
+        let mut hooks = HookEngine::new(
+            HooksConfig {
+                stop: vec![HookDef {
+                    name: "secret-stop".to_owned(),
+                    tool_match: Vec::new(),
+                    file_match: Vec::new(),
+                    command: "ignored by test executor".to_owned(),
+                    timeout_ms: 1_000,
+                    network: Default::default(),
+                }],
+                ..Default::default()
             },
-            ..Default::default()
-        };
-        let mut engine = make_engine_with_compat("old-model", compat);
-        let changes = engine.apply_config_update(
-            Some("new-model".into()),
-            Some("enabled".into()),
-            Some(12000),
-            Some("low".into()),
-            None,
+            std::path::PathBuf::from("."),
         );
-        assert_eq!(engine.model, "new-model");
-        assert_eq!(engine.reasoning_effort.as_deref(), Some("low"));
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                assert_eq!(*budget_tokens, 12000);
-            }
-            other => panic!("expected Enabled, got: {other:?}"),
-        }
-        assert_eq!(changes.len(), 3);
-    }
+        hooks.set_executor(Arc::new(SecretStopHookExecutor(SECRET)));
+        let mut engine = make_engine("model");
+        engine.hooks = Some(hooks);
+        let buffer = InfoLogBuffer::default();
+        let _guard = tracing::subscriber::set_default(InfoSubscriber(buffer.clone()));
 
-    // --- Cycle 2: White-box edge case tests ---
+        engine.run_stop_hooks().await;
 
-    #[test]
-    fn set_config_thinking_budget_only_updates_existing_enabled() {
-        let mut engine = make_engine("m");
-        engine.thinking = Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 5000 });
-        let changes = engine.apply_config_update(None, None, Some(20000), None, None);
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                assert_eq!(*budget_tokens, 20000);
-            }
-            other => panic!("expected Enabled with 20000, got: {other:?}"),
-        }
-        assert_eq!(changes.len(), 1);
+        let logs = buffer.0.lock().unwrap().clone();
+        assert!(logs.contains("stop hook output"), "{logs}");
+        assert!(logs.contains("hook_output_status"), "{logs}");
+        assert!(logs.contains("hook_output_bytes"), "{logs}");
+        assert!(logs.contains("hook_output_digest"), "{logs}");
+        assert!(!logs.contains(SECRET), "{logs}");
     }
 
     #[test]
-    fn set_config_thinking_budget_ignored_when_disabled() {
-        let mut engine = make_engine("m");
-        engine.thinking = Some(solaris_types::llm::ThinkingConfig::Disabled);
-        let changes = engine.apply_config_update(None, None, Some(20000), None, None);
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Disabled) => {}
-            other => panic!("expected Disabled unchanged, got: {other:?}"),
-        }
-        assert!(changes.is_empty());
+    fn replacing_permission_context_updates_effect_execution_context() {
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::permission::{PermissionCeiling, PermissionMode};
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::execution_context::EffectExecutionContext;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::InMemoryRuntimeLedger;
+
+        let mut engine = make_engine("model");
+        engine.set_execution_context(EffectExecutionContext::new(
+            RunId::from("run"),
+            AgentId::from("agent"),
+            Arc::new(InMemoryRuntimeLedger::default()),
+            PermissionContext::new(PermissionMode::Bypass, PermissionCeiling::unrestricted()),
+            OperationEnvironmentSnapshot::default(),
+        ));
+
+        engine.set_permission_context(PermissionContext::new(PermissionMode::Plan, PermissionCeiling::plan()));
+
+        assert_eq!(
+            engine.execution_context().unwrap().permissions().mode(),
+            PermissionMode::Plan
+        );
     }
 
     #[test]
-    fn set_config_thinking_enabled_applies_even_when_capability_is_false() {
-        let compat = ProviderCompat {
-            reasoning: ReasoningCompat {
-                supports_thinking: Some(false),
-                ..Default::default()
-            },
+    fn required_workflow_turn_is_available_to_the_next_model_request() {
+        use solaris_types::identity::RunId;
+        use solaris_types::message::{ContentBlock, Role};
+
+        let mut engine = make_engine("model");
+        assert!(
+            engine
+                .commit_workflow_turn(
+                    "plan the change",
+                    &RunId::from("root:workflow:turn-1"),
+                    "standard-plan",
+                    "1",
+                    &serde_json::json!({"plan": ["edit", "test"]}),
+                )
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .commit_workflow_turn(
+                    "plan the change",
+                    &RunId::from("root:workflow:turn-1"),
+                    "standard-plan",
+                    "1",
+                    &serde_json::json!({"plan": ["edit", "test"]}),
+                )
+                .unwrap()
+        );
+
+        assert_eq!(engine.messages.len(), 2);
+        assert_eq!(engine.messages[0].role, Role::User);
+        assert_eq!(engine.messages[1].role, Role::Assistant);
+        assert!(matches!(
+            engine.messages[0].content.as_slice(),
+            [ContentBlock::Text { text }] if text == "plan the change"
+        ));
+        assert_eq!(
+            engine.messages[1].provider_metadata["solaris.workflow"]["workflow_id"],
+            "standard-plan"
+        );
+    }
+
+    fn status(outcome: &solaris_types::config::ConfigUpdateOutcome, field: ConfigField) -> ConfigFieldStatus {
+        outcome
+            .results
+            .iter()
+            .find(|result| result.field == field)
+            .map(|result| result.status)
+            .unwrap()
+    }
+
+    #[test]
+    fn set_config_rejects_empty_request() {
+        let mut engine = make_engine("current");
+        let outcome = engine.apply_config_update(None, None, None, None, None);
+
+        assert!(!outcome.applied);
+        assert!(!outcome.changed);
+        assert!(outcome.results.is_empty());
+        assert_eq!(engine.model, "current");
+    }
+
+    #[test]
+    fn typed_multi_agent_policy_update_changes_runtime_and_spawn_gate_atomically() {
+        let mut engine = make_engine("model");
+
+        let outcome = engine.apply_config_update_with_multi_agent(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(solaris_types::workflow::MultiAgentPolicy::Disabled),
+        );
+
+        assert!(outcome.applied);
+        assert!(outcome.changed);
+        assert_eq!(
+            engine.runtime_configuration_view().snapshot().multi_agent_policy,
+            solaris_types::workflow::MultiAgentPolicy::Disabled
+        );
+        assert_eq!(
+            *engine
+                .multi_agent_policy
+                .read()
+                .unwrap_or_else(|error| error.into_inner()),
+            solaris_types::workflow::MultiAgentPolicy::Disabled
+        );
+    }
+
+    #[test]
+    fn typed_max_active_agents_updates_the_shared_admission_limit() {
+        let mut engine = make_engine("model");
+        let shared_resources = crate::resource_manager::ResourceManager::new(Default::default());
+        engine.set_resource_manager(std::sync::Arc::clone(&shared_resources));
+
+        let outcome = engine.apply_runtime_config_update(solaris_types::config::RuntimeConfigUpdate {
+            max_active_agents: Some(4),
             ..Default::default()
-        };
-        let mut engine = make_engine_with_compat("m", compat);
+        });
 
-        let changes = engine.apply_config_update(None, Some("enabled".into()), Some(16000), None, None);
-
-        match &engine.thinking {
-            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                assert_eq!(*budget_tokens, 16000);
-            }
-            other => panic!("expected Enabled with 16000, got: {other:?}"),
-        }
-        assert_eq!(changes, vec!["thinking: enabled (budget: 16000)"]);
+        assert!(outcome.applied);
+        assert!(outcome.changed);
+        assert_eq!(
+            status(&outcome, ConfigField::MaxActiveAgents),
+            ConfigFieldStatus::Applied
+        );
+        assert_eq!(engine.resources.budget().max_active_agents, Some(4));
+        assert_eq!(engine.resources.effective_agent_limit(), 4);
+        assert_eq!(shared_resources.budget().max_active_agents, Some(4));
+        assert_eq!(shared_resources.effective_agent_limit(), 4);
+        let configuration = engine.runtime_configuration_view().snapshot();
+        assert_eq!(configuration.max_active_agents, Some(4));
+        assert_eq!(configuration.effective_max_active_agents, 4);
     }
 
     #[test]
-    fn set_config_effort_valid_values() {
-        let compat = ProviderCompat {
-            reasoning: ReasoningCompat {
-                supports_effort: Some(true),
-                effort_levels: Some(vec!["low".into(), "medium".into(), "high".into(), "max".into()]),
-                ..Default::default()
-            },
+    fn invalid_max_active_agents_rejects_the_entire_config_update() {
+        let mut engine = make_engine("old-model");
+        let before = engine.runtime_configuration_view().snapshot();
+
+        let outcome = engine.apply_runtime_config_update(solaris_types::config::RuntimeConfigUpdate {
+            model: Some("new-model".to_owned()),
+            max_active_agents: Some(0),
             ..Default::default()
-        };
-        for value in ["low", "medium", "high", "max"] {
-            let mut engine = make_engine_with_compat("m", compat.clone());
-            engine.apply_config_update(None, None, None, Some(value.to_string()), None);
-            assert_eq!(
-                engine.reasoning_effort.as_deref(),
-                Some(value),
-                "effort should be set to {value}"
-            );
-        }
+        });
+
+        assert!(!outcome.applied);
+        assert!(!outcome.changed);
+        assert_eq!(status(&outcome, ConfigField::Model), ConfigFieldStatus::Rejected);
+        assert_eq!(
+            status(&outcome, ConfigField::MaxActiveAgents),
+            ConfigFieldStatus::Rejected
+        );
+        assert_eq!(engine.model, "old-model");
+        assert_eq!(engine.resources.budget().max_active_agents, None);
+        assert_eq!(engine.runtime_configuration_view().snapshot(), before);
     }
 
-    // --- Capability validation tests ---
+    #[test]
+    fn provider_request_reflects_dynamic_on_demand_and_proactive_spawn_policy() {
+        let mut engine = make_engine("model");
+
+        let on_demand = engine.build_request(TurnKind::Normal);
+        assert!(on_demand.system.contains("Multi-agent policy: OnDemand"));
+        assert!(on_demand.system.contains("user explicitly requests sub-agents"));
+        assert!(
+            on_demand
+                .system
+                .contains("independent parallel work is genuinely necessary")
+        );
+        assert!(!on_demand.system.contains("proactively divide"));
+
+        let outcome = engine.apply_config_update_with_multi_agent(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(MultiAgentPolicy::Proactive),
+        );
+        assert!(outcome.applied);
+        let proactive = engine.build_request(TurnKind::Normal);
+        assert!(proactive.system.contains("Multi-agent policy: Proactive"));
+        assert!(
+            proactive
+                .system
+                .contains("proactively divide suitable independent work")
+        );
+        assert!(!proactive.system.contains("user explicitly requests sub-agents"));
+
+        let outcome =
+            engine.apply_config_update_with_multi_agent(None, None, None, None, None, Some(MultiAgentPolicy::Disabled));
+        assert!(outcome.applied);
+        let disabled = engine.build_request(TurnKind::Normal);
+        assert!(disabled.system.contains("Multi-agent policy: Disabled"));
+        assert!(disabled.system.contains("every Spawn request is rejected"));
+    }
 
     #[test]
-    fn set_config_thinking_applies_when_capability_is_false() {
-        let mut engine = make_engine_with_compat("m", ProviderCompat::openai_defaults());
-        let changes = engine.apply_config_update(None, Some("enabled".into()), None, None, None);
-        assert_eq!(changes, vec!["thinking: enabled (budget: 10000)"]);
+    fn set_config_rejects_empty_model() {
+        let mut engine = make_engine("current");
+        let outcome = engine.apply_config_update(Some("  ".into()), None, None, None, None);
+
+        assert!(!outcome.applied);
+        assert_eq!(status(&outcome, ConfigField::Model), ConfigFieldStatus::Rejected);
+        assert_eq!(engine.model, "current");
+    }
+
+    #[test]
+    fn set_config_is_atomic_when_effort_is_unsupported() {
+        let mut engine = make_engine("old-model");
+        let outcome = engine.apply_config_update(
+            Some("new-model".into()),
+            None,
+            None,
+            Some("high".into()),
+            Some("full".into()),
+        );
+
+        assert!(!outcome.applied);
+        assert!(!outcome.changed);
+        assert_eq!(status(&outcome, ConfigField::Effort), ConfigFieldStatus::Unsupported);
+        assert_eq!(status(&outcome, ConfigField::Model), ConfigFieldStatus::Rejected);
+        assert_eq!(status(&outcome, ConfigField::Compaction), ConfigFieldStatus::Rejected);
+        assert_eq!(engine.model, "old-model");
+        assert_eq!(engine.compact_level, CompactLevel::Safe);
+        let configuration = engine.runtime_configuration_view().snapshot();
+        assert_eq!(configuration.model, "old-model");
+        assert!(configuration.effective_effort.is_none());
+    }
+
+    #[test]
+    fn set_config_rejects_unsupported_thinking() {
+        let mut engine = make_engine_with_compat("model", ProviderCompat::openai_defaults());
+        let outcome = engine.apply_config_update(None, Some("enabled".into()), None, None, None);
+
+        assert!(!outcome.applied);
+        assert_eq!(status(&outcome, ConfigField::Thinking), ConfigFieldStatus::Unsupported);
+        assert!(engine.thinking.is_none());
+    }
+
+    #[test]
+    fn set_config_rejects_invalid_thinking_and_compaction() {
+        let mut engine = make_engine("model");
+        let outcome = engine.apply_config_update(None, Some("sometimes".into()), None, None, Some("aggressive".into()));
+
+        assert!(!outcome.applied);
+        assert_eq!(status(&outcome, ConfigField::Thinking), ConfigFieldStatus::Rejected);
+        assert_eq!(status(&outcome, ConfigField::Compaction), ConfigFieldStatus::Rejected);
+        assert!(engine.thinking.is_none());
+        assert_eq!(engine.compact_level, CompactLevel::Safe);
+    }
+
+    #[test]
+    fn set_config_updates_budget_when_thinking_is_already_enabled() {
+        let mut engine = make_engine("model");
+        engine.thinking = Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 5_000 });
+        let outcome = engine.apply_config_update(None, None, Some(20_000), None, None);
+
+        assert!(outcome.applied);
+        assert!(outcome.changed);
+        assert_eq!(
+            status(&outcome, ConfigField::ThinkingBudget),
+            ConfigFieldStatus::Applied
+        );
         assert!(matches!(
             engine.thinking,
-            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 10000 })
+            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 20_000 })
         ));
     }
 
     #[test]
-    fn set_config_effort_rejected_when_unsupported() {
-        let mut engine = make_engine("m"); // anthropic defaults: supports_effort = false
-        let changes = engine.apply_config_update(None, None, None, Some("high".into()), None);
-        assert!(changes.iter().any(|c| c.contains("not supported")));
+    fn set_config_rejects_budget_when_thinking_is_not_enabled() {
+        let mut engine = make_engine("model");
+        let outcome = engine.apply_config_update(None, None, Some(20_000), None, None);
+
+        assert!(!outcome.applied);
+        assert!(!outcome.changed);
+        assert_eq!(
+            status(&outcome, ConfigField::ThinkingBudget),
+            ConfigFieldStatus::Rejected
+        );
+        assert!(engine.thinking.is_none());
+    }
+
+    #[test]
+    fn set_config_rejects_budget_with_disabled_thinking() {
+        let mut engine = make_engine("model");
+        let outcome = engine.apply_config_update(None, Some("disabled".into()), Some(20_000), None, None);
+
+        assert!(!outcome.applied);
+        assert_eq!(
+            status(&outcome, ConfigField::ThinkingBudget),
+            ConfigFieldStatus::Rejected
+        );
+        assert_eq!(status(&outcome, ConfigField::Thinking), ConfigFieldStatus::Rejected);
+        assert!(engine.thinking.is_none());
+    }
+
+    #[test]
+    fn set_config_rejects_zero_thinking_budget() {
+        let mut engine = make_engine("model");
+        let outcome = engine.apply_config_update(None, Some("enabled".into()), Some(0), None, None);
+
+        assert!(!outcome.applied);
+        assert_eq!(
+            status(&outcome, ConfigField::ThinkingBudget),
+            ConfigFieldStatus::Rejected
+        );
+        assert_eq!(status(&outcome, ConfigField::Thinking), ConfigFieldStatus::Rejected);
+        assert!(engine.thinking.is_none());
+    }
+
+    #[test]
+    fn set_config_rejects_unknown_effort_level() {
+        let mut engine = make_engine_with_compat("model", ProviderCompat::openai_defaults());
+        let outcome = engine.apply_config_update(None, None, None, Some("ultra".into()), None);
+
+        assert!(!outcome.applied);
+        assert_eq!(status(&outcome, ConfigField::Effort), ConfigFieldStatus::Rejected);
         assert!(engine.reasoning_effort.is_none());
     }
 
     #[test]
-    fn set_config_effort_rejected_invalid_level() {
-        let mut engine = make_engine_with_compat("m", ProviderCompat::openai_defaults());
-        let changes = engine.apply_config_update(None, None, None, Some("max".into()), None);
-        assert!(changes.iter().any(|c| c.contains("invalid")));
-        assert!(engine.reasoning_effort.is_none());
+    fn set_config_applies_all_valid_fields_and_reports_change() {
+        let compat = ProviderCompat {
+            reasoning: ReasoningCompat {
+                supports_thinking: Some(true),
+                supports_effort: Some(true),
+                effort_levels: Some(vec!["low".into(), "high".into()]),
+            },
+            ..Default::default()
+        };
+        let mut engine = make_engine_with_compat("old-model", compat);
+        let outcome = engine.apply_config_update(
+            Some("new-model".into()),
+            Some("enabled".into()),
+            Some(12_000),
+            Some("high".into()),
+            Some("full".into()),
+        );
+
+        assert!(outcome.applied);
+        assert!(outcome.changed);
+        assert_eq!(outcome.results.len(), 5);
+        assert!(
+            outcome
+                .results
+                .iter()
+                .all(|result| result.status == ConfigFieldStatus::Applied)
+        );
+        assert_eq!(engine.model, "new-model");
+        assert_eq!(engine.reasoning_effort.as_deref(), Some("high"));
+        let configuration = engine.runtime_configuration_view().snapshot();
+        assert_eq!(configuration.model, "new-model");
+        assert_eq!(configuration.effective_effort.as_deref(), Some("high"));
+        assert_eq!(engine.compact_level, CompactLevel::Full);
+        assert!(matches!(
+            engine.thinking,
+            Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 12_000 })
+        ));
     }
 
     #[test]
-    fn set_config_effort_clear_always_works() {
-        let mut engine = make_engine("m"); // anthropic defaults: supports_effort = false
+    fn set_config_valid_noop_is_applied_without_change() {
+        let mut engine = make_engine("same-model");
+        let outcome = engine.apply_config_update(Some("same-model".into()), None, None, None, None);
+
+        assert!(outcome.applied);
+        assert!(!outcome.changed);
+        assert_eq!(status(&outcome, ConfigField::Model), ConfigFieldStatus::Applied);
+    }
+
+    #[test]
+    fn set_config_can_clear_effort_even_if_provider_does_not_support_setting_it() {
+        let mut engine = make_engine("model");
         engine.reasoning_effort = Some("high".into());
-        let changes = engine.apply_config_update(None, None, None, Some(String::new()), None);
+        let outcome = engine.apply_config_update(None, None, None, Some(String::new()), None);
+
+        assert!(outcome.applied);
+        assert!(outcome.changed);
         assert!(engine.reasoning_effort.is_none());
-        assert!(changes.iter().any(|c| c.contains("cleared")));
+        assert!(
+            engine
+                .runtime_configuration_view()
+                .snapshot()
+                .effective_effort
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn selected_extra_reports_high_as_the_effective_provider_effort() {
+        let compat = ProviderCompat {
+            reasoning: ReasoningCompat {
+                supports_effort: Some(true),
+                effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut engine = make_engine_with_compat("model", compat);
+
+        engine.apply_intensity(Intensity::Extra);
+
+        let configuration = engine.runtime_configuration_view().snapshot();
+        assert_eq!(configuration.selected_intensity, Intensity::Extra);
+        assert_eq!(configuration.effective_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn selected_ultracode_reports_the_highest_advertised_effort() {
+        let compat = ProviderCompat {
+            reasoning: ReasoningCompat {
+                supports_effort: Some(true),
+                effort_levels: Some(vec!["low".into(), "custom-strong".into()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut engine = make_engine_with_compat("model", compat);
+
+        engine.apply_intensity(Intensity::Ultracode);
+
+        let configuration = engine.runtime_configuration_view().snapshot();
+        assert_eq!(configuration.selected_intensity, Intensity::Ultracode);
+        assert_eq!(configuration.effective_effort.as_deref(), Some("custom-strong"));
+    }
+
+    #[test]
+    fn provider_without_effort_keeps_selected_intensity_and_reports_no_effective_effort() {
+        let mut engine = make_engine_with_compat("model", ProviderCompat::default());
+
+        engine.apply_intensity(Intensity::Extra);
+
+        let configuration = engine.runtime_configuration_view().snapshot();
+        assert_eq!(configuration.selected_intensity, Intensity::Extra);
+        assert!(configuration.effective_effort.is_none());
+    }
+
+    #[test]
+    fn permission_changes_are_visible_in_the_shared_configuration() {
+        let mut engine = make_engine("model");
+
+        engine.set_permission_mode(PermissionMode::Plan);
+
+        assert_eq!(
+            engine.runtime_configuration_view().snapshot().permission,
+            PermissionMode::Plan
+        );
+    }
+
+    #[test]
+    fn shared_permission_handle_changes_are_visible_without_manual_refresh() {
+        let engine = make_engine("model");
+        let view = engine.runtime_configuration_view();
+
+        engine.permission_context().set_mode(PermissionMode::Auto);
+
+        assert_eq!(view.snapshot().permission, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn execution_context_permission_changes_are_visible_without_manual_refresh() {
+        use solaris_types::identity::{AgentId, RunId};
+        use solaris_types::permission::PermissionCeiling;
+        use solaris_types::runtime::OperationEnvironmentSnapshot;
+
+        use crate::execution_context::EffectExecutionContext;
+        use crate::permission_engine::PermissionContext;
+        use crate::runtime_ledger::InMemoryRuntimeLedger;
+
+        let mut engine = make_engine("model");
+        engine.set_execution_context(EffectExecutionContext::new(
+            RunId::from("run"),
+            AgentId::from("agent"),
+            Arc::new(InMemoryRuntimeLedger::default()),
+            PermissionContext::new(PermissionMode::Bypass, PermissionCeiling::unrestricted()),
+            OperationEnvironmentSnapshot::default(),
+        ));
+        let view = engine.runtime_configuration_view();
+
+        engine
+            .execution_context()
+            .unwrap()
+            .permissions()
+            .set_mode(PermissionMode::Auto);
+
+        assert_eq!(view.snapshot().permission, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn shared_plan_flag_has_priority_over_mutable_permission_mode() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut engine = make_engine("model");
+        let plan_active = Arc::new(AtomicBool::new(false));
+        let view = engine.runtime_configuration_view();
+        engine.set_plan_active_flag(Arc::clone(&plan_active));
+
+        engine.permission_context().set_mode(PermissionMode::Bypass);
+        plan_active.store(true, Ordering::Release);
+        assert_eq!(view.snapshot().permission, PermissionMode::Plan);
+
+        plan_active.store(false, Ordering::Release);
+        assert_eq!(view.snapshot().permission, PermissionMode::Bypass);
+    }
+
+    #[test]
+    fn set_config_snapshot_serializes_actual_thinking_budget_and_compaction() {
+        let mut engine = make_engine("model");
+        let outcome = engine.apply_config_update(None, Some("enabled".into()), Some(12_000), None, Some("full".into()));
+        assert!(outcome.applied);
+
+        let reconnect_view = engine.runtime_configuration_view();
+        let snapshot = serde_json::to_value(reconnect_view.snapshot()).unwrap();
+        assert_eq!(snapshot["thinking"]["type"], "enabled");
+        assert_eq!(snapshot["thinking"]["budget_tokens"], 12_000);
+        assert_eq!(snapshot["thinking_budget"], 12_000);
+        assert_eq!(snapshot["compaction"], "full");
     }
 }
+
+#[cfg(test)]
+#[path = "engine_provider_effect_test.rs"]
+mod provider_effect_boundary_tests;
 
 // ---------------------------------------------------------------------------
 // Phase 6 tests — apply_context_modifiers()
@@ -385,12 +896,25 @@ mod tests_phase6 {
     fn make_engine(model: &str, allow_list: Vec<String>) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            provider_label: "test-provider".to_owned(),
+            provider_effect: crate::bootstrap::provider_effect_descriptor("https://provider.test"),
             model: model.to_string(),
             max_tokens: Some(4096),
             thinking: None,
             compat: ProviderCompat::anthropic_defaults(),
             system_prompt: String::new(),
             reasoning_effort: None,
+            runtime_configuration: super::runtime_configuration_state(
+                "test-provider",
+                model,
+                solaris_types::permission::PermissionMode::Bypass,
+                &None,
+                CompactLevel::default(),
+            ),
+            multi_agent_policy: std::sync::Arc::new(std::sync::RwLock::new(
+                solaris_types::workflow::MultiAgentPolicy::default(),
+            )),
+            resources: crate::resource_manager::ResourceManager::new(Default::default()),
             messages: vec![],
             total_usage: Default::default(),
             msg_id: String::new(),
@@ -399,6 +923,8 @@ mod tests_phase6 {
             max_tool_call_failure_turns: 3,
             tools: ToolRegistry::new(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
+            permission_context: crate::permission_engine::PermissionContext::from_auto_approve(true),
+            execution_context: None,
             allow_list,
             hooks: None,
             session_manager: None,
@@ -412,6 +938,7 @@ mod tests_phase6 {
             toon_enabled: false,
             plan_state: Default::default(),
             plan_active_flag: None,
+            plan_mode_disable_handler: None,
             cache_detector: super::CacheBreakDetector::new(),
             commands: crate::commands::default_registry(),
         }
@@ -420,12 +947,19 @@ mod tests_phase6 {
     #[test]
     fn tc_6_21_model_override_applied() {
         let mut engine = make_engine("original-model", vec![]);
+        engine.thinking = Some(solaris_types::llm::ThinkingConfig::Enabled { budget_tokens: 8_000 });
+        engine.compact_level = CompactLevel::Full;
+        engine.refresh_runtime_configuration();
         let modifiers = vec![Some(ContextModifier {
             model: Some("override-model".to_string()),
             ..Default::default()
         })];
         engine.apply_context_modifiers(&modifiers);
         assert_eq!(engine.model, "override-model");
+        let snapshot = engine.runtime_configuration_view().snapshot();
+        assert_eq!(snapshot.model, "override-model");
+        assert_eq!(snapshot.thinking_budget, Some(8_000));
+        assert_eq!(snapshot.compaction, CompactLevel::Full);
     }
 
     #[test]
@@ -437,6 +971,14 @@ mod tests_phase6 {
         })];
         engine.apply_context_modifiers(&modifiers);
         assert_eq!(engine.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            engine
+                .runtime_configuration_view()
+                .snapshot()
+                .effective_effort
+                .as_deref(),
+            Some("high")
+        );
     }
 
     #[test]
@@ -541,1036 +1083,17 @@ mod tests_phase6 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests_compact {
-    use std::sync::{Arc, Mutex};
-
-    use serde_json::json;
-    use solaris_config::compact::CompactConfig;
-    use solaris_providers::error::ProviderError;
-    use solaris_providers::provider::LlmProvider;
-    use solaris_tools::registry::ToolRegistry;
-    use solaris_types::llm::{LlmEvent, LlmRequest};
-    use solaris_types::message::{ContentBlock, Message, Role, TokenUsage};
-
-    use super::{CompactLevel, ProviderCompat};
-    use crate::compact::state::CompactState;
-    use crate::confirm::ToolConfirmer;
-    use crate::output::OutputSink;
-
-    struct NullOutput;
-    impl OutputSink for NullOutput {
-        fn emit_text_delta(&self, _: &str, _: &str) {}
-        fn emit_thinking(&self, _: &str, _: &str) {}
-        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
-        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
-        fn emit_stream_start(&self, _: &str) {}
-        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
-        fn emit_error(&self, _: &str) {}
-        fn emit_info(&self, _: &str) {}
-    }
-
-    #[derive(Default)]
-    struct RecordingOutput {
-        tool_results: Mutex<Vec<(String, String, bool, String)>>,
-        errors: Mutex<Vec<String>>,
-        infos: Mutex<Vec<String>>,
-    }
-
-    impl OutputSink for RecordingOutput {
-        fn emit_text_delta(&self, _: &str, _: &str) {}
-        fn emit_thinking(&self, _: &str, _: &str) {}
-        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
-        fn emit_tool_result(&self, tool_use_id: &str, name: &str, is_error: bool, content: &str) {
-            self.tool_results.lock().unwrap().push((
-                tool_use_id.to_string(),
-                name.to_string(),
-                is_error,
-                content.to_string(),
-            ));
-        }
-        fn emit_stream_start(&self, _: &str) {}
-        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
-
-        fn emit_error(&self, msg: &str) {
-            self.errors.lock().unwrap().push(msg.to_string());
-        }
-
-        fn emit_info(&self, msg: &str) {
-            self.infos.lock().unwrap().push(msg.to_string());
-        }
-    }
-
-    struct NullProvider;
-    #[async_trait::async_trait]
-    impl LlmProvider for NullProvider {
-        async fn stream(&self, _: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(rx)
-        }
-    }
-
-    fn make_compact_engine(
-        compact_config: CompactConfig,
-        compact_state: CompactState,
-        messages: Vec<Message>,
-    ) -> super::AgentEngine {
-        make_compact_engine_with_output(compact_config, compact_state, messages, Arc::new(NullOutput))
-    }
-
-    fn make_compact_engine_with_output(
-        compact_config: CompactConfig,
-        compact_state: CompactState,
-        messages: Vec<Message>,
-        output: Arc<dyn OutputSink>,
-    ) -> super::AgentEngine {
-        super::AgentEngine {
-            provider: Arc::new(NullProvider),
-            model: "test-model".to_string(),
-            max_tokens: Some(4096),
-            thinking: None,
-            compat: ProviderCompat::anthropic_defaults(),
-            system_prompt: String::new(),
-            reasoning_effort: None,
-            messages,
-            total_usage: Default::default(),
-            msg_id: String::new(),
-            max_turns_per_run: Some(10),
-            max_tool_call_malformed_turns: 3,
-            max_tool_call_failure_turns: 3,
-            tools: ToolRegistry::new(),
-            confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
-            allow_list: vec![],
-            hooks: None,
-            session_manager: None,
-            current_session: None,
-            output,
-            approval_manager: None,
-            protocol_writer: None,
-            compact_config,
-            compact_state,
-            compact_level: CompactLevel::default(),
-            toon_enabled: false,
-            plan_state: Default::default(),
-            plan_active_flag: None,
-            cache_detector: super::CacheBreakDetector::new(),
-            commands: crate::commands::default_registry(),
-        }
-    }
-
-    fn tool_use_msg(id: &str, name: &str) -> Message {
-        Message::new(
-            Role::Assistant,
-            vec![ContentBlock::ToolUse {
-                id: id.to_string(),
-                name: name.to_string(),
-                input: json!({}),
-                extra: None,
-            }],
-        )
-    }
-
-    fn tool_use_msg_with_two_calls(first_id: &str, second_id: &str) -> Message {
-        Message::new(
-            Role::Assistant,
-            vec![
-                ContentBlock::ToolUse {
-                    id: first_id.to_string(),
-                    name: "Read".to_string(),
-                    input: json!({}),
-                    extra: None,
-                },
-                ContentBlock::ToolUse {
-                    id: second_id.to_string(),
-                    name: "ExecCommand".to_string(),
-                    input: json!({}),
-                    extra: None,
-                },
-            ],
-        )
-    }
-
-    fn tool_result_msg(id: &str, content: &str) -> Message {
-        Message::new(
-            Role::User,
-            vec![ContentBlock::ToolResult {
-                tool_use_id: id.to_string(),
-                content: content.to_string(),
-                is_error: false,
-            }],
-        )
-    }
-
-    #[test]
-    fn abort_current_turn_closes_pending_tool_uses() {
-        let output = Arc::new(RecordingOutput::default());
-        let mut engine = make_compact_engine_with_output(
-            CompactConfig::default(),
-            CompactState::new(),
-            vec![
-                Message::new(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        text: "run tools".to_string(),
-                    }],
-                ),
-                tool_use_msg_with_two_calls("call_read", "call_bash"),
-            ],
-            output.clone(),
-        );
-
-        engine.abort_current_turn("Tool execution canceled by user");
-
-        let last = engine.messages.last().expect("synthetic result message");
-        assert_eq!(last.role, Role::User);
-        assert_eq!(last.content.len(), 2);
-        assert!(
-            matches!(&last.content[0], ContentBlock::ToolResult { tool_use_id, content, is_error }
-                if tool_use_id == "call_read" && content == "Tool execution canceled by user" && *is_error)
-        );
-        assert!(
-            matches!(&last.content[1], ContentBlock::ToolResult { tool_use_id, content, is_error }
-                if tool_use_id == "call_bash" && content == "Tool execution canceled by user" && *is_error)
-        );
-
-        let emitted = output.tool_results.lock().unwrap();
-        assert_eq!(emitted.len(), 2);
-        assert_eq!(
-            emitted[0],
-            (
-                "call_read".into(),
-                "Read".into(),
-                true,
-                "Tool execution canceled by user".into()
-            )
-        );
-        assert_eq!(
-            emitted[1],
-            (
-                "call_bash".into(),
-                "ExecCommand".into(),
-                true,
-                "Tool execution canceled by user".into()
-            )
-        );
-    }
-
-    #[test]
-    fn cache_full_miss_is_reported_as_info_not_error() {
-        let output = Arc::new(RecordingOutput::default());
-        let mut engine =
-            make_compact_engine_with_output(CompactConfig::default(), CompactState::new(), vec![], output.clone());
-
-        engine.cache_detector.record_request("prompt", &[]);
-        engine.record_turn_usage(&TokenUsage {
-            input_tokens: 10_000,
-            output_tokens: 100,
-            cache_creation_tokens: 2_000,
-            cache_read_tokens: 8_000,
-        });
-
-        engine.cache_detector.record_request("prompt", &[]);
-        engine.record_turn_usage(&TokenUsage {
-            input_tokens: 10_000,
-            output_tokens: 100,
-            cache_creation_tokens: 10_000,
-            cache_read_tokens: 0,
-        });
-
-        assert!(
-            output.errors.lock().unwrap().is_empty(),
-            "cache diagnostics should not emit terminal errors"
-        );
-        assert!(
-            output
-                .infos
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|msg| msg == "Cache full miss: TtlExpiry"),
-            "full cache misses should remain visible as diagnostics"
-        );
-    }
-
-    // -- Emergency check fires when at limit --
-
-    #[tokio::test]
-    async fn emergency_fires_when_at_limit() {
-        let config = CompactConfig {
-            context_window: 200_000,
-            emergency_buffer: 3_000,
-            ..Default::default()
-        };
-        let mut state = CompactState::new();
-        state.last_input_tokens = 198_000; // >= 197k limit
-
-        let mut engine = make_compact_engine(config, state, vec![]);
-        let result = engine.run_compaction().await;
-
-        match result {
-            Err(super::AgentError::ContextTooLong { input_tokens, limit }) => {
-                assert_eq!(input_tokens, 198_000);
-                assert_eq!(limit, 197_000);
-            }
-            other => panic!("expected ContextTooLong, got: {:?}", other),
-        }
-    }
-
-    // -- Emergency does not fire when below limit --
-
-    #[tokio::test]
-    async fn emergency_silent_below_limit() {
-        let config = CompactConfig::default();
-        let mut state = CompactState::new();
-        state.last_input_tokens = 190_000; // below 197k
-
-        let mut engine = make_compact_engine(config, state, vec![]);
-        assert!(engine.run_compaction().await.is_ok());
-    }
-
-    // -- Microcompact runs when count trigger fires --
-
-    #[tokio::test]
-    async fn microcompact_clears_old_results() {
-        // 12 tool results with keep_recent=3 (threshold=6) → should clear 9
-        let mut messages = Vec::new();
-        for i in 0..12 {
-            let id = format!("t{i}");
-            messages.push(tool_use_msg(&id, "Read"));
-            messages.push(tool_result_msg(&id, &format!("data-{i}")));
-        }
-
-        let config = CompactConfig {
-            micro_keep_recent: 3,
-            ..Default::default()
-        };
-        let state = CompactState::new();
-
-        let mut engine = make_compact_engine(config, state, messages);
-        engine.run_compaction().await.unwrap();
-
-        // Last 3 tool results should be preserved
-        let cleared_count = engine
-            .messages
-            .iter()
-            .flat_map(|m| &m.content)
-            .filter(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content == "[Tool result cleared]"))
-            .count();
-
-        assert_eq!(cleared_count, 9);
-    }
-
-    // -- Disabled config skips micro and auto but not emergency --
-
-    #[tokio::test]
-    async fn disabled_config_skips_micro_auto() {
-        let mut messages = Vec::new();
-        for i in 0..12 {
-            let id = format!("t{i}");
-            messages.push(tool_use_msg(&id, "Read"));
-            messages.push(tool_result_msg(&id, &format!("data-{i}")));
-        }
-
-        let config = CompactConfig {
-            enabled: false,
-            micro_keep_recent: 3,
-            ..Default::default()
-        };
-        let state = CompactState::new();
-
-        let mut engine = make_compact_engine(config, state, messages);
-        engine.run_compaction().await.unwrap();
-
-        // Nothing should be cleared (microcompact skipped)
-        let cleared_count = engine
-            .messages
-            .iter()
-            .flat_map(|m| &m.content)
-            .filter(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content == "[Tool result cleared]"))
-            .count();
-
-        assert_eq!(cleared_count, 0, "microcompact should be skipped when disabled");
-    }
-
-    #[tokio::test]
-    async fn disabled_config_still_fires_emergency() {
-        let config = CompactConfig {
-            enabled: false,
-            context_window: 200_000,
-            emergency_buffer: 3_000,
-            ..Default::default()
-        };
-        let mut state = CompactState::new();
-        state.last_input_tokens = 198_000;
-
-        let mut engine = make_compact_engine(config, state, vec![]);
-        let result = engine.run_compaction().await;
-
-        assert!(
-            matches!(result, Err(super::AgentError::ContextTooLong { .. })),
-            "emergency should fire even when disabled"
-        );
-    }
-
-    // -- Zero tokens on first turn does not trigger anything --
-
-    #[tokio::test]
-    async fn first_turn_zero_tokens_no_compaction() {
-        let config = CompactConfig::default();
-        let state = CompactState::new(); // last_input_tokens = 0
-
-        let mut engine = make_compact_engine(config, state, vec![]);
-        assert!(engine.run_compaction().await.is_ok());
-        assert_eq!(engine.compact_state.last_input_tokens, 0);
-    }
-
-    // -- Circuit broken prevents autocompact, emergency still fires --
-
-    #[tokio::test]
-    async fn circuit_broken_skips_auto_but_emergency_fires() {
-        let config = CompactConfig {
-            context_window: 200_000,
-            emergency_buffer: 3_000,
-            max_failures: 3,
-            ..Default::default()
-        };
-        let mut state = CompactState::new();
-        state.last_input_tokens = 198_000; // triggers both auto and emergency
-        state.consecutive_failures = 3; // circuit broken
-
-        let mut engine = make_compact_engine(config, state, vec![]);
-        let result = engine.run_compaction().await;
-
-        // Auto is skipped due to circuit breaker; emergency fires
-        assert!(matches!(result, Err(super::AgentError::ContextTooLong { .. })));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Phase 3 tests — plan mode integration in apply_context_modifiers()
-// ---------------------------------------------------------------------------
+#[path = "engine_compact_unit_test.rs"]
+mod tests_compact;
 
 #[cfg(test)]
-mod tests_plan_mode {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    use solaris_providers::error::ProviderError;
-    use solaris_providers::provider::LlmProvider;
-    use solaris_tools::registry::ToolRegistry;
-    use solaris_types::llm::{LlmEvent, LlmRequest};
-    use solaris_types::skill_types::{ContextModifier, PlanModeTransition};
-
-    use super::{CompactLevel, ProviderCompat};
-    use crate::compact::state::CompactState;
-    use crate::confirm::ToolConfirmer;
-    use crate::output::OutputSink;
-    use crate::plan::state::PlanState;
-
-    struct NullOutput;
-    impl OutputSink for NullOutput {
-        fn emit_text_delta(&self, _: &str, _: &str) {}
-        fn emit_thinking(&self, _: &str, _: &str) {}
-        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
-        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
-        fn emit_stream_start(&self, _: &str) {}
-        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
-        fn emit_error(&self, _: &str) {}
-        fn emit_info(&self, _: &str) {}
-    }
-
-    struct NullProvider;
-    #[async_trait::async_trait]
-    impl LlmProvider for NullProvider {
-        async fn stream(&self, _: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(rx)
-        }
-    }
-
-    fn make_plan_engine(allow_list: Vec<String>) -> super::AgentEngine {
-        let flag = Arc::new(AtomicBool::new(false));
-        super::AgentEngine {
-            provider: Arc::new(NullProvider),
-            model: "test-model".to_string(),
-            max_tokens: Some(4096),
-            thinking: None,
-            compat: ProviderCompat::anthropic_defaults(),
-            system_prompt: String::new(),
-            reasoning_effort: None,
-            messages: vec![],
-            total_usage: Default::default(),
-            msg_id: String::new(),
-            max_turns_per_run: Some(10),
-            max_tool_call_malformed_turns: 3,
-            max_tool_call_failure_turns: 3,
-            tools: ToolRegistry::new(),
-            confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
-            allow_list,
-            hooks: None,
-            session_manager: None,
-            current_session: None,
-            output: Arc::new(NullOutput),
-            approval_manager: None,
-            protocol_writer: None,
-            compact_config: solaris_config::compact::CompactConfig::default(),
-            compact_state: CompactState::new(),
-            compact_level: CompactLevel::default(),
-            toon_enabled: false,
-            plan_state: PlanState::default(),
-            plan_active_flag: Some(flag),
-            cache_detector: super::CacheBreakDetector::new(),
-            commands: crate::commands::default_registry(),
-        }
-    }
-
-    // --- TC-3.5-03: Enter transition activates plan mode ---
-
-    #[test]
-    fn enter_transition_activates_plan_mode() {
-        let mut engine = make_plan_engine(vec!["Read".into(), "ExecCommand".into()]);
-        let modifiers = vec![Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Enter),
-            ..Default::default()
-        })];
-
-        engine.apply_context_modifiers(&modifiers);
-
-        assert!(engine.plan_state.is_active, "plan mode should be active");
-        assert_eq!(
-            engine.plan_state.pre_plan_allow_list,
-            vec!["Read".to_string(), "ExecCommand".to_string()],
-            "pre_plan_allow_list should capture original allow_list"
-        );
-    }
-
-    // --- TC-3.5-03 supplement: shared flag updated on enter ---
-
-    #[test]
-    fn enter_transition_updates_shared_flag() {
-        let mut engine = make_plan_engine(vec![]);
-        let flag = engine.plan_active_flag.clone().unwrap();
-        assert!(!flag.load(Ordering::Acquire));
-
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Enter),
-            ..Default::default()
-        })]);
-
-        assert!(flag.load(Ordering::Acquire), "shared flag should be true");
-    }
-
-    // --- TC-3.5-04: Exit transition deactivates plan mode and restores allow_list ---
-
-    #[test]
-    fn exit_transition_deactivates_and_restores() {
-        let mut engine = make_plan_engine(vec!["Read".into(), "ExecCommand".into()]);
-
-        // Enter plan mode first
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Enter),
-            ..Default::default()
-        })]);
-        assert!(engine.plan_state.is_active);
-
-        // Modify allow_list while in plan mode (simulating a skill adding tools)
-        engine.allow_list.push("NewTool".into());
-
-        // Exit plan mode
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Exit { plan_content: None }),
-            ..Default::default()
-        })]);
-
-        assert!(!engine.plan_state.is_active, "plan mode should be inactive");
-        assert_eq!(
-            engine.allow_list,
-            vec!["Read".to_string(), "ExecCommand".to_string()],
-            "allow_list should be restored to pre-plan state"
-        );
-    }
-
-    // --- TC-3.5-04 supplement: shared flag updated on exit ---
-
-    #[test]
-    fn exit_transition_updates_shared_flag() {
-        let mut engine = make_plan_engine(vec![]);
-        let flag = engine.plan_active_flag.clone().unwrap();
-
-        // Enter
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Enter),
-            ..Default::default()
-        })]);
-        assert!(flag.load(Ordering::Acquire));
-
-        // Exit
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Exit { plan_content: None }),
-            ..Default::default()
-        })]);
-        assert!(!flag.load(Ordering::Acquire), "shared flag should be false after exit");
-    }
-
-    // --- TC-3.5-05: No transition does not affect plan state ---
-
-    #[test]
-    fn no_transition_does_not_affect_plan_state() {
-        let mut engine = make_plan_engine(vec![]);
-
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            model: Some("new-model".into()),
-            plan_mode_transition: None,
-            ..Default::default()
-        })]);
-
-        assert_eq!(engine.model, "new-model");
-        assert!(!engine.plan_state.is_active, "plan state should remain inactive");
-    }
-
-    // --- Enter + other modifiers applied together ---
-
-    #[test]
-    fn enter_with_model_override_both_applied() {
-        let mut engine = make_plan_engine(vec![]);
-
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            model: Some("planning-model".into()),
-            plan_mode_transition: Some(PlanModeTransition::Enter),
-            ..Default::default()
-        })]);
-
-        assert!(engine.plan_state.is_active);
-        assert_eq!(engine.model, "planning-model");
-    }
-
-    // --- No plan_active_flag set does not panic ---
-
-    #[test]
-    fn enter_without_flag_does_not_panic() {
-        let mut engine = make_plan_engine(vec![]);
-        engine.plan_active_flag = None;
-
-        engine.apply_context_modifiers(&[Some(ContextModifier {
-            plan_mode_transition: Some(PlanModeTransition::Enter),
-            ..Default::default()
-        })]);
-
-        assert!(engine.plan_state.is_active);
-    }
-}
+#[path = "engine_plan_mode_test.rs"]
+mod tests_plan_mode;
 
 #[cfg(test)]
-mod tests_handle_command {
-    use std::sync::{Arc, Mutex};
-
-    use solaris_providers::error::ProviderError;
-    use solaris_providers::provider::LlmProvider;
-    use solaris_tools::registry::ToolRegistry;
-    use solaris_types::llm::{LlmEvent, LlmRequest};
-    use solaris_types::message::{ContentBlock, Message, Role};
-
-    use super::{CompactLevel, ProviderCompat};
-    use crate::compact::state::CompactState;
-    use crate::confirm::ToolConfirmer;
-    use crate::output::OutputSink;
-
-    struct NullOutput;
-    impl OutputSink for NullOutput {
-        fn emit_text_delta(&self, _: &str, _: &str) {}
-        fn emit_thinking(&self, _: &str, _: &str) {}
-        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
-        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
-        fn emit_stream_start(&self, _: &str) {}
-        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
-        fn emit_error(&self, _: &str) {}
-        fn emit_info(&self, _: &str) {}
-    }
-
-    struct NullProvider;
-    #[async_trait::async_trait]
-    impl LlmProvider for NullProvider {
-        async fn stream(&self, _: &LlmRequest) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(rx)
-        }
-    }
-
-    fn make_engine() -> super::AgentEngine {
-        super::AgentEngine {
-            provider: Arc::new(NullProvider),
-            model: "test-model".to_string(),
-            max_tokens: Some(4096),
-            thinking: None,
-            compat: ProviderCompat::anthropic_defaults(),
-            system_prompt: String::new(),
-            reasoning_effort: None,
-            messages: vec![],
-            total_usage: Default::default(),
-            msg_id: String::new(),
-            max_turns_per_run: Some(10),
-            max_tool_call_malformed_turns: 3,
-            max_tool_call_failure_turns: 3,
-            tools: ToolRegistry::new(),
-            confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
-            allow_list: vec![],
-            hooks: None,
-            session_manager: None,
-            current_session: None,
-            output: Arc::new(NullOutput),
-            approval_manager: None,
-            protocol_writer: None,
-            compact_config: solaris_config::compact::CompactConfig::default(),
-            compact_state: CompactState::new(),
-            compact_level: CompactLevel::default(),
-            toon_enabled: false,
-            plan_state: Default::default(),
-            plan_active_flag: None,
-            cache_detector: super::CacheBreakDetector::new(),
-            commands: crate::commands::default_registry(),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_command_quit() {
-        let mut engine = make_engine();
-        let err = engine.handle_command("/quit").await.unwrap_err();
-        assert!(matches!(err, super::AgentError::UserAborted));
-    }
-
-    #[tokio::test]
-    async fn handle_command_exit_alias() {
-        let mut engine = make_engine();
-        let err = engine.handle_command("/exit").await.unwrap_err();
-        assert!(matches!(err, super::AgentError::UserAborted));
-    }
-
-    #[tokio::test]
-    async fn handle_command_unknown() {
-        let mut engine = make_engine();
-        let result = engine.handle_command("/nonexistent").await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn handle_command_clear() {
-        let mut engine = make_engine();
-        engine.messages.push(Message::new(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "hello".to_string(),
-            }],
-        ));
-        assert_eq!(engine.messages.len(), 1);
-
-        let result = engine.handle_command("/clear").await;
-        let result = result.unwrap().expect("clear command should be handled");
-        assert_eq!(result.turns, 0);
-        assert!(engine.messages.is_empty());
-        assert_eq!(engine.compact_state.last_input_tokens, 0);
-    }
-
-    #[tokio::test]
-    async fn handle_command_with_args() {
-        let mut engine = make_engine();
-        let result = engine
-            .handle_command("/help compact")
-            .await
-            .unwrap()
-            .expect("help command should be handled");
-        assert_eq!(result.turns, 0);
-    }
-
-    #[tokio::test]
-    async fn handle_command_not_a_command() {
-        let mut engine = make_engine();
-        let result = engine.handle_command("hello world").await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn run_intercepts_help_returns_zero_turns() {
-        let mut engine = make_engine();
-        let result = engine.run("/help", "msg-1").await.unwrap();
-        assert_eq!(result.turns, 0);
-        assert_eq!(result.usage.input_tokens, 0);
-    }
-
-    #[tokio::test]
-    async fn run_intercepts_quit_returns_user_aborted() {
-        let mut engine = make_engine();
-        let err = engine.run("/quit", "msg-1").await.unwrap_err();
-        assert!(matches!(err, super::AgentError::UserAborted));
-    }
-
-    #[test]
-    fn slash_command_list_returns_all() {
-        let engine = make_engine();
-        let list = engine.slash_command_list();
-        assert!(list.len() >= 4);
-        let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"help"));
-        assert!(names.contains(&"compact"));
-        assert!(names.contains(&"clear"));
-        assert!(names.contains(&"quit"));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Refactor unit tests — merge_tool_results() / TurnGuards
-// ---------------------------------------------------------------------------
+#[path = "engine_command_test.rs"]
+mod tests_handle_command;
 
 #[cfg(test)]
-mod tests_loop_helpers {
-    use serde_json::json;
-    use solaris_types::message::{ContentBlock, StopReason, TokenUsage};
-
-    use super::{AgentError, merge_tool_results, tool_call_malformed_fingerprint};
-    use crate::stream::StreamOutcome;
-    use crate::tool_call::{
-        DEFAULT_MAX_TOOL_CALL_FAILURE, ToolCallFailureFingerprint, ToolCallMalformedReason,
-        tool_call_failure_fingerprint,
-    };
-    use crate::turn::{FinalizationReason, TurnGuardAction, TurnGuards, TurnKind, TurnOutcome};
-
-    fn tool_use(id: &str, name: &str) -> ContentBlock {
-        tool_use_with_input(id, name, json!({}))
-    }
-
-    fn tool_use_with_input(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
-        ContentBlock::ToolUse {
-            id: id.to_string(),
-            name: name.to_string(),
-            input,
-            extra: None,
-        }
-    }
-
-    fn failed_exec_fingerprint() -> Option<ToolCallFailureFingerprint> {
-        tool_call_failure_fingerprint(&[tool_use("call", "ExecCommand")])
-    }
-
-    fn executed_result(id: &str) -> ContentBlock {
-        ContentBlock::ToolResult {
-            tool_use_id: id.to_string(),
-            content: format!("ok:{id}"),
-            is_error: false,
-        }
-    }
-
-    /// Mixed malformed + executable calls must re-interleave so each result
-    /// lands at its originating call's index, with executed results consumed
-    /// in order for the non-malformed slots.
-    #[test]
-    fn merge_interleaves_malformed_and_executed_in_call_order() {
-        let calls = vec![tool_use("bad", ""), tool_use("ok1", "Read"), tool_use("ok2", "Glob")];
-        let reasons = vec![Some(ToolCallMalformedReason::EmptyFunctionName), None, None];
-        let executed = vec![executed_result("ok1"), executed_result("ok2")];
-        let modifiers = vec![None, None];
-
-        let (results, mods) = merge_tool_results(&calls, &reasons, executed, modifiers);
-
-        assert_eq!(results.len(), 3);
-        // Slot 0: synthetic malformed error result for "bad".
-        assert!(matches!(
-            &results[0],
-            ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "bad"
-        ));
-        // Slots 1,2: executed results, consumed in order.
-        assert!(matches!(
-            &results[1],
-            ContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "ok1"
-        ));
-        assert!(matches!(
-            &results[2],
-            ContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "ok2"
-        ));
-        assert_eq!(mods.len(), 3);
-    }
-
-    #[test]
-    fn merge_all_malformed_needs_no_executed_results() {
-        let calls = vec![tool_use("bad1", ""), tool_use("bad2", "")];
-        let reasons = vec![
-            Some(ToolCallMalformedReason::EmptyFunctionName),
-            Some(ToolCallMalformedReason::EmptyFunctionName),
-        ];
-
-        let (results, mods) = merge_tool_results(&calls, &reasons, Vec::new(), Vec::new());
-
-        assert_eq!(results.len(), 2);
-        assert!(
-            results
-                .iter()
-                .all(|r| matches!(r, ContentBlock::ToolResult { is_error: true, .. }))
-        );
-        assert!(mods.iter().all(Option::is_none));
-    }
-
-    #[test]
-    fn turn_budget_reached_respects_limit_and_none() {
-        let mut guards = TurnGuards::new(Some(2), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        assert_eq!(guards.turn_budget_reached(), None);
-        guards.record_counted_turn();
-        guards.record_counted_turn();
-        assert_eq!(guards.turn_budget_reached(), Some(2));
-
-        // No limit configured → never reached.
-        let mut unlimited = TurnGuards::new(None, 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        for _ in 0..1_000 {
-            unlimited.record_counted_turn();
-        }
-        assert_eq!(unlimited.turn_budget_reached(), None);
-    }
-
-    #[test]
-    fn after_tool_round_trips_consecutive_tool_call_failure_breaker() {
-        let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        // First N-1 tool-call-failure rounds: no stop yet.
-        for _ in 0..DEFAULT_MAX_TOOL_CALL_FAILURE - 1 {
-            assert!(matches!(
-                guards.after_tool_round(None, failed_exec_fingerprint()),
-                TurnGuardAction::Continue
-            ));
-        }
-        // The Nth consecutive tool-call-failure round trips the breaker.
-        assert!(matches!(
-            guards.after_tool_round(None, failed_exec_fingerprint()),
-            TurnGuardAction::Stop(AgentError::ToolCallFailures { .. })
-        ));
-    }
-
-    #[test]
-    fn after_tool_round_resets_tool_call_failure_streak_on_success() {
-        let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        assert!(matches!(
-            guards.after_tool_round(None, failed_exec_fingerprint()),
-            TurnGuardAction::Continue
-        ));
-        // A non-error tool round resets the streak.
-        assert!(matches!(guards.after_tool_round(None, None), TurnGuardAction::Continue));
-        assert_eq!(guards.tool_call_failure_count(), 0);
-        // So a single subsequent tool-call-failure round must not trip the breaker.
-        assert!(matches!(
-            guards.after_tool_round(None, failed_exec_fingerprint()),
-            TurnGuardAction::Continue
-        ));
-    }
-
-    #[test]
-    fn after_tool_round_does_not_trip_failure_breaker_for_different_tool_inputs() {
-        let mut guards = TurnGuards::new(Some(100), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-
-        for index in 0..DEFAULT_MAX_TOOL_CALL_FAILURE {
-            let fingerprint = tool_call_failure_fingerprint(&[tool_use_with_input(
-                &format!("call-{index}"),
-                "ExecCommand",
-                json!({ "cmd": format!("command-{index}") }),
-            )]);
-
-            assert!(matches!(
-                guards.after_tool_round(None, fingerprint),
-                TurnGuardAction::Continue
-            ));
-            assert_eq!(guards.tool_call_failure_count(), 1);
-        }
-    }
-
-    #[test]
-    fn after_tool_round_requests_finalize_when_budget_is_exhausted() {
-        let mut guards = TurnGuards::new(Some(1), 3, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        guards.record_counted_turn();
-        assert!(matches!(guards.after_tool_round(None, None), TurnGuardAction::Finalize));
-    }
-
-    #[test]
-    fn after_tool_round_stop_breaker_takes_priority_over_finalize() {
-        let mut guards = TurnGuards::new(Some(1), 1, DEFAULT_MAX_TOOL_CALL_FAILURE);
-        guards.record_counted_turn();
-
-        let calls = vec![tool_use("bad", "")];
-        let reasons = vec![Some(ToolCallMalformedReason::EmptyFunctionName)];
-        let fingerprint = tool_call_malformed_fingerprint(&calls, &reasons);
-
-        assert!(matches!(
-            guards.after_tool_round(fingerprint, None),
-            TurnGuardAction::Stop(AgentError::ToolCallMalformed { count: 1, limit: 1 })
-        ));
-    }
-
-    #[test]
-    fn turn_kind_finalization_has_control_prompt_and_disables_tools() {
-        assert!(TurnKind::Normal.control_prompt().is_none());
-        assert!(!TurnKind::Normal.disable_tools());
-
-        let kind = TurnKind::Finalization(FinalizationReason::TurnBudget);
-        assert!(kind.disable_tools());
-        assert!(
-            kind.control_prompt()
-                .expect("finalization must have a control prompt")
-                .contains("Do not call any more tools")
-        );
-    }
-
-    #[test]
-    fn turn_kind_max_tokens_prompt_names_truncation() {
-        let prompt = TurnKind::Finalization(FinalizationReason::MaxTokens)
-            .control_prompt()
-            .expect("max token continuation must have a prompt");
-
-        assert!(prompt.contains("previous response was cut off"));
-        assert!(prompt.contains("Finish the answer"));
-    }
-
-    #[test]
-    fn turn_kind_empty_final_prompt_requests_visible_answer() {
-        let prompt = TurnKind::Finalization(FinalizationReason::EmptyFinal)
-            .control_prompt()
-            .expect("empty final nudge must have a prompt");
-
-        assert!(prompt.contains("visible answer text"));
-        assert!(prompt.contains("Do not send reasoning only"));
-    }
-
-    fn stream_outcome(assistant_text: &str, stop_reason: StopReason, tool_calls: Vec<ContentBlock>) -> StreamOutcome {
-        StreamOutcome {
-            assistant_text: assistant_text.to_string(),
-            thinking_text: String::new(),
-            thinking_signature: None,
-            tool_calls,
-            stop_reason,
-            usage: TokenUsage::default(),
-        }
-    }
-
-    #[test]
-    fn turn_outcome_classifies_tool_round_before_final_text() {
-        let outcome = stream_outcome(
-            "I will inspect this.",
-            StopReason::EndTurn,
-            vec![tool_use("call-1", "Read")],
-        );
-
-        assert!(matches!(TurnOutcome::from_stream(outcome), TurnOutcome::ToolRound(_)));
-    }
-
-    #[test]
-    fn turn_outcome_classifies_visible_end_turn_as_final() {
-        let outcome = stream_outcome("Done", StopReason::EndTurn, Vec::new());
-
-        assert!(matches!(TurnOutcome::from_stream(outcome), TurnOutcome::Final(_)));
-    }
-
-    #[test]
-    fn turn_outcome_classifies_max_tokens_as_truncated_even_with_text() {
-        let outcome = stream_outcome("I will now write the file", StopReason::MaxTokens, Vec::new());
-
-        assert!(matches!(TurnOutcome::from_stream(outcome), TurnOutcome::Truncated(_)));
-    }
-
-    #[test]
-    fn turn_outcome_classifies_empty_end_turn_as_empty_final() {
-        let outcome = stream_outcome("   ", StopReason::EndTurn, Vec::new());
-
-        assert!(matches!(TurnOutcome::from_stream(outcome), TurnOutcome::EmptyFinal(_)));
-    }
-}
+#[path = "engine_loop_helper_test.rs"]
+mod tests_loop_helpers;

@@ -1,5 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 /// Effort level for a skill invocation or reasoning model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EffortLevel {
     Low,
     Medium,
@@ -12,7 +15,8 @@ pub enum EffortLevel {
 /// Returned via `ContextModifier::plan_mode_transition` from
 /// the EnterPlanMode / ExitPlanMode tools.  The engine reads this
 /// to toggle the plan-mode state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "transition")]
 pub enum PlanModeTransition {
     /// Enter plan mode — restrict to read-only tools.
     Enter,
@@ -31,7 +35,8 @@ pub fn effort_to_string(level: EffortLevel) -> String {
 }
 
 /// Overrides that a skill execution can apply to subsequent turns.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextModifier {
     /// Override model ID for subsequent LLM requests.
     /// None = no override.
