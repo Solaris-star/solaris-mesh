@@ -34,6 +34,24 @@ fn task_failure_class_has_stable_wire_names() {
         (TaskFailureClass::SideEffectUnknown, "side_effect_unknown"),
     ] {
         assert_eq!(serde_json::to_value(class).unwrap(), json!(wire));
+        assert_eq!(serde_json::from_value::<TaskFailureClass>(json!(wire)).unwrap(), class);
+    }
+}
+
+#[test]
+fn only_retryable_failure_class_authorizes_retry() {
+    assert!(TaskFailureClass::Retryable.is_retryable());
+    for class in [
+        TaskFailureClass::NonRetryable,
+        TaskFailureClass::PermissionDenied,
+        TaskFailureClass::MaxTurns,
+        TaskFailureClass::NonConvergent,
+        TaskFailureClass::Cancelled,
+        TaskFailureClass::OutcomeUnknown,
+        TaskFailureClass::ReconciliationRequired,
+        TaskFailureClass::SideEffectUnknown,
+    ] {
+        assert!(!class.is_retryable());
     }
 }
 

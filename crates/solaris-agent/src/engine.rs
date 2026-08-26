@@ -39,6 +39,7 @@ use solaris_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage
 use solaris_types::permission::{ExecutionBoundary, PermissionCeiling, PermissionMode};
 use solaris_types::provider_contract::ProviderNativeMetadata;
 use solaris_types::run_preset::Intensity;
+use solaris_types::runtime::TaskFailureClass;
 use solaris_types::skill_types::ContextModifier;
 use solaris_types::spawner::AgentOutcomeStatus;
 use solaris_types::workflow::MultiAgentPolicy;
@@ -51,6 +52,9 @@ use self::runtime_configuration::{RuntimeConfigurationState, runtime_configurati
 #[derive(Debug)]
 pub struct AgentResult {
     pub status: AgentOutcomeStatus,
+    /// Typed failure classification for non-completed results.
+    /// Retry decisions must use this field, never the bare `status`.
+    pub failure_class: Option<TaskFailureClass>,
     pub text: String,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
@@ -795,6 +799,7 @@ impl AgentEngine {
                 info!(command = command.display_name, "Slash command executed");
                 Ok(Some(AgentResult {
                     status: AgentOutcomeStatus::Completed,
+                    failure_class: None,
                     text: String::new(),
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
@@ -815,6 +820,7 @@ impl AgentEngine {
                 self.persist_session_state().map_err(AgentError::ApiError)?;
                 Ok(Some(AgentResult {
                     status: AgentOutcomeStatus::Completed,
+                    failure_class: None,
                     text: String::new(),
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),

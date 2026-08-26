@@ -156,6 +156,50 @@ fn child_count(spawner: &AgentSpawner) -> usize {
         .count()
 }
 
+struct NonRetryableErrorProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl LlmProvider for NonRetryableErrorProvider {
+    async fn stream(&self, _request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderError::Api {
+            status: 400,
+            message: "invalid request".to_owned(),
+        })
+    }
+}
+
+fn non_retryable_spawner(calls: Arc<AtomicUsize>) -> Arc<AgentSpawner> {
+    Arc::new(AgentSpawner::new(
+        Arc::new(NonRetryableErrorProvider { calls }),
+        test_config(),
+        std::env::temp_dir(),
+    ))
+}
+
+#[tokio::test]
+async fn non_retryable_child_failure_stops_supervisor_without_retry() {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let spawner = non_retryable_spawner(Arc::clone(&provider_calls));
+    let spec = spawn_spec(&spawner, "supervisor-non-retryable-child");
+
+    let result = SupervisorCoordinator::new(Arc::clone(&spawner)).execute(spec, 3).await;
+
+    assert_eq!(result.status, AgentOutcomeStatus::Failed);
+    assert_eq!(result.failure_class, Some(TaskFailureClass::NonRetryable));
+    assert_eq!(
+        result.output.as_ref().and_then(|output| output.get("failure_class")),
+        Some(&serde_json::json!("non_retryable"))
+    );
+    // A typed NonRetryable child failure must not authorize a second attempt.
+    assert_eq!(record_count(&spawner, "supervisor_assignment"), 1);
+    assert_eq!(record_count(&spawner, "supervisor_attempt_failed"), 1);
+    assert_eq!(recorded_failure_class(&spawner).as_deref(), Some("non_retryable"));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn outcome_unknown_spawn_stops_supervisor_without_a_second_operation() {
     let provider_calls = Arc::new(AtomicUsize::new(0));

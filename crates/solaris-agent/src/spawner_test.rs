@@ -469,6 +469,86 @@ async fn supervisor_retries_only_retryable_direct_spawn_tasks() {
     );
 }
 
+struct SupervisorNonRetryableProvider;
+
+#[async_trait::async_trait]
+impl solaris_providers::LlmProvider for SupervisorNonRetryableProvider {
+    async fn stream(
+        &self,
+        _request: &solaris_types::llm::LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<solaris_types::llm::LlmEvent>, solaris_providers::ProviderError> {
+        Err(solaris_providers::ProviderError::Api {
+            status: 400,
+            message: "invalid request".to_owned(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn supervisor_does_not_retry_non_retryable_direct_spawn_tasks() {
+    let mut config = solaris_config::config::Config::resolve(&solaris_config::config::CliArgs {
+        provider: Some("anthropic".into()),
+        api_key: Some("test".into()),
+        base_url: None,
+        model: Some("test-model".into()),
+        max_tokens: None,
+        thinking: None,
+        thinking_budget: None,
+        max_turns: None,
+        max_tool_call_malformed_turns: None,
+        max_tool_call_failure_turns: None,
+        system_prompt: None,
+        profile: None,
+        auto_approve: true,
+        project_dir: None,
+    })
+    .unwrap();
+    config.session.enabled = false;
+    let spawner = AgentSpawner::new(Arc::new(SupervisorNonRetryableProvider), config, std::env::temp_dir());
+    let result = spawner
+        .spawn_collaboration(ParsedSpawnRequest {
+            strategy: solaris_types::workflow::CollaborationSelection::Fixed(
+                solaris_types::workflow::CollaborationStrategy::Supervisor,
+            ),
+            tasks: vec![solaris_types::workflow::CollaborationTaskInput {
+                id: Some("non-retryable".to_owned()),
+                name: "non-retryable".to_owned(),
+                prompt: "perform a permanently failing operation".to_owned(),
+                role: Some("worker".to_owned()),
+                depends_on: Vec::new(),
+                expected_output: None,
+                resource_budget: None,
+            }],
+        })
+        .await;
+
+    assert_eq!(result.status, solaris_types::workflow::CollaborationRunStatus::Failed);
+    assert_eq!(result.tasks.len(), 1);
+    assert_eq!(result.tasks[0].status, TaskState::Failed);
+    assert_eq!(result.tasks[0].retries, 0, "a NonRetryable failure must not retry");
+    assert_eq!(
+        result.tasks[0].error_kind,
+        Some(TaskFailureClass::NonRetryable),
+        "the summary must carry the typed NonRetryable classification"
+    );
+    let records = spawner
+        .lifecycle_runtime()
+        .ledger()
+        .records_for_run(spawner.run_id())
+        .unwrap();
+    assert!(
+        records.iter().all(|record| record.record_type != "supervisor_retry"),
+        "no Supervisor retry intent may be recorded for a NonRetryable failure"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "task_created")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn supervisor_retry_intent_recovers_failed_projection_after_crash_window() {
     let mut config = solaris_config::config::Config::resolve(&solaris_config::config::CliArgs {

@@ -719,6 +719,7 @@ fn agent_outcome_projection(result: &SubAgentResult) -> SubAgentResult {
         agent_id: result.agent_id.clone(),
         task_id: result.task_id.clone(),
         status: result.status,
+        failure_class: result.failure_class,
         output: None,
         text: String::new(),
         usage: Default::default(),

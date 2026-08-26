@@ -1,4 +1,5 @@
 use solaris_providers::error::ProviderError;
+use solaris_types::runtime::TaskFailureClass;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -22,4 +23,29 @@ pub enum AgentError {
     ResourceBudgetExceeded(String),
     #[error("Context window nearly full ({input_tokens} tokens used, limit {limit})")]
     ContextTooLong { input_tokens: u64, limit: usize },
+}
+
+impl AgentError {
+    /// Typed failure classification for retry decisions.
+    ///
+    /// Transient provider failures are Retryable; convergence, budget, and
+    /// reconciliation failures are not.
+    pub fn failure_class(&self) -> TaskFailureClass {
+        match self {
+            AgentError::ApiError(_) => TaskFailureClass::Retryable,
+            AgentError::Provider(error) => {
+                if error.is_retryable() {
+                    TaskFailureClass::Retryable
+                } else {
+                    TaskFailureClass::NonRetryable
+                }
+            }
+            AgentError::ToolCallMalformed { .. } | AgentError::ToolCallFailures { .. } => {
+                TaskFailureClass::NonConvergent
+            }
+            AgentError::UserAborted => TaskFailureClass::Cancelled,
+            AgentError::ReconciliationRequired { .. } => TaskFailureClass::ReconciliationRequired,
+            AgentError::ResourceBudgetExceeded(_) | AgentError::ContextTooLong { .. } => TaskFailureClass::NonRetryable,
+        }
+    }
 }

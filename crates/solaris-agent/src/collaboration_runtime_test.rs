@@ -92,6 +92,7 @@ fn legacy_inline_agent_outcome_remains_readable() {
         agent_id: Some(reservation.child_agent_id.clone()),
         task_id: None,
         status: AgentOutcomeStatus::Completed,
+        failure_class: None,
         output: Some(serde_json::json!({"text":"legacy result"})),
         text: "legacy result".into(),
         usage: Default::default(),

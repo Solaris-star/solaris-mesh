@@ -395,6 +395,11 @@ mod phase7_tests {
                 } else {
                     solaris_types::spawner::AgentOutcomeStatus::Completed
                 },
+                failure_class: if self.is_error {
+                    Some(solaris_types::runtime::TaskFailureClass::NonRetryable)
+                } else {
+                    None
+                },
                 output: Some(serde_json::json!({"text": self.text.clone()})),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),

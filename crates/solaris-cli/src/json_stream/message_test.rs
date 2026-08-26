@@ -535,6 +535,7 @@ async fn closed_command_channel_stops_pending_required_workflow_immediately() {
 fn failed_agent_result_is_not_a_successful_operation_terminal() {
     let result = AgentResult {
         status: AgentOutcomeStatus::Failed,
+        failure_class: Some(solaris_types::runtime::TaskFailureClass::MaxTurns),
         text: "fallback".into(),
         stop_reason: StopReason::MaxTurns,
         usage: TokenUsage::default(),

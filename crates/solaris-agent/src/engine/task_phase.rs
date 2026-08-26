@@ -406,6 +406,8 @@ fn task_phase_error(error: std::io::Error) -> AgentError {
 #[derive(Serialize, Deserialize)]
 struct StoredTerminalResult {
     status: AgentOutcomeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_class: Option<TaskFailureClass>,
     text: String,
     stop_reason: StopReason,
     usage: TokenUsage,
@@ -418,6 +420,7 @@ impl From<&AgentResult> for StoredTerminalResult {
     fn from(result: &AgentResult) -> Self {
         Self {
             status: result.status,
+            failure_class: result.failure_class,
             text: result.text.clone(),
             stop_reason: result.stop_reason,
             usage: result.usage.clone(),
@@ -436,6 +439,7 @@ fn decode_terminal_result(task: &StoredDurableTask) -> Result<AgentResult, Agent
         .map_err(|error| AgentError::ApiError(format!("completed durable task result is invalid: {error}")))?;
     Ok(AgentResult {
         status: stored.status,
+        failure_class: stored.failure_class,
         text: stored.text,
         stop_reason: stored.stop_reason,
         usage: stored.usage,

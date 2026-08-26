@@ -4,6 +4,7 @@ use crate::tool_call::{
     ToolCallFailureFingerprint, ToolCallFailureTracker, ToolCallMalformedFingerprint, ToolCallMalformedTracker,
 };
 use solaris_types::message::StopReason;
+use solaris_types::runtime::TaskFailureClass;
 
 pub(crate) enum TurnOutcome {
     ToolRound(StreamOutcome),
@@ -43,6 +44,14 @@ impl FinalizationReason {
                 "The response was cut off by the token limit and could not be completed automatically."
             }
             FinalizationReason::EmptyFinal => "The model finished without visible answer text after one retry.",
+        }
+    }
+
+    /// Typed failure classification for a run that could not finalize.
+    pub(crate) fn failure_class(self) -> TaskFailureClass {
+        match self {
+            FinalizationReason::TurnBudget => TaskFailureClass::MaxTurns,
+            FinalizationReason::MaxTokens | FinalizationReason::EmptyFinal => TaskFailureClass::NonConvergent,
         }
     }
 }

@@ -4,7 +4,8 @@ use crate::identity::RunId;
 use crate::runtime::TaskFailureClass;
 
 use super::{
-    AgentConversationHandle, AgentOutcomeStatus, AgentSpawnError, AgentSpawnSpec, AgentTurnSpec, OutcomeBlobRef,
+    AgentConversationError, AgentConversationHandle, AgentOutcomeStatus, AgentSpawnError, AgentSpawnSpec,
+    AgentTurnSpec, OutcomeBlobRef, SubAgentResult,
 };
 
 #[test]
@@ -123,6 +124,120 @@ fn typed_spawn_failure_classes_have_stable_wire_values() {
         serde_json::to_value(AgentOutcomeStatus::OutcomeUnknown).unwrap(),
         json!("outcome_unknown")
     );
+}
+
+#[test]
+fn typed_spawn_error_constructors_cover_every_failure_class() {
+    for (error, class, wire) in [
+        (
+            AgentSpawnError::retryable("m"),
+            TaskFailureClass::Retryable,
+            "retryable",
+        ),
+        (
+            AgentSpawnError::non_retryable("m"),
+            TaskFailureClass::NonRetryable,
+            "non_retryable",
+        ),
+        (
+            AgentSpawnError::permission_denied("m"),
+            TaskFailureClass::PermissionDenied,
+            "permission_denied",
+        ),
+        (AgentSpawnError::max_turns("m"), TaskFailureClass::MaxTurns, "max_turns"),
+        (
+            AgentSpawnError::non_convergent("m"),
+            TaskFailureClass::NonConvergent,
+            "non_convergent",
+        ),
+        (
+            AgentSpawnError::cancelled("m"),
+            TaskFailureClass::Cancelled,
+            "cancelled",
+        ),
+        (
+            AgentSpawnError::outcome_unknown("m"),
+            TaskFailureClass::OutcomeUnknown,
+            "outcome_unknown",
+        ),
+        (
+            AgentSpawnError::reconciliation_required("m"),
+            TaskFailureClass::ReconciliationRequired,
+            "reconciliation_required",
+        ),
+        (
+            AgentSpawnError::side_effect_unknown("m"),
+            TaskFailureClass::SideEffectUnknown,
+            "side_effect_unknown",
+        ),
+    ] {
+        assert_eq!(error.failure_class, class);
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({"failure_class":wire,"message":"m"})
+        );
+    }
+}
+
+#[test]
+fn typed_conversation_error_constructors_cover_every_failure_class() {
+    for (error, class) in [
+        (AgentConversationError::retryable("m"), TaskFailureClass::Retryable),
+        (
+            AgentConversationError::non_retryable("m"),
+            TaskFailureClass::NonRetryable,
+        ),
+        (
+            AgentConversationError::permission_denied("m"),
+            TaskFailureClass::PermissionDenied,
+        ),
+        (AgentConversationError::max_turns("m"), TaskFailureClass::MaxTurns),
+        (
+            AgentConversationError::non_convergent("m"),
+            TaskFailureClass::NonConvergent,
+        ),
+        (AgentConversationError::cancelled("m"), TaskFailureClass::Cancelled),
+        (
+            AgentConversationError::outcome_unknown("m"),
+            TaskFailureClass::OutcomeUnknown,
+        ),
+        (
+            AgentConversationError::reconciliation_required("m"),
+            TaskFailureClass::ReconciliationRequired,
+        ),
+        (
+            AgentConversationError::side_effect_unknown("m"),
+            TaskFailureClass::SideEffectUnknown,
+        ),
+    ] {
+        assert_eq!(error.failure_class, class);
+    }
+}
+
+#[test]
+fn agent_outcome_and_sub_agent_result_carry_optional_failure_class() {
+    let result: SubAgentResult = serde_json::from_value(json!({
+        "name": "worker",
+        "status": "failed",
+        "text": "boom",
+        "usage": {"input_tokens":0,"output_tokens":0},
+        "turns": 1,
+        "is_error": true
+    }))
+    .expect("legacy SubAgentResult wire must remain readable");
+    assert_eq!(result.failure_class, None);
+
+    let classified: SubAgentResult = serde_json::from_value(json!({
+        "name": "worker",
+        "status": "failed",
+        "failure_class": "permission_denied",
+        "text": "denied",
+        "usage": {"input_tokens":0,"output_tokens":0},
+        "turns": 1,
+        "is_error": true
+    }))
+    .unwrap();
+    assert_eq!(classified.failure_class, Some(TaskFailureClass::PermissionDenied));
 }
 
 #[test]

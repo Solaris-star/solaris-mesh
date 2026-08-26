@@ -299,6 +299,41 @@ impl AgentConversationError {
             message: message.into(),
         }
     }
+
+    pub fn permission_denied(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::PermissionDenied,
+            message: message.into(),
+        }
+    }
+
+    pub fn max_turns(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::MaxTurns,
+            message: message.into(),
+        }
+    }
+
+    pub fn non_convergent(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::NonConvergent,
+            message: message.into(),
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    pub fn side_effect_unknown(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::SideEffectUnknown,
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for AgentConversationError {
@@ -337,6 +372,41 @@ impl AgentSpawnError {
             message: message.into(),
         }
     }
+
+    pub fn permission_denied(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::PermissionDenied,
+            message: message.into(),
+        }
+    }
+
+    pub fn max_turns(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::MaxTurns,
+            message: message.into(),
+        }
+    }
+
+    pub fn non_convergent(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::NonConvergent,
+            message: message.into(),
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    pub fn side_effect_unknown(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::SideEffectUnknown,
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for AgentSpawnError {
@@ -352,6 +422,10 @@ impl std::error::Error for AgentSpawnError {}
 pub struct AgentOutcome {
     pub handle: AgentHandle,
     pub status: AgentOutcomeStatus,
+    /// Typed failure classification for non-completed outcomes.
+    /// Retry decisions must use this field, never the bare `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<TaskFailureClass>,
     pub output: Value,
     pub usage: TokenUsage,
     pub turns: usize,
@@ -419,6 +493,10 @@ pub struct SubAgentResult {
     pub task_id: Option<TaskId>,
     #[serde(default)]
     pub status: AgentOutcomeStatus,
+    /// Typed failure classification for non-completed outcomes.
+    /// Retry decisions must use this field, never the bare `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<TaskFailureClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
     pub text: String,

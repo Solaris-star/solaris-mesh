@@ -35,6 +35,41 @@ impl WorkflowNodeError {
             message: message.into(),
         }
     }
+
+    pub fn permission_denied(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::PermissionDenied,
+            message: message.into(),
+        }
+    }
+
+    pub fn max_turns(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::MaxTurns,
+            message: message.into(),
+        }
+    }
+
+    pub fn non_convergent(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::NonConvergent,
+            message: message.into(),
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    pub fn side_effect_unknown(message: impl Into<String>) -> Self {
+        Self {
+            failure_class: TaskFailureClass::SideEffectUnknown,
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for WorkflowNodeError {

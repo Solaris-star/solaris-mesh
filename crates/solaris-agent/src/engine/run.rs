@@ -121,6 +121,7 @@ impl AgentEngine {
                     .emit_protocol_error(&self.msg_id, ENGINE_ERROR_CODE, &message, false);
                 return Ok(AgentResult {
                     status: AgentOutcomeStatus::Failed,
+                    failure_class: Some(TaskFailureClass::MaxTurns),
                     text: String::new(),
                     stop_reason: StopReason::MaxTurns,
                     usage: self.total_usage.clone(),
@@ -167,6 +168,7 @@ impl AgentEngine {
                     self.save_session()?;
                     return Ok(AgentResult {
                         status: AgentOutcomeStatus::Completed,
+                        failure_class: None,
                         text: outcome.assistant_text,
                         stop_reason: outcome.stop_reason,
                         usage: self.total_usage.clone(),
@@ -212,6 +214,7 @@ impl AgentEngine {
                                 self.save_session()?;
                                 return Ok(AgentResult {
                                     status: AgentOutcomeStatus::Completed,
+                                    failure_class: None,
                                     text: accumulated_text,
                                     stop_reason: StopReason::EndTurn,
                                     usage: self.total_usage.clone(),
@@ -589,6 +592,7 @@ impl AgentEngine {
             self.save_session()?;
             return Ok(AgentResult {
                 status: AgentOutcomeStatus::Completed,
+                failure_class: None,
                 text: combined_text,
                 stop_reason: StopReason::EndTurn,
                 usage: self.total_usage.clone(),
@@ -625,6 +629,7 @@ impl AgentEngine {
         self.save_session()?;
         Ok(AgentResult {
             status: AgentOutcomeStatus::Failed,
+            failure_class: Some(reason.failure_class()),
             text: fallback_text,
             stop_reason: fallback_stop_reason,
             usage: self.total_usage.clone(),
