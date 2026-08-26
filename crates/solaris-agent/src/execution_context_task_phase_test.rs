@@ -60,17 +60,35 @@ fn run_tool_statistics_dedupe_per_agent_instead_of_per_provider_local_call_id() 
     first
         .record_tool_calls_once(
             "provider-local-round",
-            &[solaris_types::tool::ToolResultStatus::Executed],
+            &[solaris_types::tool::ToolCallStat::new(
+                "task:t|env:e",
+                "read",
+                &serde_json::json!({"path": "a"}),
+                solaris_types::tool::ToolResultStatus::Executed,
+            )],
         )
         .unwrap();
     first
         .record_tool_calls_once(
             "provider-local-round",
-            &[solaris_types::tool::ToolResultStatus::Executed],
+            &[solaris_types::tool::ToolCallStat::new(
+                "task:t|env:e",
+                "read",
+                &serde_json::json!({"path": "a"}),
+                solaris_types::tool::ToolResultStatus::Executed,
+            )],
         )
         .unwrap();
     second
-        .record_tool_calls_once("provider-local-round", &[solaris_types::tool::ToolResultStatus::Noop])
+        .record_tool_calls_once(
+            "provider-local-round",
+            &[solaris_types::tool::ToolCallStat::new(
+                "task:t|env:e",
+                "noop",
+                &serde_json::json!({}),
+                solaris_types::tool::ToolResultStatus::Noop,
+            )],
+        )
         .unwrap();
 
     let usage = resources.usage();

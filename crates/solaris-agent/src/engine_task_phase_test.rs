@@ -888,7 +888,15 @@ fn stage_tools_in_flight(
         let round_input = serde_json::to_value(&original_calls).unwrap();
         let call_id = legacy_tool_round_call_id(&stable_digest_value(&round_input));
         context
-            .record_tool_calls_once(&call_id, &[ToolResultStatus::Executed])
+            .record_tool_calls_once(
+                &call_id,
+                &[solaris_types::tool::ToolCallStat::new(
+                    "task:legacy|env:legacy",
+                    "CheckpointTool",
+                    &serde_json::json!({"changed": false}),
+                    ToolResultStatus::Executed,
+                )],
+            )
             .unwrap();
         call_id
     } else {

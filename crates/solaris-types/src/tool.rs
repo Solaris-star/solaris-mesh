@@ -1,6 +1,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::sandbox::SandboxReport;
 
@@ -239,6 +240,92 @@ pub fn useful_call_rate(statuses: &[ToolResultStatus]) -> Option<f64> {
     }
     let useful = statuses.iter().filter(|status| status.is_useful_call()).count();
     Some(useful as f64 / statuses.len() as f64)
+}
+
+/// One terminal tool call observed within a statistics scope.
+///
+/// The fingerprint identifies the logical call (stable tool name plus
+/// canonicalized JSON input plus the required task/environment scope) and is
+/// independent of object key order. The status is the terminal outcome used
+/// to classify the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallStat {
+    pub fingerprint: String,
+    pub status: ToolResultStatus,
+}
+
+impl ToolCallStat {
+    /// Build one stat by fingerprinting the call within a statistics scope.
+    pub fn new(scope: &str, tool_name: &str, input: &Value, status: ToolResultStatus) -> Self {
+        Self {
+            fingerprint: tool_call_fingerprint(scope, tool_name, input),
+            status,
+        }
+    }
+}
+
+/// Fraction of observed tool calls whose fingerprint repeats an earlier call
+/// in the same statistics scope.
+///
+/// The denominator includes every terminal status (`Executed`, `CacheHit`,
+/// `Noop`, `Denied`, `Failed`, `Aborted`, `Timeout`, `OutcomeUnknown`); a
+/// malformed call is recorded as `Failed` and participates like any other
+/// failed call. The first occurrence of a fingerprint is never a duplicate;
+/// every later occurrence of the same fingerprint is. An empty sample returns
+/// `None` rather than reporting a misleading zero-percent rate.
+pub fn duplicate_call_rate(stats: &[ToolCallStat]) -> Option<f64> {
+    if stats.is_empty() {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = 0usize;
+    for stat in stats {
+        if !seen.insert(stat.fingerprint.as_str()) {
+            duplicates += 1;
+        }
+    }
+    Some(duplicates as f64 / stats.len() as f64)
+}
+
+/// Stable fingerprint for one tool call within a statistics scope.
+///
+/// Combines the statistics scope (task/environment), the stable tool name, and
+/// the canonicalized JSON input. Object key order in the input does not affect
+/// the fingerprint, so two calls that differ only in key ordering produce the
+/// same fingerprint and are treated as the same logical call.
+pub fn tool_call_fingerprint(scope: &str, tool_name: &str, input: &Value) -> String {
+    let canonical = canonicalize_json_value(input);
+    let mut hasher = Sha256::new();
+    hasher.update(b"solaris/tool-call-fingerprint/v1\0");
+    hasher.update(scope.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(tool_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(serde_json::to_vec(&canonical).unwrap_or_default());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Canonicalize object insertion order before hashing.
+///
+/// `serde_json` can be built with its `preserve_order` feature. That feature
+/// is useful for display, but it must not change durable identities: a value
+/// loaded from a provider response and the same value reconstructed from a
+/// ledger record may otherwise hash differently solely because their object
+/// keys were inserted in a different order.
+fn canonicalize_json_value(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut keys: Vec<_> = object.keys().collect();
+            keys.sort_unstable();
+            let mut canonical = serde_json::Map::with_capacity(object.len());
+            for key in keys {
+                canonical.insert(key.clone(), canonicalize_json_value(&object[key]));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonicalize_json_value).collect()),
+        _ => value.clone(),
+    }
 }
 
 #[cfg(test)]

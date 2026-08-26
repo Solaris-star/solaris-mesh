@@ -6,6 +6,7 @@ use uuid::Uuid;
 use solaris_types::message::{ContentBlock, StopReason, TokenUsage};
 use solaris_types::runtime::TaskFailureClass;
 use solaris_types::spawner::AgentOutcomeStatus;
+use solaris_types::tool::{ToolCallStat, ToolResultStatus};
 
 use crate::error::AgentError;
 use crate::execution_context::EffectExecutionContext;
@@ -251,6 +252,33 @@ impl AgentEngine {
             .map(Some)
             .map_err(|error| AgentError::ApiError(format!("durable task lease unavailable: {error}")))
     }
+
+    /// Build duplicate-detection stats for one tool round.
+    ///
+    /// Each `ToolUse` block is paired positionally with its terminal status and
+    /// fingerprinted within the current task and environment scope.
+    /// Non-`ToolUse` blocks are skipped together with their status so the
+    /// pairing stays aligned.
+    pub(super) fn tool_call_stats(
+        &self,
+        tool_calls: &[ContentBlock],
+        statuses: &[ToolResultStatus],
+    ) -> Vec<ToolCallStat> {
+        let Some(context) = self.execution_context.as_ref() else {
+            return Vec::new();
+        };
+        let task_scope = durable_task_key(&self.msg_id);
+        let scope = context.tool_call_scope(&task_scope);
+        tool_calls
+            .iter()
+            .zip(statuses)
+            .filter_map(|(block, status)| match block {
+                ContentBlock::ToolUse { name, input, .. } => Some((name.as_str(), input, *status)),
+                _ => None,
+            })
+            .map(|(name, input, status)| ToolCallStat::new(&scope, name, input, status))
+            .collect()
+    }
 }
 
 pub(super) fn provider_call_id(kind_key: &str, request_digest: &str) -> String {
@@ -362,7 +390,7 @@ pub(super) fn turn_kind_key(kind: TurnKind) -> &'static str {
     }
 }
 
-fn durable_task_key(message_id: &str) -> String {
+pub(super) fn durable_task_key(message_id: &str) -> String {
     format!(
         "task-key-v1:sha256:{}",
         hex_digest(TASK_KEY_DOMAIN_V1, message_id.as_bytes())

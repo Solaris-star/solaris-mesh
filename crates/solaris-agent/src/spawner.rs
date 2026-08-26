@@ -2070,7 +2070,7 @@ impl AgentSpawner {
             output_tokens: usage.output_tokens,
             tool_calls: usage.tool_calls,
             useful_call_rate: usage.useful_call_rate,
-            duplicate_call_rate: None,
+            duplicate_call_rate: usage.duplicate_call_rate,
             outcome_unknown: has_unknown,
             needs_manual_verification: needs_manual,
         }

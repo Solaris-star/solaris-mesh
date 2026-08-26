@@ -99,6 +99,21 @@ pub(super) fn read_only_evidence_environment_digest(
     }))
 }
 
+/// Digest of the execution capabilities that define a tool-call statistics scope.
+///
+/// Volatile state (permission fingerprint, generation counters) is excluded so
+/// that duplicate detection is reset only when the provider, plugins, tool
+/// implementations, hook order, or workflow actually change.
+pub(super) fn tool_call_scope_environment_digest(environment: &OperationEnvironmentSnapshot) -> String {
+    stable_digest_value(&json!({
+        "provider": environment.provider,
+        "plugins": environment.plugins,
+        "tools": environment.tools,
+        "hook_order": environment.hook_order,
+        "workflow": environment.workflow,
+    }))
+}
+
 pub(crate) fn refresh_environment_tools_and_plugins(
     current: &OperationEnvironmentSnapshot,
     registry: &ToolRegistry,

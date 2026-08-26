@@ -354,6 +354,81 @@ async fn independent_reviewer_adds_a_read_only_durable_task() {
     assert_eq!(spec["context_policy"], "isolated_verification");
 }
 
+#[tokio::test]
+async fn collaboration_summary_reports_real_duplicate_call_rate() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ReviewerProvider {
+        calls: Arc::clone(&calls),
+        responses: Arc::new(std::sync::Mutex::new(vec![
+            "reviewed".to_owned(),
+            "candidate".to_owned(),
+        ])),
+    });
+    let mut config = solaris_config::config::Config::resolve(&solaris_config::config::CliArgs {
+        provider: Some("anthropic".into()),
+        api_key: Some("test".into()),
+        base_url: None,
+        model: Some("test-model".into()),
+        max_tokens: None,
+        thinking: None,
+        thinking_budget: None,
+        max_turns: None,
+        max_tool_call_malformed_turns: None,
+        max_tool_call_failure_turns: None,
+        system_prompt: None,
+        profile: None,
+        auto_approve: true,
+        project_dir: None,
+    })
+    .unwrap();
+    config.session.enabled = false;
+    let resources = crate::resource_manager::ResourceManager::new(solaris_types::resource::ResourceBudget::default());
+    let scope = "task:summary|env:summary";
+    resources
+        .record_tool_calls_once_checked(
+            "summary-round-1",
+            &[
+                solaris_types::tool::ToolCallStat::new(
+                    scope,
+                    "read",
+                    &serde_json::json!({"path": "/a"}),
+                    solaris_types::tool::ToolResultStatus::Executed,
+                ),
+                solaris_types::tool::ToolCallStat::new(
+                    scope,
+                    "read",
+                    &serde_json::json!({"path": "/a"}),
+                    solaris_types::tool::ToolResultStatus::CacheHit,
+                ),
+            ],
+        )
+        .unwrap();
+    let spawner = AgentSpawner::new(provider, config, std::env::temp_dir()).with_resource_manager(resources);
+    let result = spawner
+        .spawn_collaboration(ParsedSpawnRequest {
+            strategy: solaris_types::workflow::CollaborationSelection::Fixed(
+                solaris_types::workflow::CollaborationStrategy::IndependentReviewer,
+            ),
+            tasks: vec![solaris_types::workflow::CollaborationTaskInput {
+                id: Some("candidate".to_owned()),
+                name: "candidate".to_owned(),
+                prompt: "produce a candidate".to_owned(),
+                role: Some("author".to_owned()),
+                depends_on: Vec::new(),
+                expected_output: None,
+                resource_budget: None,
+            }],
+        })
+        .await;
+
+    assert_eq!(
+        result.status,
+        solaris_types::workflow::CollaborationRunStatus::Completed
+    );
+    assert_eq!(result.tool_calls, 2);
+    assert_eq!(result.duplicate_call_rate, Some(0.5));
+}
+
 struct SupervisorRetryProvider {
     attempts: std::sync::Mutex<Vec<bool>>,
 }

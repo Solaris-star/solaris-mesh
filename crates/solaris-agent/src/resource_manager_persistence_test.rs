@@ -4,9 +4,13 @@ use solaris_types::effect::DurabilityClass;
 use solaris_types::identity::RunId;
 use solaris_types::message::TokenUsage;
 use solaris_types::resource::ResourceBudget;
-use solaris_types::tool::ToolResultStatus;
+use solaris_types::tool::{ToolCallStat, ToolResultStatus};
 
 use super::*;
+
+fn stat(scope: &str, name: &str, input: serde_json::Value, status: ToolResultStatus) -> ToolCallStat {
+    ToolCallStat::new(scope, name, &input, status)
+}
 
 #[test]
 fn durable_resource_updates_use_deltas_and_restore_without_reapplying_usage() {
@@ -63,12 +67,28 @@ fn tool_call_statistics_resume_without_double_counting_a_replayed_round() {
         .attach_ledger(run_id.clone(), Arc::clone(&ledger) as Arc<dyn RuntimeLedger>)
         .unwrap();
 
+    let scope = "task:scope-a|env:env-a";
     let first_round = [
-        ToolResultStatus::Executed,
-        ToolResultStatus::CacheHit,
-        ToolResultStatus::Noop,
-        ToolResultStatus::Denied,
-        ToolResultStatus::Failed,
+        stat(
+            scope,
+            "read",
+            serde_json::json!({"path": "a"}),
+            ToolResultStatus::Executed,
+        ),
+        stat(
+            scope,
+            "read",
+            serde_json::json!({"path": "b"}),
+            ToolResultStatus::CacheHit,
+        ),
+        stat(scope, "noop", serde_json::json!({}), ToolResultStatus::Noop),
+        stat(
+            scope,
+            "write",
+            serde_json::json!({"path": "c"}),
+            ToolResultStatus::Denied,
+        ),
+        stat(scope, "bash", serde_json::json!({"cmd": "x"}), ToolResultStatus::Failed),
     ];
     first.record_tool_calls_once_checked("round-a", &first_round).unwrap();
     first.record_tool_calls_once_checked("round-a", &first_round).unwrap();
@@ -76,6 +96,9 @@ fn tool_call_statistics_resume_without_double_counting_a_replayed_round() {
     assert_eq!(usage.tool_calls, 5);
     assert_eq!(usage.useful_tool_calls, 2);
     assert_eq!(usage.useful_call_rate, Some(0.4));
+    assert_eq!(usage.duplicate_tool_calls, 0);
+    assert_eq!(usage.duplicate_call_rate, Some(0.0));
+    assert_eq!(usage.seen_tool_call_fingerprints.len(), 5);
     let records = ledger.records_for_run(&run_id).unwrap();
     let statistics_delta = records
         .iter()
@@ -85,6 +108,8 @@ fn tool_call_statistics_resume_without_double_counting_a_replayed_round() {
     assert_eq!(statistics_delta.payload["usage"]["tool_calls"], 5);
     assert_eq!(statistics_delta.payload["usage"]["useful_tool_calls"], 2);
     assert_eq!(statistics_delta.payload["usage"]["useful_call_rate"], 0.4);
+    assert_eq!(statistics_delta.payload["usage"]["duplicate_tool_calls"], 0);
+    assert_eq!(statistics_delta.payload["usage"]["duplicate_call_rate"], 0.0);
 
     let restored = ResourceManager::new(ResourceBudget::default());
     restored
@@ -93,18 +118,36 @@ fn tool_call_statistics_resume_without_double_counting_a_replayed_round() {
     restored
         .record_tool_calls_once_checked("round-a", &first_round)
         .unwrap();
+    let second_round = [
+        stat(
+            scope,
+            "grep",
+            serde_json::json!({"pattern": "y"}),
+            ToolResultStatus::Timeout,
+        ),
+        stat(
+            scope,
+            "glob",
+            serde_json::json!({"pattern": "z"}),
+            ToolResultStatus::Executed,
+        ),
+    ];
     restored
-        .record_tool_calls_once_checked("round-b", &[ToolResultStatus::Timeout, ToolResultStatus::Executed])
+        .record_tool_calls_once_checked("round-b", &second_round)
         .unwrap();
 
     let usage = restored.usage();
     assert_eq!(usage.tool_calls, 7);
     assert_eq!(usage.useful_tool_calls, 3);
     assert!((usage.useful_call_rate.unwrap() - 3.0 / 7.0).abs() < f64::EPSILON);
+    assert_eq!(usage.duplicate_tool_calls, 0);
+    assert_eq!(usage.duplicate_call_rate, Some(0.0));
     let snapshot = serde_json::to_value(usage).unwrap();
     assert_eq!(snapshot["tool_calls"], 7);
     assert_eq!(snapshot["useful_tool_calls"], 3);
     assert!(snapshot["useful_call_rate"].as_f64().is_some());
+    assert_eq!(snapshot["duplicate_tool_calls"], 0);
+    assert!(snapshot["duplicate_call_rate"].as_f64().is_some());
 }
 
 #[test]

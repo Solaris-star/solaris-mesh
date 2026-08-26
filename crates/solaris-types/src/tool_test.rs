@@ -183,6 +183,159 @@ mod tests {
         assert_eq!(useful_call_rate(&[]), None);
     }
 
+    // --- tool_call_fingerprint: object key order is irrelevant ---
+
+    #[test]
+    fn tool_call_fingerprint_ignores_object_key_order() {
+        let scope = "task:t|env:e";
+        let first = json!({"path": "/a", "limit": 10});
+        let reordered = json!({"limit": 10, "path": "/a"});
+
+        assert_eq!(
+            tool_call_fingerprint(scope, "read", &first),
+            tool_call_fingerprint(scope, "read", &reordered)
+        );
+    }
+
+    #[test]
+    fn tool_call_fingerprint_ignores_nested_object_key_order() {
+        let scope = "task:t|env:e";
+        let first = json!({"opts": {"a": 1, "b": 2}, "name": "x"});
+        let reordered = json!({"name": "x", "opts": {"b": 2, "a": 1}});
+
+        assert_eq!(
+            tool_call_fingerprint(scope, "bash", &first),
+            tool_call_fingerprint(scope, "bash", &reordered)
+        );
+    }
+
+    #[test]
+    fn tool_call_fingerprint_distinguishes_different_inputs() {
+        let scope = "task:t|env:e";
+        let first = json!({"path": "/a"});
+        let second = json!({"path": "/b"});
+
+        assert_ne!(
+            tool_call_fingerprint(scope, "read", &first),
+            tool_call_fingerprint(scope, "read", &second)
+        );
+    }
+
+    #[test]
+    fn tool_call_fingerprint_distinguishes_tool_names() {
+        let scope = "task:t|env:e";
+        let input = json!({"path": "/a"});
+
+        assert_ne!(
+            tool_call_fingerprint(scope, "read", &input),
+            tool_call_fingerprint(scope, "write", &input)
+        );
+    }
+
+    #[test]
+    fn tool_call_fingerprint_distinguishes_scopes() {
+        let input = json!({"path": "/a"});
+
+        assert_ne!(
+            tool_call_fingerprint("task:a|env:e", "read", &input),
+            tool_call_fingerprint("task:b|env:e", "read", &input)
+        );
+        assert_ne!(
+            tool_call_fingerprint("task:a|env:e1", "read", &input),
+            tool_call_fingerprint("task:a|env:e2", "read", &input)
+        );
+    }
+
+    #[test]
+    fn tool_call_fingerprint_array_order_matters() {
+        let scope = "task:t|env:e";
+        let first = json!({"args": ["a", "b"]});
+        let reordered = json!({"args": ["b", "a"]});
+
+        assert_ne!(
+            tool_call_fingerprint(scope, "bash", &first),
+            tool_call_fingerprint(scope, "bash", &reordered)
+        );
+    }
+
+    // --- duplicate_call_rate ---
+
+    #[test]
+    fn duplicate_call_rate_empty_sample_is_none() {
+        assert_eq!(duplicate_call_rate(&[]), None);
+    }
+
+    #[test]
+    fn duplicate_call_rate_no_repeats_is_zero() {
+        let stats = [
+            ToolCallStat::new("s", "read", &json!({"path": "/a"}), ToolResultStatus::Executed),
+            ToolCallStat::new("s", "read", &json!({"path": "/b"}), ToolResultStatus::Executed),
+        ];
+        assert_eq!(duplicate_call_rate(&stats), Some(0.0));
+    }
+
+    #[test]
+    fn duplicate_call_rate_counts_repeated_fingerprints() {
+        let stats = [
+            ToolCallStat::new("s", "read", &json!({"path": "/a"}), ToolResultStatus::Executed),
+            ToolCallStat::new("s", "read", &json!({"path": "/a"}), ToolResultStatus::Executed),
+            ToolCallStat::new("s", "read", &json!({"path": "/b"}), ToolResultStatus::Executed),
+        ];
+        assert_eq!(duplicate_call_rate(&stats), Some(1.0 / 3.0));
+    }
+
+    #[test]
+    fn duplicate_call_rate_counts_all_terminal_statuses() {
+        // A repeated fingerprint is a duplicate regardless of the terminal
+        // status of either occurrence.
+        let stats = [
+            ToolCallStat::new("s", "bash", &json!({"cmd": "x"}), ToolResultStatus::Failed),
+            ToolCallStat::new("s", "bash", &json!({"cmd": "x"}), ToolResultStatus::Denied),
+            ToolCallStat::new("s", "bash", &json!({"cmd": "x"}), ToolResultStatus::CacheHit),
+            ToolCallStat::new("s", "bash", &json!({"cmd": "x"}), ToolResultStatus::Aborted),
+            ToolCallStat::new("s", "bash", &json!({"cmd": "x"}), ToolResultStatus::OutcomeUnknown),
+        ];
+        assert_eq!(duplicate_call_rate(&stats), Some(4.0 / 5.0));
+    }
+
+    #[test]
+    fn duplicate_call_rate_key_order_variant_is_a_duplicate() {
+        let stats = [
+            ToolCallStat::new(
+                "s",
+                "read",
+                &json!({"path": "/a", "limit": 1}),
+                ToolResultStatus::Executed,
+            ),
+            ToolCallStat::new(
+                "s",
+                "read",
+                &json!({"limit": 1, "path": "/a"}),
+                ToolResultStatus::CacheHit,
+            ),
+        ];
+        assert_eq!(duplicate_call_rate(&stats), Some(0.5));
+    }
+
+    #[test]
+    fn duplicate_call_rate_cross_scope_is_not_a_duplicate() {
+        let stats = [
+            ToolCallStat::new(
+                "task:a|env:e",
+                "read",
+                &json!({"path": "/a"}),
+                ToolResultStatus::Executed,
+            ),
+            ToolCallStat::new(
+                "task:b|env:e",
+                "read",
+                &json!({"path": "/a"}),
+                ToolResultStatus::Executed,
+            ),
+        ];
+        assert_eq!(duplicate_call_rate(&stats), Some(0.0));
+    }
+
     #[test]
     fn test_tool_def_deferred_defaults_to_false() {
         let tool = ToolDef {

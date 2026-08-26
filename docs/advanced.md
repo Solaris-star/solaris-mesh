@@ -34,7 +34,8 @@ kept in the collaboration runtime for restart recovery.
 - Child Agents run through the durable task path and return a typed
   `CollaborationRunSummary` in tool metadata. The summary includes task
   status, stable Agent IDs, durations, four token counters, useful-call rate,
-  and any `outcome_unknown` work that needs manual verification.
+  duplicate-call rate, and any `outcome_unknown` work that needs manual
+  verification.
 - A failed prerequisite is durably marked `Skipped`; it is never silently
   executed during a later recovery.
 
