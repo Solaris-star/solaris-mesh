@@ -17,6 +17,10 @@ fn extension_manifest_declares_the_real_acp_command() {
     let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).expect("extension manifest must exist"))
         .expect("extension manifest must be valid JSON");
 
+    assert_eq!(
+        manifest["$schema"],
+        "https://raw.githubusercontent.com/Solaris-star/solaris-hub/v1.0.0/spec/extension-manifest.schema.json"
+    );
     assert_eq!(manifest["name"], "solaris-mesh");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     let adapters = manifest["contributes"]["acpAdapters"]
@@ -24,6 +28,14 @@ fn extension_manifest_declares_the_real_acp_command() {
         .expect("manifest must contribute ACP adapters");
     assert_eq!(adapters.len(), 1);
     assert_eq!(adapters[0]["connectionType"], "cli");
+    for field in ["id", "name", "description", "cliCommand", "defaultCliPath"] {
+        assert!(
+            adapters[0][field].as_str().is_some_and(|value| !value.is_empty()),
+            "adapter field {field} must be a non-empty string"
+        );
+    }
+    assert!(adapters[0]["authRequired"].is_boolean());
+    assert!(adapters[0]["supportsStreaming"].is_boolean());
     assert_eq!(adapters[0]["cliCommand"], "solaris");
     assert_eq!(adapters[0]["defaultCliPath"], "solaris");
     assert_eq!(adapters[0]["acpArgs"], serde_json::json!(["acp"]));

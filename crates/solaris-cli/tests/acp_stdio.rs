@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -12,6 +12,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 type StdoutLines = Lines<BufReader<ChildStdout>>;
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("solaris-cli must remain inside the workspace crates directory")
+        .to_path_buf()
+}
+
+fn manifest_acp_args() -> Vec<String> {
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(repository_root().join("solaris-extension.json")).expect("extension manifest must exist"),
+    )
+    .expect("extension manifest must be valid JSON");
+    let adapter = &manifest["contributes"]["acpAdapters"][0];
+    assert_eq!(adapter["cliCommand"], "solaris");
+    adapter["acpArgs"]
+        .as_array()
+        .expect("manifest ACP args")
+        .iter()
+        .map(|value| value.as_str().expect("ACP arg is a string").to_owned())
+        .collect()
+}
 
 async fn send_request(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) {
     let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
@@ -77,7 +100,8 @@ async fn acp_stdio_lifecycle_runs_without_a_real_provider() {
     )
     .expect("write isolated ACP config");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_solaris"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_solaris"));
+    command
         .arg("--provider")
         .arg("anthropic")
         .arg("--api-key")
@@ -90,7 +114,8 @@ async fn acp_stdio_lifecycle_runs_without_a_real_provider() {
         .arg(workspace.path())
         .arg("--max-turns")
         .arg("1")
-        .arg("acp")
+        .args(manifest_acp_args());
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
