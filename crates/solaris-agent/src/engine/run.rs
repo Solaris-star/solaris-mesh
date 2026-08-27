@@ -525,10 +525,9 @@ impl AgentEngine {
             self.messages.push(Message::now(Role::User, tool_results.clone()));
             self.save_session()?;
             task_phase.complete(DurableTaskPhase::OutcomeUnknown)?;
-            return Err(AgentError::ReconciliationRequired {
-                task_key: "current durable task".to_owned(),
-                call_id: Some(round_call_id),
-            });
+            return Err(AgentError::SideEffectUnknown(format!(
+                "tool round {round_call_id} completed with an unknown side-effect outcome"
+            )));
         }
         task_phase.disarm();
 

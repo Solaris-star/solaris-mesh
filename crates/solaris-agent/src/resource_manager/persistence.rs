@@ -45,6 +45,8 @@ struct ResourceStateDelta {
     provider_rate: Option<ProviderRateWindow>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     applied_usage_effects_added: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    seen_tool_call_fingerprints_added: Vec<String>,
 }
 
 pub(super) struct RestoredResourceState {
@@ -163,7 +165,12 @@ pub(super) fn restore_state(manager: &ResourceManager, snapshot: ResourceStateSn
 
 impl ResourceStateDelta {
     fn between(before: &ResourceStateSnapshot, after: &ResourceStateSnapshot) -> Option<Self> {
-        if !before.applied_usage_effects.is_subset(&after.applied_usage_effects) {
+        if !before.applied_usage_effects.is_subset(&after.applied_usage_effects)
+            || !before
+                .usage
+                .seen_tool_call_fingerprints
+                .is_subset(&after.usage.seen_tool_call_fingerprints)
+        {
             return None;
         }
         let mut added: Vec<_> = after
@@ -172,17 +179,28 @@ impl ResourceStateDelta {
             .cloned()
             .collect();
         added.sort();
+        let fingerprints_added = after
+            .usage
+            .seen_tool_call_fingerprints
+            .difference(&before.usage.seen_tool_call_fingerprints)
+            .cloned()
+            .collect();
+        let mut usage = (before.usage != after.usage).then(|| after.usage.clone());
+        if let Some(usage) = usage.as_mut() {
+            usage.seen_tool_call_fingerprints.clear();
+        }
         Some(Self {
             schema_version: RESOURCE_DELTA_SCHEMA_VERSION,
             budget: (before.budget != after.budget).then(|| after.budget.clone()),
             provider_signals: (before.provider_signals != after.provider_signals)
                 .then(|| after.provider_signals.clone()),
-            usage: (before.usage != after.usage).then(|| after.usage.clone()),
+            usage,
             deadline_unix_ms: (before.deadline_unix_ms != after.deadline_unix_ms).then_some(OptionalDeadline {
                 value: after.deadline_unix_ms,
             }),
             provider_rate: (before.provider_rate != after.provider_rate).then(|| after.provider_rate.clone()),
             applied_usage_effects_added: added,
+            seen_tool_call_fingerprints_added: fingerprints_added,
         })
     }
 
@@ -200,7 +218,9 @@ impl ResourceStateDelta {
             state.provider_signals = value;
         }
         if let Some(value) = self.usage {
+            let seen = std::mem::take(&mut state.usage.seen_tool_call_fingerprints);
             state.usage = value;
+            state.usage.seen_tool_call_fingerprints = seen;
         }
         if let Some(value) = self.deadline_unix_ms {
             state.deadline_unix_ms = value.value;
@@ -209,6 +229,10 @@ impl ResourceStateDelta {
             state.provider_rate = value;
         }
         state.applied_usage_effects.extend(self.applied_usage_effects_added);
+        state
+            .usage
+            .seen_tool_call_fingerprints
+            .extend(self.seen_tool_call_fingerprints_added);
         Ok(())
     }
 }

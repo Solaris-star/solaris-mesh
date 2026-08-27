@@ -587,8 +587,74 @@ fn duplicate_fields_persist_in_checkpoint_and_delta() {
     assert_eq!(delta.payload["usage"]["duplicate_tool_calls"], 1);
     assert_eq!(delta.payload["usage"]["duplicate_call_rate"], 0.5);
     assert!(
-        delta.payload["usage"]["seen_tool_call_fingerprints"]
-            .as_array()
-            .is_some()
+        delta.payload["usage"].get("seen_tool_call_fingerprints").is_none(),
+        "resource delta must not rewrite the complete fingerprint history"
     );
+    assert_eq!(
+        delta.payload["seen_tool_call_fingerprints_added"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
+#[test]
+fn long_unique_sequence_persists_only_incremental_fingerprints_and_restores_exactly() {
+    use crate::runtime_ledger::{InMemoryRuntimeLedger, RuntimeLedger};
+
+    let ledger = Arc::new(InMemoryRuntimeLedger::default());
+    let run_id = RunId::from("duplicate-long-incremental");
+    let manager = ResourceManager::new(ResourceBudget::default());
+    manager
+        .attach_ledger(run_id.clone(), Arc::clone(&ledger) as Arc<dyn RuntimeLedger>)
+        .unwrap();
+    for index in 0..200 {
+        manager
+            .record_tool_calls_once_checked(
+                &format!("round-{index}"),
+                &[stat(
+                    "task:t|env:e",
+                    "read",
+                    serde_json::json!({"index": index}),
+                    ToolResultStatus::Executed,
+                )],
+            )
+            .unwrap();
+    }
+
+    let records = ledger.records_for_run(&run_id).unwrap();
+    let deltas: Vec<_> = records
+        .iter()
+        .filter(|record| record.record_type == "resource_usage_delta")
+        .collect();
+    assert!(!deltas.is_empty());
+    for delta in deltas {
+        assert!(delta.payload["usage"].get("seen_tool_call_fingerprints").is_none());
+        assert!(
+            delta.payload["seen_tool_call_fingerprints_added"]
+                .as_array()
+                .is_some_and(|values| values.len() <= 1)
+        );
+    }
+
+    let restored = ResourceManager::new(ResourceBudget::default());
+    restored
+        .attach_ledger(run_id, Arc::clone(&ledger) as Arc<dyn RuntimeLedger>)
+        .unwrap();
+    let usage = restored.usage();
+    assert_eq!(usage.tool_calls, 200);
+    assert_eq!(usage.seen_tool_call_fingerprints.len(), 200);
+
+    restored
+        .record_tool_calls_once_checked(
+            "round-duplicate",
+            &[stat(
+                "task:t|env:e",
+                "read",
+                serde_json::json!({"index": 42}),
+                ToolResultStatus::Executed,
+            )],
+        )
+        .unwrap();
+    assert_eq!(restored.usage().duplicate_tool_calls, 1);
 }
