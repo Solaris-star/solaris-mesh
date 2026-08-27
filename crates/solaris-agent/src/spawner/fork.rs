@@ -337,19 +337,7 @@ impl AgentSpawner {
         let outcome = match run_result {
             Ok(result) => sub_agent_result_from_engine(name, reservation.child_agent_id.clone(), result),
             Err(error) => {
-                let failure_class = match &error {
-                    crate::error::AgentError::Provider(provider) if provider.is_retryable() => {
-                        TaskFailureClass::Retryable
-                    }
-                    crate::error::AgentError::ApiError(_) => TaskFailureClass::Retryable,
-                    crate::error::AgentError::ReconciliationRequired { .. } => TaskFailureClass::ReconciliationRequired,
-                    crate::error::AgentError::UserAborted => TaskFailureClass::Cancelled,
-                    crate::error::AgentError::ToolCallMalformed { .. }
-                    | crate::error::AgentError::ToolCallFailures { .. } => TaskFailureClass::NonConvergent,
-                    crate::error::AgentError::Provider(_)
-                    | crate::error::AgentError::ResourceBudgetExceeded(_)
-                    | crate::error::AgentError::ContextTooLong { .. } => TaskFailureClass::NonRetryable,
-                };
+                let failure_class = error.failure_class();
                 spawn_failure(
                     &name,
                     solaris_types::spawner::AgentSpawnError {

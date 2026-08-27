@@ -97,7 +97,6 @@ fn legacy_inline_agent_outcome_remains_readable() {
         text: "legacy result".into(),
         usage: Default::default(),
         turns: 1,
-        failure_class: None,
         is_error: false,
     };
     runtime

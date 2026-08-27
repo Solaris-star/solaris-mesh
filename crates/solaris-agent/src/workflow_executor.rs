@@ -317,14 +317,20 @@ fn normalize_role_output(role_id: &str, schema: Option<&Value>, text: &str) -> R
 }
 
 fn workflow_failure_from_result(result: &SubAgentResult) -> WorkflowNodeError {
-    match result.status {
-        AgentOutcomeStatus::OutcomeUnknown => WorkflowNodeError::outcome_unknown(result.text.clone()),
-        AgentOutcomeStatus::ReconciliationRequired => WorkflowNodeError::reconciliation_required(result.text.clone()),
-        AgentOutcomeStatus::Cancelled => WorkflowNodeError::non_retryable(result.text.clone()),
-        AgentOutcomeStatus::Failed => WorkflowNodeError::retryable(result.text.clone()),
-        AgentOutcomeStatus::Completed => {
-            WorkflowNodeError::non_retryable("completed Agent result cannot be converted to a failure")
-        }
+    let failure_class = match result.status {
+        AgentOutcomeStatus::Completed => TaskFailureClass::NonRetryable,
+        AgentOutcomeStatus::Cancelled => result.failure_class.unwrap_or(TaskFailureClass::Cancelled),
+        AgentOutcomeStatus::Failed => result.failure_class.unwrap_or(TaskFailureClass::NonRetryable),
+        AgentOutcomeStatus::OutcomeUnknown => TaskFailureClass::OutcomeUnknown,
+        AgentOutcomeStatus::ReconciliationRequired => TaskFailureClass::ReconciliationRequired,
+    };
+    WorkflowNodeError {
+        failure_class,
+        message: if result.status == AgentOutcomeStatus::Completed {
+            "completed Agent result cannot be converted to a failure".to_owned()
+        } else {
+            result.text.clone()
+        },
     }
 }
 
@@ -985,6 +991,10 @@ impl AgentWorkflowExecutor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "workflow_failure_class_test.rs"]
+mod failure_class_tests;
 
 #[cfg(test)]
 #[path = "workflow_executor_test.rs"]

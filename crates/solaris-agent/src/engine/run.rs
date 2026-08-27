@@ -126,7 +126,6 @@ impl AgentEngine {
                     stop_reason: StopReason::MaxTurns,
                     usage: self.total_usage.clone(),
                     turns: guards.counted_turns(),
-                    failure_class: Some(TaskFailureClass::MaxTurns),
                 });
             }
 
@@ -173,7 +172,6 @@ impl AgentEngine {
                         stop_reason: outcome.stop_reason,
                         usage: self.total_usage.clone(),
                         turns: guards.counted_turns(),
-                        failure_class: None,
                     });
                 }
                 TurnOutcome::Truncated(outcome) => {
@@ -219,7 +217,6 @@ impl AgentEngine {
                                     stop_reason: StopReason::EndTurn,
                                     usage: self.total_usage.clone(),
                                     turns: guards.counted_turns(),
-                                    failure_class: None,
                                 });
                             }
                             TurnOutcome::Truncated(continuation) => {
@@ -513,8 +510,9 @@ impl AgentEngine {
             .collect::<Vec<_>>();
         debug_assert_eq!(tool_results.len(), tool_statuses.len());
         if let Some(context) = &self.execution_context {
+            let stats = self.tool_call_stats(tool_calls, &tool_statuses);
             context
-                .record_tool_calls_with_inputs_once(&round_call_id, tool_calls, &tool_statuses)
+                .record_tool_calls_once(&round_call_id, &stats)
                 .map_err(AgentError::ResourceBudgetExceeded)?;
         }
         let phase = if tool_statuses.contains(&ToolResultStatus::OutcomeUnknown) {
@@ -597,7 +595,6 @@ impl AgentEngine {
                 stop_reason: StopReason::EndTurn,
                 usage: self.total_usage.clone(),
                 turns: counted_turns,
-                failure_class: None,
             });
         }
 
@@ -634,7 +631,6 @@ impl AgentEngine {
             stop_reason: fallback_stop_reason,
             usage: self.total_usage.clone(),
             turns: counted_turns,
-            failure_class: Some(TaskFailureClass::NonConvergent),
         })
     }
 

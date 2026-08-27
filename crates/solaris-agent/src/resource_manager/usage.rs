@@ -15,10 +15,10 @@ impl Default for ResourceUsage {
             cache_read_tokens: 0,
             tool_calls: 0,
             useful_tool_calls: 0,
-            duplicate_tool_calls: 0,
-            seen_tool_call_fingerprints: Vec::new(),
             useful_call_rate: None,
+            duplicate_tool_calls: 0,
             duplicate_call_rate: None,
+            seen_tool_call_fingerprints: std::collections::BTreeSet::new(),
             cost: 0.0,
             cost_known: true,
         }

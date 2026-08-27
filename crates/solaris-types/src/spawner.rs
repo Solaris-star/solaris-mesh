@@ -430,8 +430,6 @@ pub struct AgentOutcome {
     pub usage: TokenUsage,
     pub turns: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_class: Option<TaskFailureClass>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -502,8 +500,6 @@ pub struct SubAgentResult {
     pub text: String,
     pub usage: TokenUsage,
     pub turns: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_class: Option<TaskFailureClass>,
     pub is_error: bool,
 }
 

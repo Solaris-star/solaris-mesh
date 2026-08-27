@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use solaris_types::identity::RunId;
 use solaris_types::message::TokenUsage;
 use solaris_types::provider_contract::ProviderSignals;
 use solaris_types::resource::{MAX_ACTIVE_AGENTS, MIN_ACTIVE_AGENTS, ResourceBudget};
-use solaris_types::tool::{ToolResultStatus, useful_call_rate};
+use solaris_types::tool::{ToolCallStat, ToolResultStatus, useful_call_rate};
 #[cfg(test)]
 use tokio::sync::Barrier;
 use tokio::sync::Notify;
@@ -49,18 +49,22 @@ pub struct ResourceUsage {
     /// Tool calls that executed or returned a valid cached result.
     #[serde(default)]
     pub useful_tool_calls: u64,
-    /// Calls whose canonical tool identity was already observed in the same scope.
-    #[serde(default)]
-    pub duplicate_tool_calls: u64,
-    /// Canonical tool-call identities retained for checkpoint and cold restore.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub seen_tool_call_fingerprints: Vec<String>,
     /// `useful_tool_calls / tool_calls`, or `None` before the first call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub useful_call_rate: Option<f64>,
+    /// Terminal tool calls whose fingerprint repeated an earlier call within
+    /// the same statistics scope.
+    #[serde(default)]
+    pub duplicate_tool_calls: u64,
     /// `duplicate_tool_calls / tool_calls`, or `None` before the first call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_call_rate: Option<f64>,
+    /// Fingerprints of tool calls already observed for this Run.
+    ///
+    /// Persisted so duplicate detection survives checkpoint/restore and
+    /// replay. Kept as a sorted set for deterministic serialization.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub seen_tool_call_fingerprints: BTreeSet<String>,
     pub cost: f64,
     /// Whether `cost` represents all recorded provider usage.
     ///
@@ -614,29 +618,17 @@ impl ResourceManager {
     ///
     /// The stable round call ID shares the same persisted applied-ID set used
     /// by provider usage, with a namespace prefix to prevent collisions.
-    #[cfg(test)]
+    ///
+    /// Each call carries a scope-stable fingerprint (tool name plus
+    /// canonicalized input plus task/environment scope). A call is a duplicate
+    /// when its fingerprint was already seen within this Run; the first
+    /// occurrence is never a duplicate. Fingerprints are persisted so
+    /// duplicates are still detected after checkpoint/restore and replay.
     pub(crate) fn record_tool_calls_once_checked(
         &self,
         round_call_id: &str,
-        statuses: &[ToolResultStatus],
+        calls: &[ToolCallStat],
     ) -> Result<(), String> {
-        let fingerprints = statuses
-            .iter()
-            .enumerate()
-            .map(|(index, _)| format!("legacy:{round_call_id}:{index}"))
-            .collect::<Vec<_>>();
-        self.record_tool_call_fingerprints_once_checked(round_call_id, statuses, &fingerprints)
-    }
-
-    pub(crate) fn record_tool_call_fingerprints_once_checked(
-        &self,
-        round_call_id: &str,
-        statuses: &[ToolResultStatus],
-        fingerprints: &[String],
-    ) -> Result<(), String> {
-        if statuses.len() != fingerprints.len() {
-            return Err("tool-call statuses and fingerprints have different lengths".to_owned());
-        }
         let applied_id = format!("tool-round:{round_call_id}");
         self.with_state_update(|| {
             let mut applied = self
@@ -649,37 +641,30 @@ impl ResourceManager {
             applied.insert(applied_id);
             drop(applied);
 
-            let round_calls = u64::try_from(statuses.len()).unwrap_or(u64::MAX);
+            let round_calls = u64::try_from(calls.len()).unwrap_or(u64::MAX);
             let round_useful =
-                u64::try_from(statuses.iter().filter(|status| status.is_useful_call()).count()).unwrap_or(u64::MAX);
-            let round_rate = useful_call_rate(statuses);
+                u64::try_from(calls.iter().filter(|call| call.status.is_useful_call()).count()).unwrap_or(u64::MAX);
+            let round_rate = useful_call_rate(&statuses_of(calls));
             let mut usage = self.usage.lock().unwrap_or_else(|error| error.into_inner());
-            let mut seen = usage
-                .seen_tool_call_fingerprints
-                .iter()
-                .cloned()
-                .collect::<HashSet<_>>();
-            let round_duplicates = fingerprints
-                .iter()
-                .filter(|fingerprint| !seen.insert((*fingerprint).clone()))
-                .count();
+            let mut round_duplicates = 0_u64;
+            for call in calls {
+                if !usage.seen_tool_call_fingerprints.insert(call.fingerprint.clone()) {
+                    round_duplicates = round_duplicates.saturating_add(1);
+                }
+            }
             usage.tool_calls = usage.tool_calls.saturating_add(round_calls);
             usage.useful_tool_calls = usage.useful_tool_calls.saturating_add(round_useful);
-            usage.duplicate_tool_calls = usage
-                .duplicate_tool_calls
-                .saturating_add(u64::try_from(round_duplicates).unwrap_or(u64::MAX));
-            usage.seen_tool_call_fingerprints = seen.into_iter().collect();
-            usage.seen_tool_call_fingerprints.sort();
+            usage.duplicate_tool_calls = usage.duplicate_tool_calls.saturating_add(round_duplicates);
             usage.refresh_useful_call_rate();
             usage.refresh_duplicate_call_rate();
             tracing::debug!(
                 round_calls,
                 round_useful,
                 round_useful_call_rate = ?round_rate,
+                round_duplicates,
                 total_calls = usage.tool_calls,
                 useful_calls = usage.useful_tool_calls,
                 useful_call_rate = ?usage.useful_call_rate,
-                round_duplicates,
                 duplicate_calls = usage.duplicate_tool_calls,
                 duplicate_call_rate = ?usage.duplicate_call_rate,
                 "recorded terminal tool-call statistics"
@@ -1018,9 +1003,17 @@ fn cost_epsilon(limit: f64) -> f64 {
     1e-12_f64.max(limit.abs() * 1e-12)
 }
 
+fn statuses_of(calls: &[ToolCallStat]) -> Vec<ToolResultStatus> {
+    calls.iter().map(|call| call.status).collect()
+}
+
 #[cfg(test)]
 #[path = "resource_manager_persistence_test.rs"]
 mod resource_manager_persistence_test;
+
+#[cfg(test)]
+#[path = "resource_manager_duplicate_test.rs"]
+mod resource_manager_duplicate_test;
 
 #[cfg(test)]
 #[path = "resource_manager_admission_regression_test.rs"]

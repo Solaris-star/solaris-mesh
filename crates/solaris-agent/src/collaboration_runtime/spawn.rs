@@ -724,7 +724,6 @@ fn agent_outcome_projection(result: &SubAgentResult) -> SubAgentResult {
         text: String::new(),
         usage: Default::default(),
         turns: 0,
-        failure_class: result.failure_class,
         is_error: result.is_error,
     }
 }

@@ -706,15 +706,8 @@ fn spawn_detached_session_release(engine: AgentEngine, registry: Arc<SessionClea
 }
 
 pub(super) fn agent_error(error: AgentError) -> AgentConversationError {
-    let failure_class = match &error {
-        AgentError::ReconciliationRequired { .. } => TaskFailureClass::ReconciliationRequired,
-        AgentError::UserAborted => TaskFailureClass::Cancelled,
-        AgentError::ToolCallMalformed { .. } | AgentError::ToolCallFailures { .. } => TaskFailureClass::NonConvergent,
-        AgentError::Provider(_) | AgentError::ApiError(_) => TaskFailureClass::OutcomeUnknown,
-        AgentError::ResourceBudgetExceeded(_) | AgentError::ContextTooLong { .. } => TaskFailureClass::NonRetryable,
-    };
     AgentConversationError {
-        failure_class,
+        failure_class: error.failure_class(),
         message: error.to_string(),
     }
 }

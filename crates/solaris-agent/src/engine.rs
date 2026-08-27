@@ -59,7 +59,6 @@ pub struct AgentResult {
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
     pub turns: usize,
-    pub failure_class: Option<solaris_types::runtime::TaskFailureClass>,
 }
 
 pub struct AgentEngine {
@@ -804,7 +803,6 @@ impl AgentEngine {
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
                     turns: 0,
-                    failure_class: None,
                 }))
             }
             Ok(CommandResult::Exit) => {
@@ -825,7 +823,6 @@ impl AgentEngine {
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
                     turns: 0,
-                    failure_class: None,
                 }))
             }
             Err(e) => {

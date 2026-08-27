@@ -83,31 +83,20 @@ fn run_task_admission_is_durable_and_idempotent_after_restore() {
     );
     let task_a = task(&run_id, &TaskId::from("task-a"));
     let task_b = task(&run_id, &TaskId::from("task-b"));
-    assert_eq!(
-        first
-            .register_runtime_tasks_admitted(&run_id, vec![task_a.clone(), task_b.clone()], 2)
-            .unwrap(),
-        vec![true, true]
-    );
-    assert_eq!(
-        first
-            .register_runtime_tasks_admitted(&run_id, vec![task_a.clone()], 2)
-            .unwrap(),
-        vec![false]
-    );
+    first
+        .admit_collaboration_tasks(&run_id, 2, vec![task_a.clone(), task_b.clone()])
+        .unwrap();
+    first
+        .admit_collaboration_tasks(&run_id, 2, vec![task_a.clone()])
+        .unwrap();
 
     let restored: CollaborationRuntime<()> = CollaborationRuntime::with_ledger(
         Scheduler::new(ResourcePolicy::new(2)),
         Arc::clone(&ledger) as Arc<dyn RuntimeLedger>,
     );
-    assert_eq!(
-        restored
-            .register_runtime_tasks_admitted(&run_id, vec![task_b], 2)
-            .unwrap(),
-        vec![false]
-    );
+    restored.admit_collaboration_tasks(&run_id, 2, vec![task_b]).unwrap();
     let error = restored
-        .register_runtime_tasks_admitted(&run_id, vec![task(&run_id, &TaskId::from("task-c"))], 2)
+        .admit_collaboration_tasks(&run_id, 2, vec![task(&run_id, &TaskId::from("task-c"))])
         .unwrap_err();
     assert!(error.to_string().contains("at most 2"));
 }
@@ -127,7 +116,7 @@ fn concurrent_run_task_admission_never_exceeds_the_durable_limit() {
         let barrier = Arc::clone(&barrier);
         std::thread::spawn(move || {
             barrier.wait();
-            runtime.register_runtime_tasks_admitted(&run_id, vec![task(&run_id, &TaskId::from(id))], 1)
+            runtime.admit_collaboration_tasks(&run_id, 1, vec![task(&run_id, &TaskId::from(id))])
         })
     });
     barrier.wait();

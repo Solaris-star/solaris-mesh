@@ -81,7 +81,12 @@ impl AgentEngine {
                         call_id: task.call_id.clone(),
                     });
                 }
-                return Err(AgentError::ApiError(reason));
+                return Err(AgentError::ReconciliationRequired {
+                    task_key: durable_resume
+                        .map(|task| task.task_key.clone())
+                        .unwrap_or_else(|| call_id.clone()),
+                    call_id: Some(call_id.clone()),
+                });
             }
         }
         execution_context
@@ -93,8 +98,8 @@ impl AgentEngine {
             .record_permission_decision(&effect_request, &evaluation, "provider_request")
             .map_err(|error| AgentError::ApiError(format!("provider permission persistence failed: {error}")))?;
         if evaluation.decision != PermissionDecision::Allow {
-            return Err(AgentError::ApiError(format!(
-                "provider request permission denied: {}",
+            return Err(AgentError::PermissionDenied(format!(
+                "provider request: {}",
                 evaluation.reason
             )));
         }

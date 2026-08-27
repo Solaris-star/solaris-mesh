@@ -86,6 +86,7 @@ fn sub_agent_result_from_engine(name: String, agent_id: AgentId, result: AgentRe
         agent_id: Some(agent_id),
         task_id: None,
         status,
+        failure_class: result.failure_class,
         output: Some(json!({"text": result.text.clone()})),
         text: result.text,
         usage: result.usage,
@@ -352,6 +353,7 @@ impl Drop for SpawnExecutionGuard {
                 agent_id: Some(self.reservation.child_agent_id.clone()),
                 task_id: None,
                 status: AgentOutcomeStatus::Cancelled,
+                failure_class: Some(TaskFailureClass::Cancelled),
                 output: Some(json!({"error": "child Agent cancelled because its owning operation was dropped"})),
                 text: "child Agent cancelled because its owning operation was dropped".to_owned(),
                 usage: TokenUsage::default(),
@@ -1642,7 +1644,7 @@ impl AgentSpawner {
                             .agent_outcome_by_identity(&self.run_id, &operation_id, &existing_agent)
                 {
                     let retryable_reattach = strategy == solaris_types::workflow::CollaborationStrategy::Supervisor
-                        && outcome.status == AgentOutcomeStatus::Failed
+                        && outcome.failure_class == Some(TaskFailureClass::Retryable)
                         && self
                             .lifecycle_runtime
                             .tasks()
@@ -1656,8 +1658,14 @@ impl AgentSpawner {
                         pending.remove(id);
                         let (state, failure_class) = match outcome.status {
                             AgentOutcomeStatus::Completed => (TaskState::Completed, None),
-                            AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, None),
-                            AgentOutcomeStatus::Failed => (TaskState::Failed, Some(TaskFailureClass::Retryable)),
+                            AgentOutcomeStatus::Cancelled => (
+                                TaskState::Cancelled,
+                                Some(outcome.failure_class.unwrap_or(TaskFailureClass::Cancelled)),
+                            ),
+                            AgentOutcomeStatus::Failed => (
+                                TaskState::Failed,
+                                Some(outcome.failure_class.unwrap_or(TaskFailureClass::NonRetryable)),
+                            ),
                             AgentOutcomeStatus::OutcomeUnknown => {
                                 has_unknown = true;
                                 needs_manual.push(id.clone());
@@ -1863,8 +1871,14 @@ impl AgentSpawner {
                     Ok(outcome) => {
                         let (state, failure_class) = match outcome.status {
                             AgentOutcomeStatus::Completed => (TaskState::Completed, None),
-                            AgentOutcomeStatus::Cancelled => (TaskState::Cancelled, None),
-                            AgentOutcomeStatus::Failed => (TaskState::Failed, Some(TaskFailureClass::Retryable)),
+                            AgentOutcomeStatus::Cancelled => (
+                                TaskState::Cancelled,
+                                Some(outcome.failure_class.unwrap_or(TaskFailureClass::Cancelled)),
+                            ),
+                            AgentOutcomeStatus::Failed => (
+                                TaskState::Failed,
+                                Some(outcome.failure_class.unwrap_or(TaskFailureClass::NonRetryable)),
+                            ),
                             AgentOutcomeStatus::OutcomeUnknown => {
                                 has_unknown = true;
                                 needs_manual.push(id.clone());

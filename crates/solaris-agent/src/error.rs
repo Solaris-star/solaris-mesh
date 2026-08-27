@@ -5,6 +5,14 @@ use solaris_types::runtime::TaskFailureClass;
 pub enum AgentError {
     #[error("API error: {0}")]
     ApiError(String),
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+    #[error("Operation outcome is unknown: {0}")]
+    OutcomeUnknown(String),
+    #[error("Side effect outcome is unknown: {0}")]
+    SideEffectUnknown(String),
+    #[error("Durable state requires reconciliation: {0}")]
+    DurableState(String),
     #[error(
         "provider repeatedly returned tool-call malformed outputs ({count}/{limit}); stopped to avoid wasting tokens"
     )]
@@ -32,7 +40,13 @@ impl AgentError {
     /// reconciliation failures are not.
     pub fn failure_class(&self) -> TaskFailureClass {
         match self {
-            AgentError::ApiError(_) => TaskFailureClass::Retryable,
+            AgentError::ApiError(_) => TaskFailureClass::NonRetryable,
+            AgentError::PermissionDenied(_) => TaskFailureClass::PermissionDenied,
+            AgentError::OutcomeUnknown(_) => TaskFailureClass::OutcomeUnknown,
+            AgentError::SideEffectUnknown(_) => TaskFailureClass::SideEffectUnknown,
+            AgentError::DurableState(_) | AgentError::ReconciliationRequired { .. } => {
+                TaskFailureClass::ReconciliationRequired
+            }
             AgentError::Provider(error) => {
                 if error.is_retryable() {
                     TaskFailureClass::Retryable
@@ -44,8 +58,11 @@ impl AgentError {
                 TaskFailureClass::NonConvergent
             }
             AgentError::UserAborted => TaskFailureClass::Cancelled,
-            AgentError::ReconciliationRequired { .. } => TaskFailureClass::ReconciliationRequired,
             AgentError::ResourceBudgetExceeded(_) | AgentError::ContextTooLong { .. } => TaskFailureClass::NonRetryable,
         }
     }
 }
+
+#[cfg(test)]
+#[path = "error_test.rs"]
+mod error_test;

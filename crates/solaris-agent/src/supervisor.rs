@@ -186,12 +186,22 @@ fn supervisor_outcome(outcome: AgentOutcome) -> SubAgentResult {
         .or(outcome.error.as_deref())
         .unwrap_or_default()
         .to_owned();
+    let output = match outcome.failure_class {
+        Some(failure_class) => {
+            let mut output = outcome.output;
+            if let Some(object) = output.as_object_mut() {
+                object.insert("failure_class".to_owned(), json!(failure_class));
+            }
+            output
+        }
+        None => outcome.output,
+    };
     SubAgentResult {
         name: outcome.handle.spec.config.name.clone(),
         agent_id: Some(outcome.handle.agent_id),
         task_id: Some(outcome.handle.task_id),
         status: outcome.status,
-        output: Some(outcome.output),
+        output: Some(output),
         text,
         usage: outcome.usage,
         turns: outcome.turns,

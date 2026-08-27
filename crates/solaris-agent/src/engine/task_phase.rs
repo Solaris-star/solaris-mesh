@@ -440,8 +440,6 @@ struct StoredTerminalResult {
     stop_reason: StopReason,
     usage: TokenUsage,
     turns: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    failure_class: Option<TaskFailureClass>,
 }
 
 impl From<&AgentResult> for StoredTerminalResult {
@@ -453,7 +451,6 @@ impl From<&AgentResult> for StoredTerminalResult {
             stop_reason: result.stop_reason,
             usage: result.usage.clone(),
             turns: result.turns,
-            failure_class: result.failure_class,
         }
     }
 }
@@ -472,6 +469,5 @@ fn decode_terminal_result(task: &StoredDurableTask) -> Result<AgentResult, Agent
         stop_reason: stored.stop_reason,
         usage: stored.usage,
         turns: stored.turns,
-        failure_class: stored.failure_class,
     })
 }
