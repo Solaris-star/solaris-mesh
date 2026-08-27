@@ -508,7 +508,7 @@ impl AgentSpawner {
 
     pub fn prepare_collaboration_handles(&self, handles: &[(AgentHandle, bool)]) -> Result<(), String> {
         self.lifecycle_runtime
-            .prepare_spawn_batch(&self.run_id, handles)
+            .prepare_spawn_batch(&self.run_id, handles, self.max_tasks_per_run())
             .map_err(|error| error.to_string())
     }
 

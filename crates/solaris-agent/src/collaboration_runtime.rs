@@ -459,7 +459,12 @@ impl<T> CollaborationRuntime<T> {
     /// by one spawn batch. Validation and the single durable record happen
     /// before any projection is changed, so partial preparation cannot leak a
     /// Team, coordinator membership, or Assigned Task.
-    pub fn prepare_spawn_batch(&self, run_id: &RunId, handles: &[(AgentHandle, bool)]) -> std::io::Result<()> {
+    pub fn prepare_spawn_batch(
+        &self,
+        run_id: &RunId,
+        handles: &[(AgentHandle, bool)],
+        max_tasks_per_run: usize,
+    ) -> std::io::Result<()> {
         let line = self.mutation.line_for(run_id);
         let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
         let mut prospective_teams = std::collections::HashMap::<TeamId, TeamRecord>::new();
@@ -585,10 +590,14 @@ impl<T> CollaborationRuntime<T> {
             }
         }
 
-        if new_teams.is_empty() && memberships.is_empty() && tasks.is_empty() {
+        if !tasks.is_empty() {
+            self.admit_collaboration_tasks(run_id, max_tasks_per_run, tasks.clone())
+                .map_err(std::io::Error::other)?;
+        }
+        if new_teams.is_empty() && memberships.is_empty() {
             return Ok(());
         }
-        let payload = json!({"teams": &new_teams, "memberships": &memberships, "tasks": &tasks});
+        let payload = json!({"teams": &new_teams, "memberships": &memberships});
         let record = self.ledger.append(
             run_id,
             DurabilityClass::SyncCritical,
@@ -612,15 +621,6 @@ impl<T> CollaborationRuntime<T> {
                 Some(agent_id.clone()),
                 "team_member_joined",
                 json!({"team_id": team_id, "agent_id": agent_id}),
-            );
-        }
-        for task in &tasks {
-            self.tasks.upsert(task.clone());
-            self.emit_durable_event(
-                &record,
-                task.owner_agent_id.clone(),
-                "task_created",
-                serde_json::to_value(task).unwrap_or_default(),
             );
         }
         Ok(())
