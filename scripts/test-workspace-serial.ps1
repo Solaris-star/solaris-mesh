@@ -50,6 +50,61 @@ function Invoke-TextCommand {
     return [pscustomobject]@{ value = $value; exit_code = $LASTEXITCODE }
 }
 
+function Invoke-GitPorcelainZ {
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = "git"
+    $start.Arguments = "status --porcelain=v1 -z -uall"
+    $start.WorkingDirectory = $repositoryRoot
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $start
+    if (-not $process.Start()) {
+        throw "Failed to start git status."
+    }
+    $output = $process.StandardOutput.ReadToEnd()
+    $errorOutput = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        throw "git status failed: $errorOutput"
+    }
+    return $output
+}
+
+function ConvertFrom-GitPorcelainZ {
+    param([AllowEmptyString()][string]$Value)
+    $entries = New-Object 'Collections.Generic.List[object]'
+    if ([string]::IsNullOrEmpty($Value)) {
+        return @()
+    }
+    $fields = $Value.Split([char[]]@([char]0), [StringSplitOptions]::None)
+    $index = 0
+    while ($index -lt $fields.Length -and -not [string]::IsNullOrEmpty($fields[$index])) {
+        $field = $fields[$index]
+        if ($field.Length -lt 4) {
+            throw "Malformed git porcelain entry."
+        }
+        $statusCode = $field.Substring(0, 2)
+        $path = $field.Substring(3)
+        $originalPath = $null
+        if ($statusCode.IndexOf('R') -ge 0 -or $statusCode.IndexOf('C') -ge 0) {
+            $index++
+            if ($index -ge $fields.Length -or [string]::IsNullOrEmpty($fields[$index])) {
+                throw "Malformed renamed git porcelain entry."
+            }
+            $originalPath = $fields[$index]
+        }
+        $entries.Add([pscustomobject]@{
+            status = $statusCode
+            path = $path
+            original_path = $originalPath
+        })
+        $index++
+    }
+    return $entries.ToArray()
+}
+
 function Get-AccountInfo {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -130,16 +185,25 @@ finally {
     $branch = Invoke-TextCommand git @('branch', '--show-current')
     $head = Invoke-TextCommand git @('rev-parse', 'HEAD')
     $commitTime = Invoke-TextCommand git @('show', '-s', '--format=%cI', 'HEAD')
-    $status = Invoke-TextCommand git @('status', '--porcelain=v1', '-uall')
+    $statusRaw = Invoke-GitPorcelainZ
+    $statusEntries = @(ConvertFrom-GitPorcelainZ -Value $statusRaw)
+    $statusText = ($statusEntries | ForEach-Object {
+        if ($_.original_path) {
+            "$($_.status) $($_.original_path) -> $($_.path)"
+        } else {
+            "$($_.status) $($_.path)"
+        }
+    }) -join "`n"
     $rust = Invoke-TextCommand rustc @('--version')
     $cargo = Invoke-TextCommand cargo @('--version')
     $dirtyFiles = @()
-    foreach ($line in ($status.value -split "`r?`n" | Where-Object { $_.Length -ge 4 })) {
-        $path = $line.Substring(3)
+    foreach ($entry in $statusEntries) {
+        $path = $entry.path
         $fullPath = Join-Path $repositoryRoot $path
         $dirtyFiles += [pscustomobject]@{
-            status = $line.Substring(0, 2)
+            status = $entry.status
             path = $path
+            original_path = $entry.original_path
             sha256 = if (Test-Path -LiteralPath $fullPath -PathType Leaf) { (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
         }
     }
@@ -149,10 +213,10 @@ finally {
         branch = $branch.value
         head = $head.value
         head_commit_time = $commitTime.value
-        dirty = -not [string]::IsNullOrWhiteSpace($status.value)
-        dirty_status = $status.value
+        dirty = ($statusEntries.Count -gt 0)
+        dirty_status = $statusText
         dirty_files = @($dirtyFiles)
-        evidence_kind = if ([string]::IsNullOrWhiteSpace($status.value)) { 'commit_bound' } else { 'head_plus_dirty_worktree' }
+        evidence_kind = if ($statusEntries.Count -eq 0) { 'commit_bound' } else { 'head_plus_dirty_worktree' }
         toolchain = [pscustomobject]@{
             rustc = $rust.value
             cargo = $cargo.value
