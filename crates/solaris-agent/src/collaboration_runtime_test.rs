@@ -193,7 +193,7 @@ fn supervisor_isolation_cannot_be_bypassed_by_omitting_team_id() {
     };
     assert!(
         runtime
-            .create_collaboration_task(&run, &team, &AgentId::from("worker-a"), worker_task)
+            .create_collaboration_task(&run, &team, &AgentId::from("worker-a"), 256, worker_task)
             .is_err()
     );
     let broadcast = runtime
@@ -235,6 +235,7 @@ fn only_supervisor_coordinator_can_cancel_a_queued_workflow_task_and_replay_is_s
             &run,
             &team,
             &coordinator,
+            256,
             TaskRecord {
                 run_id: run.clone(),
                 task_id: task_id.clone(),
@@ -282,6 +283,7 @@ fn only_supervisor_coordinator_can_cancel_a_queued_workflow_task_and_replay_is_s
                 &run,
                 &team,
                 &coordinator,
+                256,
                 TaskRecord {
                     run_id: run.clone(),
                     task_id: task_id.clone(),
@@ -811,6 +813,7 @@ fn jsonl_restart_restores_collaboration_projection() {
                 &run,
                 &team,
                 &root,
+                256,
                 TaskRecord {
                     run_id: run.clone(),
                     task_id: task_id.clone(),

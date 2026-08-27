@@ -481,7 +481,13 @@ impl AgentWorkflowExecutor {
             };
             self.spawner
                 .lifecycle_runtime()
-                .create_collaboration_task(self.spawner.run_id(), &runtime.team_id, &runtime.handle.agent_id, task)
+                .create_collaboration_task(
+                    self.spawner.run_id(),
+                    &runtime.team_id,
+                    &runtime.handle.agent_id,
+                    self.spawner.max_tasks_per_run(),
+                    task,
+                )
                 .map_err(|error| WorkflowNodeError::reconciliation_required(error.to_string()))?;
         }
         Ok(())

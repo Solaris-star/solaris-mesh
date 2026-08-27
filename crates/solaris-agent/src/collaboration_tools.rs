@@ -373,14 +373,21 @@ pub struct CreateTeamTaskTool {
     runtime: Arc<CollaborationRuntime<()>>,
     run_id: RunId,
     agent_id: AgentId,
+    max_tasks_per_run: usize,
 }
 
 impl CreateTeamTaskTool {
-    pub fn new(runtime: Arc<CollaborationRuntime<()>>, run_id: RunId, agent_id: AgentId) -> Self {
+    pub fn new(
+        runtime: Arc<CollaborationRuntime<()>>,
+        run_id: RunId,
+        agent_id: AgentId,
+        max_tasks_per_run: usize,
+    ) -> Self {
         Self {
             runtime,
             run_id,
             agent_id,
+            max_tasks_per_run,
         }
     }
 }
@@ -508,10 +515,13 @@ impl Tool for CreateTeamTaskTool {
             failure_class: None,
         };
         let durable_task_id = task.task_id.clone();
-        match self
-            .runtime
-            .create_collaboration_task(&self.run_id, &team_id, &self.agent_id, task)
-        {
+        match self.runtime.create_collaboration_task(
+            &self.run_id,
+            &team_id,
+            &self.agent_id,
+            self.max_tasks_per_run,
+            task,
+        ) {
             Ok(created) => ToolResult {
                 content: json!({"task_id": durable_task_id, "created": created, "revision": 0}).to_string(),
                 is_error: false,

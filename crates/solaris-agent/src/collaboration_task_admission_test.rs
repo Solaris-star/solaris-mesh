@@ -1,7 +1,7 @@
 use super::tasks::TaskAdmissionError;
 use super::{CollaborationRuntime, TaskSettlement};
 use crate::resource_policy::ResourcePolicy;
-use crate::runtime_ledger::{InMemoryRuntimeLedger, LedgerRecord, RuntimeLedger};
+use crate::runtime_ledger::{InMemoryRuntimeLedger, LedgerRecord, RuntimeLedger, SqliteRuntimeLedger};
 use crate::scheduler::Scheduler;
 use solaris_types::effect::DurabilityClass;
 use solaris_types::identity::{AgentId, OperationId, RunId, TaskId};
@@ -280,7 +280,7 @@ fn reviewer_task_counts_toward_the_quota() {
 }
 
 #[test]
-fn non_collaboration_tasks_do_not_consume_the_collaboration_quota() {
+fn workflow_tasks_consume_the_run_collaboration_quota() {
     let ledger = Arc::new(InMemoryRuntimeLedger::default());
     let runtime = runtime_with_ledger(ledger.clone());
     let run = RunId::from("admission-scoped");
@@ -293,7 +293,7 @@ fn non_collaboration_tasks_do_not_consume_the_collaboration_quota() {
         state: AgentLifecycleState::Active,
     });
 
-    // A workflow-namespaced task registered for the same run must not count.
+    // Workflow tasks share the same historical Run quota.
     let workflow_task = TaskRecord {
         run_id: run.clone(),
         task_id: TaskId::new(format!("workflow:{run}:node")),
@@ -313,11 +313,11 @@ fn non_collaboration_tasks_do_not_consume_the_collaboration_quota() {
     };
     runtime.register_runtime_task(&run, workflow_task).unwrap();
 
-    // The full collaboration quota remains available.
-    runtime
+    let error = runtime
         .admit_collaboration_tasks(&run, 1, vec![collaboration_task(&run, "only")])
-        .unwrap();
-    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 2);
+        .expect_err("a Workflow task already occupies the Run quota");
+    assert!(matches!(error, TaskAdmissionError::OverLimit { limit: 1 }));
+    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 1);
 }
 
 #[test]
@@ -388,7 +388,7 @@ impl RuntimeLedger for FailAfterLedger {
 }
 
 #[test]
-fn ledger_failure_mid_batch_persists_nothing_beyond_the_failure_point() {
+fn unsupported_ledger_admission_fails_closed() {
     let ledger = Arc::new(FailAfterLedger::default());
     let runtime = runtime_with_ledger(ledger.clone());
     let run = RunId::from("admission-crash");
@@ -407,14 +407,15 @@ fn ledger_failure_mid_batch_persists_nothing_beyond_the_failure_point() {
     assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 0);
 
     ledger.fail.store(false, Ordering::SeqCst);
-    runtime
+    let unsupported = runtime
         .admit_collaboration_tasks(
             &run,
             3,
             vec![collaboration_task(&run, "a"), collaboration_task(&run, "b")],
         )
-        .unwrap();
-    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 2);
+        .expect_err("a ledger without atomic admission must fail closed");
+    assert!(matches!(unsupported, TaskAdmissionError::Runtime(_)));
+    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 0);
 }
 
 #[test]
@@ -460,4 +461,32 @@ fn admission_after_settlement_still_counts_the_task() {
         .admit_collaboration_tasks(&run, 1, vec![collaboration_task(&run, "other")])
         .expect_err("a settled task still occupies its quota slot");
     assert!(matches!(error, TaskAdmissionError::OverLimit { limit: 1 }));
+}
+
+#[test]
+fn two_sqlite_runtimes_cannot_race_past_the_run_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("runtime.sqlite3");
+    let first_ledger = Arc::new(SqliteRuntimeLedger::open(&database).unwrap());
+    let second_ledger = Arc::new(SqliteRuntimeLedger::open(&database).unwrap());
+    let first = runtime_with_ledger(first_ledger.clone());
+    let second = runtime_with_ledger(second_ledger.clone());
+    let run = RunId::from("sqlite-cross-runtime-admission");
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+
+    let workers = [(first, "a"), (second, "b")].map(|(runtime, id)| {
+        let run = run.clone();
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            runtime.admit_collaboration_tasks(&run, 1, vec![collaboration_task(&run, id)])
+        })
+    });
+    barrier.wait();
+    let results = workers.map(|worker| worker.join().unwrap());
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    assert_eq!(durable_task_created_count(first_ledger.as_ref(), &run), 1);
+    assert_eq!(durable_task_created_count(second_ledger.as_ref(), &run), 1);
 }

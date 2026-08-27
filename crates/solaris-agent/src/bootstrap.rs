@@ -784,6 +784,7 @@ impl AgentBootstrap {
             Arc::clone(&self.collaboration_runtime),
             self.run_id.clone(),
             self.root_agent_id.clone(),
+            self.config.multi_agent.max_tasks_per_run as usize,
         )));
         registry.register(Box::new(HandoffTaskTool::new(
             Arc::clone(&self.collaboration_runtime),

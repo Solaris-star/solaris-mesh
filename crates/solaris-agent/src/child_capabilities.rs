@@ -292,7 +292,7 @@ impl ChildCapabilityBlueprint {
             )
             .with_shell_executor(Arc::new(EffectSkillShellExecutor::new(execution_context))),
         ));
-        registry.register(Box::new(SpawnTool::new(spawner)));
+        registry.register(Box::new(SpawnTool::new(Arc::clone(&spawner))));
         registry.register(Box::new(SendAgentMessageTool::new(
             Arc::clone(&runtime),
             run_id.clone(),
@@ -316,6 +316,7 @@ impl ChildCapabilityBlueprint {
             Arc::clone(&runtime),
             run_id.clone(),
             agent_id.clone(),
+            spawner.max_tasks_per_run(),
         )));
         registry.register(Box::new(HandoffTaskTool::new(
             Arc::clone(&runtime),

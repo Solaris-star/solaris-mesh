@@ -5,7 +5,7 @@ use crate::scheduler::Scheduler;
 #[test]
 fn create_team_task_effect_uses_the_durable_team_scoped_task_id() {
     let runtime = Arc::new(CollaborationRuntime::new(Scheduler::new(ResourcePolicy::new(1))));
-    let tool = CreateTeamTaskTool::new(runtime, RunId::from("run"), AgentId::from("coordinator"));
+    let tool = CreateTeamTaskTool::new(runtime, RunId::from("run"), AgentId::from("coordinator"), 256);
     let team_a = tool.describe_effect(&json!({"team_id": "alpha", "task_id": "review"}));
     let team_b = tool.describe_effect(&json!({"team_id": "beta", "task_id": "review"}));
 
@@ -43,7 +43,7 @@ async fn typed_team_task_requires_key_and_preserves_content_scope_and_dependenci
         )
         .unwrap();
     runtime.join_team(&run_id, &team_id, coordinator.clone()).unwrap();
-    let tool = CreateTeamTaskTool::new(Arc::clone(&runtime), run_id, coordinator);
+    let tool = CreateTeamTaskTool::new(Arc::clone(&runtime), run_id, coordinator, 256);
     let typed = json!({
         "team_id": team_id,
         "task_id": "review",
@@ -260,4 +260,38 @@ async fn prepared_broadcast_replays_after_capacity_is_full() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn create_team_task_cannot_bypass_the_run_quota() {
+    let runtime = Arc::new(CollaborationRuntime::new(Scheduler::new(ResourcePolicy::new(1))));
+    let run_id = RunId::from("team-task-quota-run");
+    let coordinator = AgentId::from("coordinator");
+    runtime.agents().upsert(solaris_types::runtime::AgentRecord {
+        run_id: run_id.clone(),
+        agent_id: coordinator.clone(),
+        team_id: None,
+        parent_agent_id: None,
+        state: solaris_types::runtime::AgentLifecycleState::Active,
+    });
+    let team_id = TeamId::from("team-task-quota");
+    runtime
+        .create_collaboration_team(
+            run_id.clone(),
+            team_id.clone(),
+            "quota",
+            solaris_types::workflow::CollaborationStrategy::Supervisor,
+            Some(coordinator.clone()),
+        )
+        .unwrap();
+    runtime.join_team(&run_id, &team_id, coordinator.clone()).unwrap();
+    let tool = CreateTeamTaskTool::new(Arc::clone(&runtime), run_id, coordinator, 1);
+
+    let first = tool.execute(json!({"team_id": team_id, "task_id": "first"})).await;
+    let second = tool.execute(json!({"team_id": team_id, "task_id": "second"})).await;
+
+    assert!(!first.is_error, "{}", first.content);
+    assert!(second.is_error);
+    assert!(second.content.contains("at most 1"), "{}", second.content);
+    assert_eq!(runtime.tasks().snapshot().len(), 1);
 }

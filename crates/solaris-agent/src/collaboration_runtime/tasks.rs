@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -37,37 +37,34 @@ impl<T> CollaborationRuntime<T> {
         }
     }
 
-    pub fn create_collaboration_task(
+    pub(crate) fn create_collaboration_task(
         &self,
         run_id: &RunId,
         team_id: &TeamId,
         created_by: &AgentId,
+        max_tasks_per_run: usize,
         mut task: TaskRecord,
-    ) -> std::io::Result<bool> {
+    ) -> Result<bool, TaskAdmissionError> {
         let team = self
             .teams
             .get(team_id)
             .ok_or_else(|| std::io::Error::other(format!("unknown team: {team_id}")))?;
         if &team.run_id != run_id || !team.members.contains(created_by) {
-            return Err(std::io::Error::other(
-                "collaboration task creator must belong to the requested team/run",
-            ));
+            return Err(
+                std::io::Error::other("collaboration task creator must belong to the requested team/run").into(),
+            );
         }
         if team.strategy == CollaborationStrategy::Supervisor && team.coordinator.as_ref() != Some(created_by) {
-            return Err(std::io::Error::other(
-                "only the Supervisor coordinator may create Team tasks",
-            ));
+            return Err(std::io::Error::other("only the Supervisor coordinator may create Team tasks").into());
         }
         if task.team_id.as_ref() != Some(team_id) {
-            return Err(std::io::Error::other(
-                "collaboration task must carry the requested Team identity",
-            ));
+            return Err(std::io::Error::other("collaboration task must carry the requested Team identity").into());
         }
         let owner = task.owner_agent_id.clone();
         if let Some(owner) = owner.as_ref()
             && !team.members.contains(owner)
         {
-            return Err(std::io::Error::other("collaboration task owner is not a team member"));
+            return Err(std::io::Error::other("collaboration task owner is not a team member").into());
         }
         task.state = if owner.is_some() {
             TaskState::Assigned
@@ -77,7 +74,9 @@ impl<T> CollaborationRuntime<T> {
         task.revision = 0;
         task.outcome_ref = None;
         task.failure_class = None;
-        self.register_runtime_task(run_id, task)
+        let created = self.tasks.get(&task.task_id).is_none();
+        self.admit_collaboration_tasks(run_id, max_tasks_per_run, vec![task])?;
+        Ok(created)
     }
 
     pub fn register_runtime_task(&self, run_id: &RunId, task: TaskRecord) -> std::io::Result<bool> {
@@ -132,77 +131,28 @@ impl<T> CollaborationRuntime<T> {
         for task in &tasks {
             self.validate_runtime_task(run_id, task)?;
         }
-        let line = self.mutation.line_for(run_id);
-        let _guard = line.lock().unwrap_or_else(|error| error.into_inner());
-        let durable_created = self.durable_task_created_map_locked(run_id)?;
-        let prefix = format!("collaboration:{run_id}:");
-        let existing = durable_created
-            .values()
-            .filter(|task| task.task_id.as_str().starts_with(&prefix))
-            .count();
-
-        let mut admitted = Vec::new();
-        let mut seen = HashSet::new();
-        let mut replayed = 0usize;
+        let records = self
+            .ledger
+            .admit_collaboration_tasks(run_id, max_tasks_per_run, &tasks)
+            .map_err(|error| {
+                if error.to_string().contains("accepts at most") {
+                    TaskAdmissionError::OverLimit {
+                        limit: max_tasks_per_run,
+                    }
+                } else {
+                    TaskAdmissionError::Runtime(error)
+                }
+            })?;
+        for record in records {
+            let task: TaskRecord = serde_json::from_value(record.payload)
+                .map_err(|error| TaskAdmissionError::Runtime(std::io::Error::other(error.to_string())))?;
+            self.tasks.upsert(task);
+        }
         for task in tasks {
-            if let Some(created) = durable_created.get(&task.task_id) {
-                if created != &task {
-                    return Err(std::io::Error::other(format!(
-                        "runtime task {} was durably created with different metadata",
-                        task.task_id
-                    ))
-                    .into());
-                }
-                if self.tasks.get(&task.task_id).is_none() {
-                    self.tasks.upsert(created.clone());
-                }
-                replayed += 1;
-                continue;
+            if self.tasks.get(&task.task_id).is_none() {
+                self.tasks.upsert(task);
             }
-            if !seen.insert(task.task_id.clone()) {
-                return Err(std::io::Error::other(format!(
-                    "collaboration batch contains duplicate task {}",
-                    task.task_id
-                ))
-                .into());
-            }
-            if let Some(existing) = self.tasks.get(&task.task_id)
-                && existing != task
-            {
-                return Err(std::io::Error::other(format!(
-                    "runtime task {} already exists with different metadata",
-                    task.task_id
-                ))
-                .into());
-            }
-            admitted.push(task);
         }
-
-        let total = existing + admitted.len();
-        if total > max_tasks_per_run {
-            tracing::debug!(
-                run_id = %run_id,
-                existing,
-                admitted = admitted.len(),
-                limit = max_tasks_per_run,
-                "rejecting collaboration batch that exceeds the Run task quota"
-            );
-            return Err(TaskAdmissionError::OverLimit {
-                limit: max_tasks_per_run,
-            });
-        }
-
-        for task in admitted {
-            self.persist_new_task_created_locked(run_id, task)?;
-        }
-        tracing::debug!(
-            run_id = %run_id,
-            existing,
-            replayed,
-            admitted = seen.len(),
-            limit = max_tasks_per_run,
-            "durable collaboration task admission"
-        );
         Ok(())
     }
 

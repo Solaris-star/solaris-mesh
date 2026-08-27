@@ -11,6 +11,7 @@ use serde_json::Value;
 use solaris_types::effect::DurabilityClass;
 use solaris_types::identity::RunId;
 use solaris_types::plan::PlanArtifact;
+use solaris_types::runtime::TaskRecord;
 
 #[path = "runtime_ledger_export.rs"]
 mod runtime_ledger_export;
@@ -22,6 +23,8 @@ mod runtime_ledger_migration;
 mod runtime_ledger_mutation;
 #[path = "runtime_ledger_plan.rs"]
 mod runtime_ledger_plan;
+#[path = "runtime_ledger_task_admission.rs"]
+mod runtime_ledger_task_admission;
 #[cfg(test)]
 #[path = "runtime_ledger_test_support.rs"]
 mod runtime_ledger_test_support;
@@ -45,6 +48,7 @@ use runtime_ledger_jsonl::{JsonlLedgerState, JsonlWriter};
 use runtime_ledger_migration::{import_jsonl_explicit, import_jsonl_once, initialize_sqlite_schema};
 pub use runtime_ledger_mutation::RunMutationCoordinator;
 use runtime_ledger_plan::{record_plan_artifact_default, record_plan_artifact_sqlite};
+use runtime_ledger_task_admission::{admit_collaboration_tasks_in_memory, admit_collaboration_tasks_sqlite};
 #[cfg(test)]
 pub(crate) use runtime_ledger_test_support::forward_workflow_mutation_lease;
 #[cfg(test)]
@@ -163,6 +167,20 @@ pub trait RuntimeLedger: Send + Sync {
         identity_fields: &[&str],
         payload: Value,
     ) -> std::io::Result<LedgerRecord>;
+
+    /// Atomically admits new collaboration tasks against one Run-wide quota.
+    /// Existing identical tasks are replays and consume no additional quota.
+    fn admit_collaboration_tasks(
+        &self,
+        _run_id: &RunId,
+        _max_tasks: usize,
+        _tasks: &[TaskRecord],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        Err(io::Error::new(
+            ErrorKind::Unsupported,
+            "runtime ledger does not support atomic collaboration task admission",
+        ))
+    }
 
     fn run_ids(&self) -> std::io::Result<Vec<RunId>>;
 
@@ -378,6 +396,16 @@ impl RuntimeLedger for InMemoryRuntimeLedger {
             identity_fields,
             payload,
         )
+    }
+
+    fn admit_collaboration_tasks(
+        &self,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        admit_collaboration_tasks_in_memory(&mut state, run_id, max_tasks, tasks)
     }
 
     fn run_ids(&self) -> std::io::Result<Vec<RunId>> {
@@ -714,6 +742,15 @@ impl RuntimeLedger for SqliteRuntimeLedger {
             identity_fields,
             payload,
         )
+    }
+
+    fn admit_collaboration_tasks(
+        &self,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        admit_collaboration_tasks_sqlite(self, run_id, max_tasks, tasks)
     }
 
     fn run_ids(&self) -> io::Result<Vec<RunId>> {

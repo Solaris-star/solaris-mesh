@@ -429,6 +429,10 @@ impl AgentSpawner {
         self
     }
 
+    pub(crate) const fn max_tasks_per_run(&self) -> usize {
+        self.max_tasks_per_run as usize
+    }
+
     pub fn resource_manager(&self) -> Arc<ResourceManager> {
         Arc::clone(&self.resources)
     }
