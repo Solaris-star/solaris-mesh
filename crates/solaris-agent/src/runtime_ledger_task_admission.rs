@@ -15,7 +15,7 @@ fn decode_task(payload: &[u8]) -> io::Result<TaskRecord> {
     serde_json::from_slice(payload).map_err(|error| io::Error::other(format!("decode task_created payload: {error}")))
 }
 
-fn validate_batch(
+pub(super) fn validate_collaboration_batch(
     existing: &HashMap<TaskId, TaskRecord>,
     max_tasks: usize,
     tasks: &[TaskRecord],
@@ -66,7 +66,7 @@ pub(super) fn admit_collaboration_tasks_in_memory(
                 .map_err(|error| io::Error::other(format!("decode task_created payload: {error}")))
         })
         .collect::<io::Result<HashMap<_, _>>>()?;
-    let admitted = validate_batch(&existing, max_tasks, tasks)?;
+    let admitted = validate_collaboration_batch(&existing, max_tasks, tasks)?;
     let mut records = Vec::with_capacity(admitted.len());
     for task in admitted {
         state.next_sequence = state
@@ -125,7 +125,7 @@ pub(super) fn admit_collaboration_tasks_sqlite(
         }
         existing
     };
-    let admitted = validate_batch(&existing, max_tasks, tasks)?;
+    let admitted = validate_collaboration_batch(&existing, max_tasks, tasks)?;
     let timestamp_unix_ms = chrono::Utc::now().timestamp_millis();
     let durability = DurabilityClass::SyncCritical;
     let durability_code = durability_code(durability).expect("sync critical is persisted");

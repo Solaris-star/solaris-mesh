@@ -63,6 +63,15 @@ macro_rules! forward_compare_and_append {
                 .append_under_workflow_lease(lease, now_unix_ms, durability, record_type, payload)
         }
 
+        fn admit_collaboration_tasks(
+            &self,
+            run_id: &solaris_types::identity::RunId,
+            max_tasks: usize,
+            tasks: &[solaris_types::runtime::TaskRecord],
+        ) -> std::io::Result<Vec<$crate::runtime_ledger::LedgerRecord>> {
+            self.inner.admit_collaboration_tasks(run_id, max_tasks, tasks)
+        }
+
         fn compare_and_append_under_workflow_lease(
             &self,
             lease: &$crate::runtime_ledger::WorkflowMutationLease,

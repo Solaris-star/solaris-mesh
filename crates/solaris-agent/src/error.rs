@@ -34,6 +34,15 @@ pub enum AgentError {
 }
 
 impl AgentError {
+    /// Classify a Provider failure observed after the durable effect intent was
+    /// recorded and the request was dispatched.
+    pub fn from_dispatched_provider(error: ProviderError) -> Self {
+        match error {
+            ProviderError::Connection(_) | ProviderError::Http(_) => Self::OutcomeUnknown(error.to_string()),
+            error => Self::Provider(error),
+        }
+    }
+
     /// Typed failure classification for retry decisions.
     ///
     /// Transient provider failures are Retryable; convergence, budget, and

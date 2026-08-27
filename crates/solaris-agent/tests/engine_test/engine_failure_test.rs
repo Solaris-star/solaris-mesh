@@ -360,7 +360,10 @@ async fn test_engine_api_error_handling() {
         .unwrap_err();
 
     match err {
-        AgentError::ApiError(msg) => assert_eq!(msg, "test error"),
-        other => panic!("expected ApiError(\"test error\"), got: {:?}", other),
+        AgentError::OutcomeUnknown(msg) => {
+            assert!(msg.contains("provider stream terminated after request execution"));
+            assert!(msg.contains("test error"));
+        }
+        other => panic!("expected OutcomeUnknown, got: {other:?}"),
     }
 }

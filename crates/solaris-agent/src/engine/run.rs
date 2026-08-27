@@ -705,8 +705,10 @@ impl AgentEngine {
                     stop_reason = sr;
                     usage = u;
                 }
-                LlmEvent::Error(e) => {
-                    return Err(AgentError::ApiError(e));
+                LlmEvent::Error(error) => {
+                    return Err(AgentError::OutcomeUnknown(format!(
+                        "provider stream terminated after request execution: {error}"
+                    )));
                 }
             }
         }

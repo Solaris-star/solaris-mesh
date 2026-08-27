@@ -76,6 +76,25 @@ impl RuntimeLedger for SupervisorRecoveryLedger {
         self.inner.logical_append_capability()
     }
 
+    fn admit_collaboration_tasks(
+        &self,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+    ) -> std::io::Result<Vec<LedgerRecord>> {
+        if let SupervisorRecoveryFault::TaskCreate { task_key } = &self.fault
+            && tasks
+                .iter()
+                .any(|task| task.task_key.as_deref() == Some(task_key.as_str()))
+            && self.armed.swap(false, Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other(format!(
+                "injected Supervisor failure before task_created for {task_key}"
+            )));
+        }
+        self.inner.admit_collaboration_tasks(run_id, max_tasks, tasks)
+    }
+
     fn compare_and_append(
         &self,
         run_id: &RunId,

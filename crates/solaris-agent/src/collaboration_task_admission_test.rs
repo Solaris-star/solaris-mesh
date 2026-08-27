@@ -388,34 +388,19 @@ impl RuntimeLedger for FailAfterLedger {
 }
 
 #[test]
-fn unsupported_ledger_admission_fails_closed() {
+fn forwarding_ledger_uses_inner_atomic_admission() {
     let ledger = Arc::new(FailAfterLedger::default());
     let runtime = runtime_with_ledger(ledger.clone());
-    let run = RunId::from("admission-crash");
+    let run = RunId::from("admission-forwarding");
 
-    // Fail on the second append so only the first task is persisted.
-    ledger.fail.store(true, Ordering::SeqCst);
-    let result = runtime.admit_collaboration_tasks(
-        &run,
-        3,
-        vec![collaboration_task(&run, "a"), collaboration_task(&run, "b")],
-    );
-    assert!(result.is_err());
-    // The quota check passed but persistence failed; nothing durable leaked
-    // beyond what the ledger actually accepted (here, zero because the first
-    // append already saw the failure flag).
-    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 0);
-
-    ledger.fail.store(false, Ordering::SeqCst);
-    let unsupported = runtime
+    runtime
         .admit_collaboration_tasks(
             &run,
             3,
             vec![collaboration_task(&run, "a"), collaboration_task(&run, "b")],
         )
-        .expect_err("a ledger without atomic admission must fail closed");
-    assert!(matches!(unsupported, TaskAdmissionError::Runtime(_)));
-    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 0);
+        .unwrap();
+    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 2);
 }
 
 #[test]

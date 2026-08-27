@@ -459,7 +459,10 @@ impl solaris_providers::LlmProvider for SupervisorRetryProvider {
                 .unwrap();
             Ok(receiver)
         } else {
-            Err(solaris_providers::ProviderError::Connection("transient".to_owned()))
+            Err(solaris_providers::ProviderError::RateLimited {
+                retry_after_ms: 1,
+                body: None,
+            })
         }
     }
 }

@@ -48,6 +48,19 @@ For a Spawn request, `single` means the parent Agent keeps the work and no
 Child Agent is created; workflow nodes may still use their ordinary single
 executor. Task IDs are checked before execution; duplicate IDs, missing
 dependencies, self-dependencies, and cycles are rejected as one request.
+`max_tasks_per_run` is a durable historical quota for the entire Run: direct
+Spawn batches, Workflow tasks, `CreateTeamTask`, configured Supervisor dispatch,
+and the independent reviewer all use the same atomic ledger admission. Replays
+of the same logical task do not consume another slot, while completed, failed,
+and cancelled tasks continue to occupy their original slot. `single` creates no
+Child task and therefore consumes no slot. Across SQLite Runtime instances, the
+quota check and all `task_created` records commit in one immediate transaction.
+
+Workflow retry policy is type-based. Only an explicit `Retryable` failure class
+authorizes automatic retry; a bare `Failed` result is `NonRetryable`, and
+permission, cancellation, convergence, turn-budget, unknown side-effect, unknown
+outcome, and reconciliation failures retain their typed terminal or recovery
+semantics.
 
 The CLI also exposes the settings directly:
 
@@ -72,7 +85,7 @@ The Linux Full runner requires Bubblewrap at `/usr/bin/bwrap` or `/bin/bwrap`, t
 
 The Linux sandbox exposes the workspace and private `HOME`, temporary, and runtime-state directories as writable. Its supported read-only host toolchain roots are `/bin`, `/usr`, `/lib`, `/lib64`, `/sbin`, and `/nix/store` when present, plus a small fixed set of `/etc` loader, identity, certificate, resolver, host, and timezone files. Toolchains or runtime dependencies stored under `/opt`, the real user home, or another host path are not advertised as supported and may fail inside the sandbox. Solaris does not mount the complete host root because a read-only mount would still expose pathname Unix sockets.
 
-The Windows Full runner uses the packaged helper to create an AppContainer target with no network capabilities. Temporary ACL leases grant only the launch profile access to the workspace and private directories, keep Runtime state unavailable, and remain correct for concurrent launches in one Solaris process. The outer helper and all descendants remain in a kill-on-close Job Object, which is terminated immediately when the sandbox target completes so background descendants cannot outlive the operation. A real probe verifies the AppContainer token, Job membership, and startup handshake before Full is cached.
+The Windows Full runner uses the packaged helper to create an AppContainer target with no network capabilities. Temporary ACL leases grant only the launch profile access to the workspace and private directories, keep Runtime state unavailable, and remain correct for concurrent launches in one Solaris process. The outer helper and all descendants remain in a kill-on-close Job Object, which is terminated immediately when the sandbox target completes so background descendants cannot outlive the operation. A real probe launches and waits for an AppContainer target before Full is cached; if the current account cannot initialize that child, the probe returns Partial or Unavailable before the requested target starts. The native Windows suite currently passes 39 tests under an interactive Administrator account; this is not a claim that every Windows service account supports AppContainer startup.
 
 The macOS Full runner uses the fixed `/usr/bin/sandbox-exec`, a restrictive Seatbelt profile, and the packaged helper. It retains the opened workspace directory identity through managed-child cleanup, checks that the configured path still names that object immediately before spawn, and rejects protected aliases, external hardlinks, sockets, and FIFOs before target execution. A guardian owns the target process group and verifies descendant termination; Seatbelt denies `setsid`, `setpgid`, and `posix_spawn` so a managed descendant cannot detach. Auto processes have no direct network access. Exact approved HTTP(S) destinations are available only through the per-launch Host proxy, which revalidates DNS and destination IPs. Full is cached only after a real probe verifies workspace writes, external file and non-proxy loopback denial, target startup, and the helper handshake. The implementation and native CI suite are present, but the current change still has no macOS runtime evidence.
 

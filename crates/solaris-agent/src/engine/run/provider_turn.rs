@@ -147,7 +147,7 @@ impl AgentEngine {
                     )));
                 }
                 task_phase.complete(DurableTaskPhase::ProviderCompleted)?;
-                return Err(error.into());
+                return Err(AgentError::from_dispatched_provider(error));
             }
         };
         let outcome = match self.consume_stream(&mut rx, emit_assistant_text).await {
