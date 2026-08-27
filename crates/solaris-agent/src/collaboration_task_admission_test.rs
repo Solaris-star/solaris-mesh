@@ -1,7 +1,9 @@
 use super::tasks::TaskAdmissionError;
 use super::{CollaborationRuntime, TaskSettlement};
 use crate::resource_policy::ResourcePolicy;
-use crate::runtime_ledger::{InMemoryRuntimeLedger, LedgerRecord, RuntimeLedger, SqliteRuntimeLedger};
+use crate::runtime_ledger::{
+    InMemoryRuntimeLedger, JsonlRuntimeLedger, LedgerRecord, RuntimeLedger, SqliteRuntimeLedger,
+};
 use crate::scheduler::Scheduler;
 use solaris_types::effect::DurabilityClass;
 use solaris_types::identity::{AgentId, OperationId, RunId, TaskId};
@@ -40,6 +42,29 @@ fn durable_task_created_count(ledger: &dyn RuntimeLedger, run_id: &RunId) -> usi
         .iter()
         .filter(|record| record.record_type == "task_created")
         .count()
+}
+
+#[test]
+fn jsonl_task_admission_fails_closed_instead_of_partially_appending() {
+    let directory = tempfile::tempdir().unwrap();
+    let ledger = Arc::new(JsonlRuntimeLedger::open(directory.path().join("legacy.jsonl")).unwrap());
+    let runtime = runtime_with_ledger(ledger.clone());
+    let run = RunId::from("jsonl-admission-fails-closed");
+
+    let error = runtime
+        .admit_collaboration_tasks(
+            &run,
+            2,
+            vec![collaboration_task(&run, "a"), collaboration_task(&run, "b")],
+        )
+        .expect_err("JSONL cannot guarantee atomic Run task admission");
+
+    assert!(matches!(
+        error,
+        TaskAdmissionError::Runtime(ref source) if source.kind() == std::io::ErrorKind::Unsupported
+    ));
+    assert_eq!(durable_task_created_count(ledger.as_ref(), &run), 0);
+    assert!(runtime.tasks().snapshot().is_empty());
 }
 
 #[test]

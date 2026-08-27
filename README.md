@@ -111,6 +111,12 @@ or at most 256 when configured. Replays and retries reuse their logical task
 identity; `single` creates no Child Agent task, while an automatic independent
 reviewer consumes one task slot.
 
+Workflow retries are failure-class based. Only an explicit `Retryable` failure
+is retried automatically. A bare `Failed` result defaults to `NonRetryable`;
+permission, cancellation, convergence, turn-budget, `SideEffectUnknown`,
+`OutcomeUnknown`, and `ReconciliationRequired` keep their terminal or
+reconciliation semantics and are not silently replayed.
+
 `CollaborationRunSummary` reports `duplicate_call_rate` for terminal tool calls.
 A duplicate is a later call in the same Agent execution scope with the same
 stable tool name, canonical JSON input, and execution-environment snapshot.

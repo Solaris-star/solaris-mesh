@@ -2,11 +2,12 @@ mod common;
 
 use common::{MockTool, auto_approve_confirmer};
 use serde_json::json;
-use solaris_agent::orchestration::execute_tool_calls;
+use solaris_agent::orchestration::{execute_tool_calls, execute_tool_calls_with_policy};
 use solaris_compact::CompactLevel;
 use solaris_config::hooks::{HookDef, HookEngine, HooksConfig};
 use solaris_tools::registry::ToolRegistry;
 use solaris_types::message::ContentBlock;
+use solaris_types::permission::{PermissionCeiling, PermissionMode};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -201,10 +202,12 @@ async fn test_pre_hook_blocks_tool() {
     let tool_calls = vec![make_tool_use("id-blocked", "echo")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_with_policy(
         &registry,
         &tool_calls,
         &confirmer,
+        PermissionMode::Bypass,
+        PermissionCeiling::unrestricted(),
         Some(&mut hook_engine),
         CompactLevel::Off,
         false,
@@ -234,7 +237,7 @@ async fn test_post_hook_runs_after_tool() {
         post_tool_use: vec![make_post_hook("post-logger", "echo", "echo done")],
         stop: vec![],
     };
-    let mut hook_engine = HookEngine::new(hook_config, std::env::temp_dir());
+    let mut hook_engine = HookEngine::new(hook_config, std::env::current_dir().unwrap());
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(MockTool::new("echo", "result", false)));
@@ -242,10 +245,12 @@ async fn test_post_hook_runs_after_tool() {
     let tool_calls = vec![make_tool_use("id-post", "echo")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_with_policy(
         &registry,
         &tool_calls,
         &confirmer,
+        PermissionMode::Bypass,
+        PermissionCeiling::unrestricted(),
         Some(&mut hook_engine),
         CompactLevel::Off,
         false,
@@ -257,7 +262,7 @@ async fn test_post_hook_runs_after_tool() {
     match &results[0] {
         ContentBlock::ToolResult { content, is_error, .. } => {
             // Post-hooks must not mutate the tool result
-            assert!(!is_error);
+            assert!(!is_error, "post-hook must not replace the tool result: {content}");
             assert_eq!(content, "result");
         }
         other => panic!("expected ToolResult, got {:?}", other),

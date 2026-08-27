@@ -146,6 +146,10 @@ impl AgentEngine {
                 task_key,
                 call_id: task.call_id,
             }),
+            DurableTaskPhase::SideEffectUnknown => Err(AgentError::SideEffectUnknown(match task.call_id {
+                Some(call_id) => format!("tool call {call_id} has an unknown side-effect outcome"),
+                None => format!("durable task {task_key} has an unknown side-effect outcome"),
+            })),
             DurableTaskPhase::Aborted => Err(AgentError::UserAborted),
             DurableTaskPhase::Created => Ok(DurableTaskResume::New(Some(task))),
             DurableTaskPhase::UserCheckpointed => Ok(DurableTaskResume::UserCheckpointed),

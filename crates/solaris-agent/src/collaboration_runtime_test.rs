@@ -808,12 +808,13 @@ fn jsonl_restart_restores_collaboration_projection() {
                 json!({"durable":true}),
             )
             .unwrap();
+        // JSONL is legacy/migration-only and no longer advertises atomic Run
+        // task admission. Write one historical task record through the legacy
+        // single-record path so restart compatibility remains covered without
+        // claiming that new JSONL collaboration admission is safe.
         runtime
-            .create_collaboration_task(
+            .register_runtime_task(
                 &run,
-                &team,
-                &root,
-                256,
                 TaskRecord {
                     run_id: run.clone(),
                     task_id: task_id.clone(),
@@ -827,7 +828,7 @@ fn jsonl_restart_restores_collaboration_projection() {
                     content: None,
                     expected_write_scope: Vec::new(),
                     owner_agent_id: Some(root.clone()),
-                    state: TaskState::Queued,
+                    state: TaskState::Assigned,
                     outcome_ref: None,
                     failure_class: None,
                 },

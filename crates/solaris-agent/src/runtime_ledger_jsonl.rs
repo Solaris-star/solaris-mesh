@@ -9,7 +9,6 @@ use solaris_types::effect::DurabilityClass;
 use solaris_types::identity::RunId;
 use solaris_types::runtime::TaskRecord;
 
-use super::runtime_ledger_task_admission::validate_collaboration_batch;
 use super::{
     LEDGER_SCHEMA_VERSION, LedgerRecord, LogicalAppendCapability, RuntimeLedger, WorkflowMutationLease,
     WorkflowRestoreCommit,
@@ -177,34 +176,17 @@ impl RuntimeLedger for JsonlRuntimeLedger {
         Err(unsupported_workflow_mutation_lease())
     }
 
-    fn admit_collaboration_tasks(
+    fn admit_collaboration_tasks_for_root(
         &self,
-        run_id: &RunId,
-        max_tasks: usize,
-        tasks: &[TaskRecord],
+        _root_run_id: &RunId,
+        _run_id: &RunId,
+        _max_tasks: usize,
+        _tasks: &[TaskRecord],
     ) -> io::Result<Vec<LedgerRecord>> {
-        let existing = self
-            .records_for_run(run_id)?
-            .into_iter()
-            .filter(|record| record.record_type == "task_created")
-            .map(|record| {
-                serde_json::from_value::<TaskRecord>(record.payload)
-                    .map(|task| (task.task_id.clone(), task))
-                    .map_err(io::Error::other)
-            })
-            .collect::<io::Result<HashMap<_, _>>>()?;
-        let admitted = validate_collaboration_batch(&existing, max_tasks, tasks)?;
-        admitted
-            .into_iter()
-            .map(|task| {
-                self.append(
-                    run_id,
-                    DurabilityClass::SyncCritical,
-                    "task_created",
-                    serde_json::to_value(task).map_err(io::Error::other)?,
-                )
-            })
-            .collect()
+        Err(io::Error::new(
+            ErrorKind::Unsupported,
+            "JSONL runtime ledger does not support atomic Run task admission; migrate to SQLite",
+        ))
     }
 
     fn run_ids(&self) -> io::Result<Vec<RunId>> {

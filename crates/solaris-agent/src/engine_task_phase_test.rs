@@ -678,6 +678,75 @@ async fn provider_in_flight_resume_checks_original_unknown_effect_without_retry(
 }
 
 #[tokio::test]
+async fn side_effect_unknown_resume_preserves_class_and_never_retries_provider() {
+    let workspace = tempdir().unwrap();
+    let sessions = tempdir().unwrap();
+    let mut config = test_config(workspace.path());
+    config.session.directory = sessions.path().to_string_lossy().into_owned();
+    let ledger = test_ledger(workspace.path());
+    let context = EffectExecutionContext::new(
+        RunId::from("side-effect-unknown-run"),
+        AgentId::from("root"),
+        ledger,
+        PermissionContext::new(PermissionMode::Bypass, PermissionCeiling::unrestricted()),
+        OperationEnvironmentSnapshot::default(),
+    );
+    let mut first = AgentEngine::new_with_provider(
+        Arc::new(CompletedProvider),
+        config.clone(),
+        ToolRegistry::new(),
+        Arc::new(NullSink),
+        workspace.path().to_path_buf(),
+    );
+    first.set_execution_context(context.clone());
+    first
+        .init_session(
+            "openai",
+            &workspace.path().to_string_lossy(),
+            Some("side-effect-unknown"),
+        )
+        .unwrap();
+    first.msg_id = "message-side-effect-unknown".to_owned();
+    first.messages.push(Message::now(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "use tool".to_owned(),
+        }],
+    ));
+    first.save_session().unwrap();
+    let _ = first.begin_or_resume_durable_task("use tool").unwrap();
+    first
+        .record_durable_task_phase(DurableTaskPhase::SideEffectUnknown, Some("tool-call-v3:unknown"))
+        .unwrap();
+    drop(first);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let session = crate::session::SessionManager::new(sessions.path().to_path_buf(), 20)
+        .load("side-effect-unknown")
+        .unwrap();
+    let mut resumed = AgentEngine::resume_with_provider(
+        Arc::new(CountingProvider { calls: calls.clone() }),
+        config,
+        ToolRegistry::new(),
+        Arc::new(NullSink),
+        session,
+        workspace.path().to_path_buf(),
+    );
+    resumed.set_execution_context(context);
+
+    let error = resumed
+        .run("use tool", "message-side-effect-unknown")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AgentError::SideEffectUnknown(ref message) if message.contains("tool-call-v3:unknown")
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn tools_in_flight_resume_rejects_changed_round_before_any_execution() {
     let workspace = tempdir().unwrap();
     let sessions = tempdir().unwrap();

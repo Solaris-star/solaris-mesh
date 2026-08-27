@@ -550,7 +550,7 @@ impl AgentWorkflowExecutor {
                     let _permit = role_limit
                         .acquire_owned()
                         .await
-                        .map_err(|_| WorkflowNodeError::retryable("Supervisor role semaphore closed"))?;
+                        .map_err(|_| WorkflowNodeError::non_retryable("Supervisor role semaphore closed"))?;
                     self.execute_supervisor_task(runtime, &proposal).await
                 }
             }))
@@ -887,8 +887,32 @@ fn supervisor_turn_id(context: &WorkflowExecutionContext, round: u32) -> String 
 fn supervisor_error_requires_recovery(error: &WorkflowNodeError) -> bool {
     matches!(
         error.failure_class,
-        TaskFailureClass::OutcomeUnknown | TaskFailureClass::ReconciliationRequired
+        TaskFailureClass::OutcomeUnknown
+            | TaskFailureClass::SideEffectUnknown
+            | TaskFailureClass::ReconciliationRequired
     )
+}
+
+#[cfg(test)]
+#[test]
+fn unknown_supervisor_side_effect_preserves_recovery_state() {
+    for class in [
+        TaskFailureClass::OutcomeUnknown,
+        TaskFailureClass::SideEffectUnknown,
+        TaskFailureClass::ReconciliationRequired,
+    ] {
+        assert!(supervisor_error_requires_recovery(&workflow_error(class, "unknown")));
+    }
+    for class in [
+        TaskFailureClass::Retryable,
+        TaskFailureClass::NonRetryable,
+        TaskFailureClass::PermissionDenied,
+        TaskFailureClass::MaxTurns,
+        TaskFailureClass::NonConvergent,
+        TaskFailureClass::Cancelled,
+    ] {
+        assert!(!supervisor_error_requires_recovery(&workflow_error(class, "terminal")));
+    }
 }
 
 fn supervisor_result_after_cleanup(

@@ -53,6 +53,45 @@ async fn run_hook_process_policy_case(mode: PermissionMode) -> (bool, bool) {
 }
 
 #[tokio::test]
+async fn auto_configured_hook_runs_inside_the_strict_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let marker = workspace.path().join("hook-process-marker.txt");
+    let permissions = PermissionContext::new(PermissionMode::Auto, PermissionCeiling::unrestricted());
+    permissions.set_boundary(ExecutionBoundary::workspace(
+        workspace.path().to_string_lossy().into_owned(),
+    ));
+    permissions.register_protected_paths(state.path(), Vec::new()).unwrap();
+    let context = EffectExecutionContext::new(
+        RunId::from("hook-process-policy-auto-inside"),
+        AgentId::from("hook-process-policy-agent"),
+        Arc::new(InMemoryRuntimeLedger::default()),
+        permissions,
+        OperationEnvironmentSnapshot::default(),
+    );
+    let mut hooks = HookEngine::new(
+        HooksConfig {
+            pre_tool_use: vec![HookDef {
+                name: "process-policy-hook".into(),
+                tool_match: vec!["Read".into()],
+                file_match: Vec::new(),
+                command: hook_marker_command(&marker),
+                timeout_ms: 5_000,
+                network: Default::default(),
+            }],
+            ..Default::default()
+        },
+        workspace.path().to_path_buf(),
+    );
+    hooks.set_executor(Arc::new(EffectHookExecutor::new(context)));
+
+    let result = hooks.run_pre_tool_use("Read", &json!({})).await;
+
+    assert!(result.is_ok(), "strict Auto hook failed: {result:?}");
+    assert!(marker.exists());
+}
+
+#[tokio::test]
 async fn auto_configured_hook_cannot_start_with_ambient_access() {
     let (is_error, marker_exists) = run_hook_process_policy_case(PermissionMode::Auto).await;
 

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn workflow_retry_uses_a_new_child_attempt_after_invalid_role_output() {
+async fn workflow_invalid_role_output_is_non_convergent_and_not_retried() {
     let runtime = Arc::new(CollaborationRuntime::new(Scheduler::new(ResourcePolicy::new(1))));
     let root_run = RunId::from("workflow-retry-root");
     let root_agent = AgentId::from("workflow-retry-agent");
@@ -61,8 +61,13 @@ async fn workflow_retry_uses_a_new_child_attempt_after_invalid_role_output() {
         .await
         .unwrap();
 
-    assert_eq!(settled.status, WorkflowRunStatus::Completed);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(settled.status, WorkflowRunStatus::Failed);
+    assert_eq!(settled.nodes["work"].attempt_number, 1);
+    assert_eq!(
+        settled.nodes["work"].failure_class,
+        Some(TaskFailureClass::NonConvergent)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         runtime
             .ledger()
@@ -71,7 +76,7 @@ async fn workflow_retry_uses_a_new_child_attempt_after_invalid_role_output() {
             .iter()
             .filter(|record| record.record_type == "agent_handle_issued")
             .count(),
-        2
+        1
     );
 }
 

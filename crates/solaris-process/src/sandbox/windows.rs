@@ -7,7 +7,7 @@ use tokio::process::{Child, Command};
 
 use super::identity::ProtectedIdentitySnapshot;
 use super::layout::{ResolvedSandboxLayout, resolve_path};
-use super::windows_acl::{AclGuard, AppContainerProfile};
+use super::windows_acl::{AclGuard, AppContainerProfile, UserObjectAclGuard};
 use super::{
     SandboxBackend, SandboxCommandDisposition, SandboxEnforcement, SandboxError, SandboxReason, SandboxReport,
     SandboxRunner, insufficient_enforcement_error, sandbox_io_error, trusted_sandbox_helper,
@@ -89,6 +89,7 @@ pub(super) struct WindowsSandbox {
     // Restore temporary ACL changes before releasing the workspace component
     // handles which prevent path replacement.
     _acl: AclGuard,
+    _user_objects: UserObjectAclGuard,
     layout: ResolvedSandboxLayout,
     identities: ProtectedIdentitySnapshot,
     helper: Option<PinnedExecutable>,
@@ -123,6 +124,8 @@ impl WindowsSandbox {
         identities.verify_workspace(&layout.protected_roots, &layout.workspace_root)?;
         let profile = AppContainerProfile::create()
             .map_err(|_| insufficient_enforcement_error(partial_report(SandboxReason::AppContainerUnavailable)))?;
+        let user_objects = UserObjectAclGuard::apply(profile.sid())
+            .map_err(|_| insufficient_enforcement_error(partial_report(SandboxReason::AppContainerUnavailable)))?;
         let private_home = private_directory("solaris-windows-sandbox-home-")?;
         let private_tmp = private_directory("solaris-windows-sandbox-tmp-")?;
         let private_state = private_directory("solaris-windows-sandbox-state-")?;
@@ -147,6 +150,7 @@ impl WindowsSandbox {
         let start_marker = private_state.path().join("ready");
         Ok(Self {
             _acl: acl,
+            _user_objects: user_objects,
             layout,
             identities,
             helper: Some(helper),
@@ -321,7 +325,7 @@ fn explicit_environment(
             !is_network_proxy_environment_key(key)
                 && !matches!(
                     key.to_string_lossy().to_ascii_uppercase().as_str(),
-                    "HOME" | "USERPROFILE" | "TMP" | "TMPDIR" | "TEMP"
+                    "HOME" | "USERPROFILE" | "TMP" | "TMPDIR" | "TEMP" | "SYSTEMROOT" | "WINDIR"
                 )
         })
         .collect::<Vec<_>>();
@@ -332,6 +336,11 @@ fn explicit_environment(
         (OsString::from("TMPDIR"), private_tmp.as_os_str().to_os_string()),
         (OsString::from("TEMP"), private_tmp.as_os_str().to_os_string()),
     ]);
+    for key in ["SystemRoot", "WINDIR"] {
+        if let Some(value) = std::env::var_os(key) {
+            environment.push((OsString::from(key), value));
+        }
+    }
     for (key, value) in &environment {
         if key.to_string_lossy().contains('=')
             || key.to_string_lossy().contains('\0')

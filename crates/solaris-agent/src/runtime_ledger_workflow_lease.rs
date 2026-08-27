@@ -9,9 +9,9 @@ use crate::session::store::{DEFAULT_HEARTBEAT_SECONDS, DEFAULT_LEASE_SECONDS};
 
 use super::runtime_ledger_unique::{compare_and_append_in_memory_locked, compare_and_append_sqlite_transaction};
 use super::{
-    InMemoryRuntimeLedger, LEDGER_SCHEMA_VERSION, LedgerRecord, SqliteRuntimeLedger, WorkflowMutationLease,
-    WorkflowRestoreCommit, allocate_sqlite_sequence, durability_code, set_sqlite_synchronous, sqlite_error,
-    sqlite_sequence_to_u64,
+    InMemoryLedgerState, InMemoryRuntimeLedger, LEDGER_SCHEMA_VERSION, LedgerRecord, SqliteRuntimeLedger,
+    WorkflowMutationLease, WorkflowRestoreCommit, allocate_sqlite_sequence, durability_code, set_sqlite_synchronous,
+    sqlite_error, sqlite_sequence_to_u64,
 };
 
 pub(crate) const WORKFLOW_MUTATION_HEARTBEAT_MILLIS: i64 = DEFAULT_HEARTBEAT_SECONDS * 1_000;
@@ -590,6 +590,56 @@ fn run_sequence(transaction: &Transaction<'_>, run_id: &RunId) -> io::Result<u64
         )
         .map_err(|error| sqlite_error("read Workflow mutation high-water", error))?;
     sequence.map_or(Ok(0), sqlite_sequence_to_u64)
+}
+
+pub(super) fn validate_workflow_mutation_lease_in_memory(
+    state: &InMemoryLedgerState,
+    lease: &WorkflowMutationLease,
+    now_unix_ms: i64,
+) -> io::Result<()> {
+    require_current(
+        state
+            .workflow_mutation_leases
+            .get(&lease.run_id)
+            .ok_or_else(|| lease_lost(&lease.run_id))?,
+        lease,
+        now_unix_ms,
+    )
+}
+
+pub(super) fn advance_workflow_mutation_lease_in_memory(
+    state: &mut InMemoryLedgerState,
+    lease: &WorkflowMutationLease,
+    now_unix_ms: i64,
+    observed_sequence: u64,
+) {
+    let current = state
+        .workflow_mutation_leases
+        .get_mut(&lease.run_id)
+        .expect("Workflow mutation lease was validated under the same ledger lock");
+    debug_assert_eq!(current.owner_id.as_deref(), Some(lease.owner_id.as_str()));
+    debug_assert_eq!(current.epoch, lease.epoch);
+    current.heartbeat_at_unix_ms = now_unix_ms;
+    current.expires_at_unix_ms = lease_expiry(now_unix_ms);
+    current.observed_sequence = observed_sequence;
+}
+
+pub(super) fn validate_workflow_mutation_lease_sqlite_transaction(
+    transaction: &Transaction<'_>,
+    lease: &WorkflowMutationLease,
+    now_unix_ms: i64,
+) -> io::Result<()> {
+    require_sqlite_current(transaction, lease, now_unix_ms).map(|_| ())
+}
+
+pub(super) fn advance_workflow_mutation_lease_sqlite_transaction(
+    transaction: &Transaction<'_>,
+    lease: &WorkflowMutationLease,
+    now_unix_ms: i64,
+    observed_sequence: u64,
+) -> io::Result<()> {
+    update_heartbeat(transaction, lease, now_unix_ms, lease_expiry(now_unix_ms))?;
+    advance_sqlite_observed_sequence(transaction, lease, observed_sequence)
 }
 
 fn require_current(

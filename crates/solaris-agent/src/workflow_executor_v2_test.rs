@@ -283,6 +283,7 @@ struct SupervisorWorkflowRuntimeOptions {
     permission_mode: solaris_types::permission::PermissionMode,
     ledger: Option<Arc<dyn RuntimeLedger>>,
     concurrency_gate: Option<V2ProviderConcurrencyGate>,
+    max_tasks_per_run: Option<usize>,
 }
 
 impl Default for SupervisorWorkflowRuntimeOptions {
@@ -291,6 +292,7 @@ impl Default for SupervisorWorkflowRuntimeOptions {
             permission_mode: solaris_types::permission::PermissionMode::Auto,
             ledger: None,
             concurrency_gate: None,
+            max_tasks_per_run: None,
         }
     }
 }
@@ -313,6 +315,7 @@ async fn run_supervisor_workflow_with_permission_mode(
         permission_mode,
         ledger,
         concurrency_gate,
+        max_tasks_per_run,
     } = runtime_options;
     let session_dir = tempfile::tempdir().unwrap();
     let scheduler = Scheduler::new(ResourcePolicy::new(max_active));
@@ -336,6 +339,9 @@ async fn run_supervisor_workflow_with_permission_mode(
     let mut config = test_config();
     config.session.enabled = true;
     config.session.directory = session_dir.path().to_string_lossy().into_owned();
+    if let Some(max_tasks_per_run) = max_tasks_per_run {
+        config.multi_agent.max_tasks_per_run = u32::try_from(max_tasks_per_run).unwrap();
+    }
     let spawner = Arc::new(
         AgentSpawner::new(
             Arc::new(V2TrackingProvider {
@@ -360,6 +366,11 @@ async fn run_supervisor_workflow_with_permission_mode(
         roles.register(role);
     }
     let controller = WorkflowController::with_runtime_and_roles(Arc::clone(&runtime), Some(Arc::clone(&roles)));
+    let controller = if let Some(max_tasks_per_run) = max_tasks_per_run {
+        controller.with_task_admission(root_run.clone(), max_tasks_per_run)
+    } else {
+        controller
+    };
     let workflow_id = format!("v2-{name}");
     controller
         .register(WorkflowDefinition {

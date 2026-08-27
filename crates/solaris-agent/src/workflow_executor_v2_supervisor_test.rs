@@ -320,6 +320,65 @@ async fn configured_supervisor_rejects_invalid_proposals_before_creating_tasks()
 }
 
 #[tokio::test]
+async fn configured_supervisor_cannot_bypass_run_task_quota() {
+    let collaboration = CollaborationRuntimeConfig {
+        strategy: CollaborationStrategy::Supervisor,
+        worker_roles: vec![WorkerRolePolicy {
+            role: "worker-a".into(),
+            max_concurrent: 1,
+            max_total: 1,
+        }],
+        max_tasks: 1,
+        max_coordinator_rounds: 1,
+        ..CollaborationRuntimeConfig::default()
+    };
+    let scripted = HashMap::from([(
+        "coordinator".to_owned(),
+        VecDeque::from([json!({
+            "decision":"dispatch",
+            "tasks":[{"task_key":"extra", "role":"worker-a", "instruction":"must be rejected by Run quota"}]
+        })
+        .to_string()]),
+    )]);
+    let (snapshot, runtime, _, state) = run_supervisor_workflow_with_permission_mode(
+        "supervisor-run-quota",
+        collaboration,
+        vec![
+            v2_role("coordinator", &["Read"], PermissionCeiling::plan()),
+            v2_role("worker-a", &["Grep"], PermissionCeiling::plan()),
+        ],
+        scripted,
+        2,
+        solaris_types::workflow::MultiAgentPolicy::OnDemand,
+        SupervisorWorkflowRuntimeOptions {
+            max_tasks_per_run: Some(1),
+            ..SupervisorWorkflowRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    assert_eq!(snapshot.status, WorkflowRunStatus::Failed, "{snapshot:#?}");
+    assert_eq!(v2_node_attempt(&snapshot).attempt_number, 1);
+    assert!(
+        v2_node_attempt(&snapshot)
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("accepts at most 1 collaboration tasks")),
+        "{snapshot:#?}"
+    );
+    assert_eq!(
+        runtime.tasks().snapshot().iter().filter(|task| task.team_id.is_some()).count(),
+        0,
+        "Supervisor must not create a partial dynamic task after the Run quota is exhausted"
+    );
+    assert_eq!(
+        state.lock().unwrap_or_else(|error| error.into_inner()).calls,
+        ["coordinator"],
+        "quota rejection must happen before a worker provider call"
+    );
+}
+
+#[tokio::test]
 async fn configured_supervisor_abort_is_typed_and_spawns_no_worker() {
     let collaboration = CollaborationRuntimeConfig {
         strategy: CollaborationStrategy::Supervisor,
@@ -543,6 +602,7 @@ async fn configured_supervisor_finalize_gate_rejects_failed_worker_task() {
     .await;
 
     assert_eq!(snapshot.status, WorkflowRunStatus::Failed);
+    assert_eq!(v2_node_attempt(&snapshot).attempt_number, 1);
     assert!(
         v2_node_attempt(&snapshot)
             .error
@@ -557,7 +617,7 @@ async fn configured_supervisor_finalize_gate_rejects_failed_worker_task() {
         .find(|task| task.task_key.as_deref() == Some("invalid"))
         .unwrap();
     assert_eq!(task.state, TaskState::Failed);
-    assert_eq!(task.failure_class, Some(TaskFailureClass::Retryable));
+    assert_eq!(task.failure_class, Some(TaskFailureClass::NonConvergent));
     assert_eq!(
         state.lock().unwrap_or_else(|error| error.into_inner()).calls,
         ["coordinator", "invalid-worker", "coordinator"]

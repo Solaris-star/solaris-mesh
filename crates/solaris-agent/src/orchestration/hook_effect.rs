@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use solaris_config::hooks::{HookError, HookExecutionResult, HookExecutor, HookInvocation, HookStageInvocation};
-use solaris_process::inspect_executable;
+use solaris_process::{
+    ProcessFinalizationError, inspect_executable, process_outcome_unknown, process_recovery_required,
+};
 use solaris_types::effect::{EffectClass, EffectDescriptor, EffectReplayPolicy, ProcessInvocation, ResourceFootprint};
 use solaris_types::permission::{PermissionDecision, PermissionRule};
 
@@ -67,6 +69,22 @@ impl EffectHookExecutor {
             HookError::ExecutionFailed(reason)
         }
     }
+}
+
+fn process_failure_reason(error: &std::io::Error) -> String {
+    let Some(finalization) = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<ProcessFinalizationError>())
+    else {
+        return error.to_string();
+    };
+    let details = finalization
+        .failures()
+        .iter()
+        .map(|failure| format!("{:?}: {}", failure.stage(), failure.error()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("{error}; {details}")
 }
 
 #[async_trait]
@@ -284,7 +302,16 @@ impl HookExecutor for EffectHookExecutor {
             .run()
             .await;
         let result = match output {
-            Err(error) => Err(HookError::ExecutionFailed(error.to_string())),
+            Err(error) if process_recovery_required(&error).is_some() || process_outcome_unknown(&error) => {
+                // The process authorizer has already persisted this exact
+                // launch as OutcomeUnknown (and, for cleanup failures, bound
+                // the recovery record to the same EffectId). Do not attempt a
+                // second canonical terminal write that would obscure the
+                // original reason or conflict with the durable unknown state.
+                outcome_guard.leave_for_reconciliation();
+                return Err(Self::outcome_unknown(&invocation, process_failure_reason(&error)));
+            }
+            Err(error) => Err(HookError::ExecutionFailed(process_failure_reason(&error))),
             Ok(output) if output.output_limit_exceeded => Err(HookError::ExecutionFailed(format!(
                 "hook output exceeded {output_limit} bytes and the process tree was terminated"
             ))),

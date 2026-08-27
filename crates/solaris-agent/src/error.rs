@@ -38,7 +38,9 @@ impl AgentError {
     /// recorded and the request was dispatched.
     pub fn from_dispatched_provider(error: ProviderError) -> Self {
         match error {
-            ProviderError::Connection(_) | ProviderError::Http(_) => Self::OutcomeUnknown(error.to_string()),
+            ProviderError::Connection(_) | ProviderError::Http(_) | ProviderError::Parse(_) => {
+                Self::OutcomeUnknown(error.to_string())
+            }
             error => Self::Provider(error),
         }
     }
@@ -56,6 +58,7 @@ impl AgentError {
             AgentError::DurableState(_) | AgentError::ReconciliationRequired { .. } => {
                 TaskFailureClass::ReconciliationRequired
             }
+            AgentError::Provider(ProviderError::Api { status: 401 | 403, .. }) => TaskFailureClass::PermissionDenied,
             AgentError::Provider(error) => {
                 if error.is_retryable() {
                     TaskFailureClass::Retryable

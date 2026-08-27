@@ -48,7 +48,11 @@ use runtime_ledger_jsonl::{JsonlLedgerState, JsonlWriter};
 use runtime_ledger_migration::{import_jsonl_explicit, import_jsonl_once, initialize_sqlite_schema};
 pub use runtime_ledger_mutation::RunMutationCoordinator;
 use runtime_ledger_plan::{record_plan_artifact_default, record_plan_artifact_sqlite};
-use runtime_ledger_task_admission::{admit_collaboration_tasks_in_memory, admit_collaboration_tasks_sqlite};
+use runtime_ledger_task_admission::{
+    admit_collaboration_tasks_in_memory, admit_collaboration_tasks_sqlite, admit_tasks_and_append_in_memory,
+    admit_tasks_and_append_sqlite, admit_tasks_and_append_under_workflow_lease_in_memory,
+    admit_tasks_and_append_under_workflow_lease_sqlite,
+};
 #[cfg(test)]
 pub(crate) use runtime_ledger_test_support::forward_workflow_mutation_lease;
 #[cfg(test)]
@@ -172,13 +176,62 @@ pub trait RuntimeLedger: Send + Sync {
     /// Existing identical tasks are replays and consume no additional quota.
     fn admit_collaboration_tasks(
         &self,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        self.admit_collaboration_tasks_for_root(run_id, run_id, max_tasks, tasks)
+    }
+
+    /// Atomically admits tasks recorded under `run_id` while charging the
+    /// historical quota of `root_run_id` and all its descendant Runs.
+    fn admit_collaboration_tasks_for_root(
+        &self,
+        _root_run_id: &RunId,
         _run_id: &RunId,
         _max_tasks: usize,
         _tasks: &[TaskRecord],
     ) -> io::Result<Vec<LedgerRecord>> {
         Err(io::Error::new(
             ErrorKind::Unsupported,
-            "runtime ledger does not support atomic collaboration task admission",
+            "runtime ledger does not support atomic Root Run task admission",
+        ))
+    }
+
+    /// Atomically admits tasks and appends additional records under the task
+    /// Run. Implementations must commit the complete batch or nothing.
+    fn admit_tasks_and_append(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        if records.is_empty() {
+            return self.admit_collaboration_tasks_for_root(root_run_id, run_id, max_tasks, tasks);
+        }
+        Err(io::Error::new(
+            ErrorKind::Unsupported,
+            "runtime ledger does not support atomic task and metadata admission",
+        ))
+    }
+
+    /// Atomically admits tasks and metadata while validating a Workflow
+    /// mutation lease and advancing that lease's observed sequence in the same
+    /// durable operation.
+    fn admit_tasks_and_append_under_workflow_lease(
+        &self,
+        _lease: &WorkflowMutationLease,
+        _now_unix_ms: i64,
+        _root_run_id: &RunId,
+        _max_tasks: usize,
+        _tasks: &[TaskRecord],
+        _records: &[(DurabilityClass, String, Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        Err(io::Error::new(
+            ErrorKind::Unsupported,
+            "runtime ledger does not support fenced atomic task and metadata admission",
         ))
     }
 
@@ -282,7 +335,7 @@ impl Default for InMemoryRuntimeLedger {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct InMemoryLedgerState {
     records: HashMap<RunId, Vec<LedgerRecord>>,
     next_sequence: u64,
@@ -398,14 +451,48 @@ impl RuntimeLedger for InMemoryRuntimeLedger {
         )
     }
 
-    fn admit_collaboration_tasks(
+    fn admit_collaboration_tasks_for_root(
         &self,
+        root_run_id: &RunId,
         run_id: &RunId,
         max_tasks: usize,
         tasks: &[TaskRecord],
     ) -> io::Result<Vec<LedgerRecord>> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        admit_collaboration_tasks_in_memory(&mut state, run_id, max_tasks, tasks)
+        admit_collaboration_tasks_in_memory(&mut state, root_run_id, run_id, max_tasks, tasks)
+    }
+
+    fn admit_tasks_and_append(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        admit_tasks_and_append_in_memory(&mut state, root_run_id, run_id, max_tasks, tasks, records)
+    }
+
+    fn admit_tasks_and_append_under_workflow_lease(
+        &self,
+        lease: &WorkflowMutationLease,
+        now_unix_ms: i64,
+        root_run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        admit_tasks_and_append_under_workflow_lease_in_memory(
+            &mut state,
+            lease,
+            now_unix_ms,
+            root_run_id,
+            max_tasks,
+            tasks,
+            records,
+        )
     }
 
     fn run_ids(&self) -> std::io::Result<Vec<RunId>> {
@@ -744,13 +831,45 @@ impl RuntimeLedger for SqliteRuntimeLedger {
         )
     }
 
-    fn admit_collaboration_tasks(
+    fn admit_collaboration_tasks_for_root(
         &self,
+        root_run_id: &RunId,
         run_id: &RunId,
         max_tasks: usize,
         tasks: &[TaskRecord],
     ) -> io::Result<Vec<LedgerRecord>> {
-        admit_collaboration_tasks_sqlite(self, run_id, max_tasks, tasks)
+        admit_collaboration_tasks_sqlite(self, root_run_id, run_id, max_tasks, tasks)
+    }
+
+    fn admit_tasks_and_append(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        admit_tasks_and_append_sqlite(self, root_run_id, run_id, max_tasks, tasks, records)
+    }
+
+    fn admit_tasks_and_append_under_workflow_lease(
+        &self,
+        lease: &WorkflowMutationLease,
+        now_unix_ms: i64,
+        root_run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        admit_tasks_and_append_under_workflow_lease_sqlite(
+            self,
+            lease,
+            now_unix_ms,
+            root_run_id,
+            max_tasks,
+            tasks,
+            records,
+        )
     }
 
     fn run_ids(&self) -> io::Result<Vec<RunId>> {

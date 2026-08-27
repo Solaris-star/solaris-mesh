@@ -412,10 +412,13 @@ impl AgentBootstrap {
             environment.memory.clone(),
         );
         let role_registry = Arc::new(AgentRoleRegistry::default());
-        let workflow_controller = Arc::new(WorkflowController::with_runtime_and_roles(
-            Arc::clone(&self.collaboration_runtime),
-            Some(Arc::clone(&role_registry)),
-        ));
+        let workflow_controller = Arc::new(
+            WorkflowController::with_runtime_and_roles(
+                Arc::clone(&self.collaboration_runtime),
+                Some(Arc::clone(&role_registry)),
+            )
+            .with_task_admission(self.run_id.clone(), self.config.multi_agent.max_tasks_per_run as usize),
+        );
         register_builtin_workflows(&workflow_controller, &role_registry).map_err(anyhow::Error::msg)?;
         plugin_bootstrap
             .register_workflows(&workflow_controller)

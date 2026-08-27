@@ -53,7 +53,7 @@ use store_schema::initialize_schema;
 pub(crate) use store_task::TaskTransitionFault;
 pub(crate) use store_task::{DurableTaskPhase, StoredDurableTask};
 
-pub(crate) const SESSION_STORE_SCHEMA_VERSION: i64 = 8;
+pub(crate) const SESSION_STORE_SCHEMA_VERSION: i64 = 9;
 pub(crate) const DEFAULT_HEARTBEAT_SECONDS: i64 = 15;
 pub(crate) const DEFAULT_LEASE_SECONDS: i64 = 90;
 pub(crate) const MAX_LEGACY_SESSION_BYTES: u64 = 64 * 1024 * 1024;

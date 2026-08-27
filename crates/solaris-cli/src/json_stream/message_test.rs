@@ -192,6 +192,25 @@ impl RuntimeLedger for CancelFailLedger {
         )
     }
 
+    fn admit_tasks_and_append_under_workflow_lease(
+        &self,
+        lease: &solaris_agent::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+        root_run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+        records: &[(DurabilityClass, String, serde_json::Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        self.records.admit_tasks_and_append_under_workflow_lease(
+            lease,
+            now_unix_ms,
+            root_run_id,
+            max_tasks,
+            tasks,
+            records,
+        )
+    }
+
     fn run_ids(&self) -> io::Result<Vec<RunId>> {
         self.records.run_ids()
     }

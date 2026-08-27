@@ -50,6 +50,8 @@ fn partial_apply_cleanup_failure_retains_retryable_guard_until_restore() {
     let mut guard = AclGuard {
         leased: Vec::new(),
         sid,
+        writable_roots: Vec::new(),
+        protected_roots: Vec::new(),
         fail_cleanup_attempts: 0,
     };
     let root_path = root.path().to_path_buf();

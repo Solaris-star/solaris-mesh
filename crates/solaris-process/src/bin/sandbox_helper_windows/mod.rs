@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, TRUE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, PSID, SECURITY_CAPABILITIES, TOKEN_QUERY, TokenIsAppContainer,
@@ -11,11 +11,13 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, DeleteProcThreadAttributeList,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
     STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
+
+const TARGET_START_GRACE_MS: u32 = 100;
 
 pub(super) fn run() -> io::Result<()> {
     let invocation = Invocation::parse(std::env::args_os().skip(1)).map_err(|error| stage("parse", error))?;
@@ -34,8 +36,7 @@ pub(super) fn run() -> io::Result<()> {
     startup.lpAttributeList = attributes.get();
     let mut process = PROCESS_INFORMATION::default();
     let created = unsafe {
-        CreateProcessAsUserW(
-            std::ptr::null_mut(),
+        CreateProcessW(
             target.as_ptr(),
             command_line.as_mut_ptr(),
             std::ptr::null(),
@@ -54,18 +55,40 @@ pub(super) fn run() -> io::Result<()> {
     let process = ChildProcess::new(process);
     verify_appcontainer(process.process, sid.get()).map_err(|error| stage("verify-token", error))?;
     verify_job_membership(process.process).map_err(|error| stage("verify-job", error))?;
-    publish_status(&invocation.status).map_err(|error| stage("publish", error))?;
     if unsafe { ResumeThread(process.thread) } == u32::MAX {
         return Err(stage("resume", io::Error::last_os_error()));
+    }
+    match unsafe { WaitForSingleObject(process.process, TARGET_START_GRACE_MS) } {
+        WAIT_OBJECT_0 => {
+            let exit_code = target_exit_code(process.process)?;
+            if exit_code != 0 {
+                return Err(stage(
+                    "target-start",
+                    io::Error::other(format!(
+                        "sandbox target exited during initialization with status 0x{exit_code:08X}"
+                    )),
+                ));
+            }
+            publish_status(&invocation.status).map_err(|error| stage("publish", error))?;
+            std::process::exit(0);
+        }
+        WAIT_TIMEOUT => {
+            publish_status(&invocation.status).map_err(|error| stage("publish", error))?;
+        }
+        _ => return Err(stage("startup-wait", io::Error::last_os_error())),
     }
     if unsafe { WaitForSingleObject(process.process, u32::MAX) } != WAIT_OBJECT_0 {
         return Err(io::Error::last_os_error());
     }
+    std::process::exit(target_exit_code(process.process)? as i32);
+}
+
+fn target_exit_code(process: windows_sys::Win32::Foundation::HANDLE) -> io::Result<u32> {
     let mut exit_code = 125_u32;
-    if unsafe { GetExitCodeProcess(process.process, &mut exit_code) } == 0 {
+    if unsafe { GetExitCodeProcess(process, &mut exit_code) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    std::process::exit(exit_code as i32);
+    Ok(exit_code)
 }
 
 struct Invocation {

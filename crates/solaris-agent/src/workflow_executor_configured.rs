@@ -290,7 +290,7 @@ impl AgentWorkflowExecutor {
                 let _role_permit = role_limit
                     .acquire_owned()
                     .await
-                    .map_err(|_| WorkflowNodeError::retryable("configured worker role semaphore closed"))?;
+                    .map_err(|_| WorkflowNodeError::non_retryable("configured worker role semaphore closed"))?;
                 let result = self.join_handle(handle, settle_task).await?;
                 Ok::<_, WorkflowNodeError>((index, role_id, result))
             }
@@ -314,11 +314,7 @@ impl AgentWorkflowExecutor {
             .roles
             .get(role_id)
             .ok_or_else(|| format!("unknown agent role: {role_id}"))?;
-        Ok(normalize_role_output(
-            &role.id,
-            role.output_schema.as_ref(),
-            &result.text,
-        )?)
+        normalize_role_output(&role.id, role.output_schema.as_ref(), &result.text)
     }
 
     async fn coordinator_cleanup_error(

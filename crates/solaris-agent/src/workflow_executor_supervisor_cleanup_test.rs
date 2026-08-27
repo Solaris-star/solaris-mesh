@@ -221,6 +221,7 @@ async fn cleanup_failure_upgrades_to_reconciliation_and_preserves_both_causes() 
             permission_mode: solaris_types::permission::PermissionMode::Auto,
             ledger: Some(Arc::new(FailSupervisorCleanupLedger::default())),
             concurrency_gate: None,
+            max_tasks_per_run: None,
         },
     )
     .await;
@@ -296,6 +297,7 @@ async fn close_failure_upgrades_to_reconciliation_and_preserves_both_causes() {
             permission_mode: solaris_types::permission::PermissionMode::Auto,
             ledger: Some(Arc::new(FailSupervisorCloseLedger::default())),
             concurrency_gate: None,
+            max_tasks_per_run: None,
         },
     )
     .await;
@@ -643,6 +645,7 @@ async fn bypass_treats_supervisor_write_scope_as_advisory() {
             permission_mode: solaris_types::permission::PermissionMode::Bypass,
             ledger: None,
             concurrency_gate: None,
+            max_tasks_per_run: None,
         },
     )
     .await;

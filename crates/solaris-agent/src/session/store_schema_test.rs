@@ -385,6 +385,89 @@ fn version_seven_opening_claim_gains_epoch_and_expiry() {
 }
 
 #[test]
+fn version_eight_store_gains_side_effect_unknown_without_losing_tasks() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE session_store_meta (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                schema_version INTEGER NOT NULL
+             );
+             INSERT INTO session_store_meta (singleton, schema_version) VALUES (1, 8);
+             CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                state_json BLOB NOT NULL,
+                revision INTEGER NOT NULL,
+                run_id TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+             );
+             INSERT INTO sessions VALUES ('session-a', X'7B7D', 0, 'run-a', 1, 1);
+             CREATE TABLE durable_agent_tasks (
+                session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                task_key TEXT NOT NULL,
+                input_digest BLOB NOT NULL CHECK (length(input_digest) = 32),
+                phase TEXT NOT NULL CHECK (phase IN (
+                    'created', 'user_checkpointed', 'awaiting_provider',
+                    'provider_in_flight', 'provider_completed',
+                    'tools_in_flight', 'tools_completed', 'completed', 'outcome_unknown', 'aborted'
+                )),
+                call_id TEXT,
+                session_revision INTEGER NOT NULL CHECK (session_revision >= 0),
+                task_revision INTEGER NOT NULL CHECK (task_revision >= 0),
+                terminal_result_json BLOB,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (session_id, task_key),
+                CHECK (
+                    (phase = 'completed' AND terminal_result_json IS NOT NULL)
+                    OR (phase != 'completed' AND terminal_result_json IS NULL)
+                )
+             );
+             CREATE INDEX durable_agent_tasks_phase
+                ON durable_agent_tasks (phase, updated_at_ms);
+             INSERT INTO durable_agent_tasks
+                (session_id, task_key, input_digest, phase, call_id, session_revision,
+                 task_revision, terminal_result_json, updated_at_ms)
+             VALUES ('session-a', 'task-a', zeroblob(32), 'outcome_unknown',
+                     'tool-call-v3:existing', 0, 1, NULL, 1);
+             PRAGMA user_version = 8;",
+        )
+        .unwrap();
+
+    initialize_schema(&mut connection).unwrap();
+
+    let preserved: (String, Option<String>, i64) = connection
+        .query_row(
+            "SELECT phase, call_id, task_revision FROM durable_agent_tasks
+             WHERE session_id = 'session-a' AND task_key = 'task-a'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved,
+        (
+            "outcome_unknown".to_owned(),
+            Some("tool-call-v3:existing".to_owned()),
+            1
+        )
+    );
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'durable_agent_tasks'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(schema.contains("'side_effect_unknown'"));
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SESSION_STORE_SCHEMA_VERSION);
+}
+
+#[test]
 fn current_agent_conversation_schema_initialization_is_idempotent() {
     let mut connection = Connection::open_in_memory().unwrap();
     initialize_schema(&mut connection).unwrap();

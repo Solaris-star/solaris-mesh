@@ -50,7 +50,7 @@ impl AgentEngine {
         let effect_id = effect_request.effect_id.clone();
         match execution_context
             .recover_effect(&effect_request)
-            .map_err(AgentError::ApiError)?
+            .map_err(|error| AgentError::DurableState(format!("provider effect recovery failed: {error}")))?
         {
             EffectRecoveryDecision::Execute => {}
             EffectRecoveryDecision::Reuse { is_error: true, output } => {
@@ -62,8 +62,9 @@ impl AgentEngine {
                 output,
             } => {
                 self.record_durable_task_phase(DurableTaskPhase::ProviderCompleted, Some(&call_id))?;
-                let outcome: StreamOutcome = serde_json::from_str(&output)
-                    .map_err(|error| AgentError::ApiError(format!("recovered provider outcome is invalid: {error}")))?;
+                let outcome: StreamOutcome = serde_json::from_str(&output).map_err(|error| {
+                    AgentError::DurableState(format!("recovered provider outcome is invalid: {error}"))
+                })?;
                 self.emit_recovered_stream(&outcome, emit_assistant_text);
                 self.record_turn_usage(&outcome.usage, &effect_id)?;
                 return Ok(outcome);
@@ -142,7 +143,7 @@ impl AgentEngine {
             Ok(rx) => rx,
             Err(error) => {
                 if let Err(persistence_error) = outcome_guard.complete(true, &error.to_string()) {
-                    return Err(AgentError::ApiError(format!(
+                    return Err(AgentError::DurableState(format!(
                         "provider request failed: {error}; provider outcome persistence failed: {persistence_error}"
                     )));
                 }
@@ -154,7 +155,7 @@ impl AgentEngine {
             Ok(outcome) => outcome,
             Err(error) => {
                 if let Err(persistence_error) = outcome_guard.complete(true, &error.to_string()) {
-                    return Err(AgentError::ApiError(format!(
+                    return Err(AgentError::DurableState(format!(
                         "provider stream failed: {error}; provider outcome persistence failed: {persistence_error}"
                     )));
                 }
@@ -163,10 +164,10 @@ impl AgentEngine {
             }
         };
         let output = serde_json::to_string(&outcome)
-            .map_err(|error| AgentError::ApiError(format!("provider outcome serialization failed: {error}")))?;
+            .map_err(|error| AgentError::DurableState(format!("provider outcome serialization failed: {error}")))?;
         outcome_guard
             .complete(false, &output)
-            .map_err(|error| AgentError::ApiError(format!("provider outcome persistence failed: {error}")))?;
+            .map_err(|error| AgentError::DurableState(format!("provider outcome persistence failed: {error}")))?;
         task_phase.complete(DurableTaskPhase::ProviderCompleted)?;
         if let Some(permit) = provider_rate_permit.take() {
             permit

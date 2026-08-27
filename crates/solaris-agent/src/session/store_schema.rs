@@ -19,6 +19,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Sessi
             migrate_v5_to_v6(&transaction)?;
             migrate_v6_to_v7(&transaction)?;
             migrate_v7_to_v8(&transaction)?;
+            migrate_v8_to_v9(&transaction)?;
         }
         2 => {
             migrate_v2_to_v3(&transaction)?;
@@ -27,6 +28,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Sessi
             migrate_v5_to_v6(&transaction)?;
             migrate_v6_to_v7(&transaction)?;
             migrate_v7_to_v8(&transaction)?;
+            migrate_v8_to_v9(&transaction)?;
         }
         3 => {
             migrate_v3_to_v4(&transaction)?;
@@ -34,23 +36,31 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Sessi
             migrate_v5_to_v6(&transaction)?;
             migrate_v6_to_v7(&transaction)?;
             migrate_v7_to_v8(&transaction)?;
+            migrate_v8_to_v9(&transaction)?;
         }
         4 => {
             migrate_v4_to_v5(&transaction)?;
             migrate_v5_to_v6(&transaction)?;
             migrate_v6_to_v7(&transaction)?;
             migrate_v7_to_v8(&transaction)?;
+            migrate_v8_to_v9(&transaction)?;
         }
         5 => {
             migrate_v5_to_v6(&transaction)?;
             migrate_v6_to_v7(&transaction)?;
             migrate_v7_to_v8(&transaction)?;
+            migrate_v8_to_v9(&transaction)?;
         }
         6 => {
             migrate_v6_to_v7(&transaction)?;
             migrate_v7_to_v8(&transaction)?;
+            migrate_v8_to_v9(&transaction)?;
         }
-        7 => migrate_v7_to_v8(&transaction)?,
+        7 => {
+            migrate_v7_to_v8(&transaction)?;
+            migrate_v8_to_v9(&transaction)?;
+        }
+        8 => migrate_v8_to_v9(&transaction)?,
         SESSION_STORE_SCHEMA_VERSION => verify_meta_version(&transaction)?,
         version if version > SESSION_STORE_SCHEMA_VERSION => {
             return Err(SessionStoreError::UnsupportedSchema {
@@ -348,6 +358,66 @@ fn migrate_v7_to_v8(transaction: &Transaction<'_>) -> Result<(), SessionStoreErr
         .map_err(|source| db_error("set Agent conversation opening lease schema version", source))
 }
 
+fn migrate_v8_to_v9(transaction: &Transaction<'_>) -> Result<(), SessionStoreError> {
+    let has_durable_tasks: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'durable_agent_tasks'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| db_error("inspect durable task schema before side-effect migration", source))?;
+    let supports_side_effect_unknown = if has_durable_tasks {
+        transaction
+            .query_row(
+                "SELECT instr(sql, '''side_effect_unknown''') > 0
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_agent_tasks'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|source| db_error("inspect durable task side-effect phase constraint", source))?
+    } else {
+        false
+    };
+    if has_durable_tasks && !supports_side_effect_unknown {
+        transaction
+            .execute_batch(
+                "DROP INDEX IF EXISTS durable_agent_tasks_phase;
+                 ALTER TABLE durable_agent_tasks RENAME TO durable_agent_tasks_v8;",
+            )
+            .map_err(|source| db_error("prepare durable task side-effect migration", source))?;
+        create_durable_tasks(transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO durable_agent_tasks
+                    (session_id, task_key, input_digest, phase, call_id, session_revision,
+                     task_revision, terminal_result_json, updated_at_ms)
+                 SELECT session_id, task_key, input_digest, phase, call_id, session_revision,
+                        task_revision, terminal_result_json, updated_at_ms
+                 FROM durable_agent_tasks_v8",
+                [],
+            )
+            .map_err(|source| db_error("copy durable tasks into side-effect schema", source))?;
+        transaction
+            .execute("DROP TABLE durable_agent_tasks_v8", [])
+            .map_err(|source| db_error("remove previous durable task side-effect schema", source))?;
+    } else if !has_durable_tasks {
+        create_durable_tasks(transaction)?;
+    }
+    transaction
+        .execute(
+            "UPDATE session_store_meta SET schema_version = 9 WHERE singleton = 1",
+            [],
+        )
+        .map_err(|source| db_error("record durable task side-effect schema version", source))?;
+    transaction
+        .pragma_update(None, "user_version", 9)
+        .map_err(|source| db_error("set durable task side-effect schema version", source))
+}
+
 fn create_agent_conversations(transaction: &Transaction<'_>) -> Result<(), SessionStoreError> {
     transaction
         .execute_batch(
@@ -450,7 +520,8 @@ fn create_durable_tasks(transaction: &Transaction<'_>) -> Result<(), SessionStor
                 phase TEXT NOT NULL CHECK (phase IN (
                     'created', 'user_checkpointed', 'awaiting_provider',
                     'provider_in_flight', 'provider_completed',
-                    'tools_in_flight', 'tools_completed', 'completed', 'outcome_unknown', 'aborted'
+                    'tools_in_flight', 'tools_completed', 'completed', 'outcome_unknown',
+                    'side_effect_unknown', 'aborted'
                 )),
                 call_id TEXT,
                 session_revision INTEGER NOT NULL CHECK (session_revision >= 0),

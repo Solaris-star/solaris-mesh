@@ -25,6 +25,7 @@ pub(crate) enum DurableTaskPhase {
     ToolsCompleted,
     Completed,
     OutcomeUnknown,
+    SideEffectUnknown,
     Aborted,
 }
 
@@ -40,6 +41,7 @@ impl DurableTaskPhase {
             Self::ToolsCompleted => "tools_completed",
             Self::Completed => "completed",
             Self::OutcomeUnknown => "outcome_unknown",
+            Self::SideEffectUnknown => "side_effect_unknown",
             Self::Aborted => "aborted",
         }
     }
@@ -55,6 +57,7 @@ impl DurableTaskPhase {
             "tools_completed" => Ok(Self::ToolsCompleted),
             "completed" => Ok(Self::Completed),
             "outcome_unknown" => Ok(Self::OutcomeUnknown),
+            "side_effect_unknown" => Ok(Self::SideEffectUnknown),
             "aborted" => Ok(Self::Aborted),
             _ => Err(SessionStoreError::TaskStateCorrupt),
         }
@@ -64,7 +67,10 @@ impl DurableTaskPhase {
         if self == next {
             return true;
         }
-        if matches!(self, Self::Completed | Self::OutcomeUnknown | Self::Aborted) {
+        if matches!(
+            self,
+            Self::Completed | Self::OutcomeUnknown | Self::SideEffectUnknown | Self::Aborted
+        ) {
             return false;
         }
         matches!(
@@ -77,6 +83,7 @@ impl DurableTaskPhase {
                 | Self::ToolsCompleted
                 | Self::Completed
                 | Self::OutcomeUnknown
+                | Self::SideEffectUnknown
                 | Self::Aborted
         )
     }

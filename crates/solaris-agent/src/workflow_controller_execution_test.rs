@@ -116,6 +116,30 @@ impl crate::runtime_ledger::RuntimeLedger for WorkflowAppendBlockingLedger {
         Ok(record)
     }
 
+    fn admit_tasks_and_append_under_workflow_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+        root_run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+        records: &[(solaris_types::effect::DurabilityClass, String, Value)],
+    ) -> std::io::Result<Vec<crate::runtime_ledger::LedgerRecord>> {
+        let persisted = self.inner.admit_tasks_and_append_under_workflow_lease(
+            lease,
+            now_unix_ms,
+            root_run_id,
+            max_tasks,
+            tasks,
+            records,
+        )?;
+        if records.iter().any(|(_, record_type, _)| record_type == "workflow_started") {
+            self.appended.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+        Ok(persisted)
+    }
+
     fn compare_and_append(
         &self,
         run_id: &RunId,
@@ -339,7 +363,7 @@ impl WorkflowNodeExecutor for FlakyExecutor {
             let mut failures = self.failures.lock().unwrap();
             if *failures == 0 {
                 *failures += 1;
-                return Err("first failure".into());
+                return Err(WorkflowNodeError::retryable("first failure"));
             }
         }
         Ok(json!({"ok": true}))
@@ -564,6 +588,7 @@ async fn timeout_fails_node_without_hanging_run() {
     let controller = WorkflowController::default();
     let mut slow = node("slow", &[]);
     slow.timeout_ms = Some(1);
+    slow.retry.max_attempts = 2;
     controller
         .register(WorkflowDefinition {
             id: "timeout".into(),
@@ -583,6 +608,8 @@ async fn timeout_fails_node_without_hanging_run() {
         .await
         .unwrap();
     assert_eq!(settled.status, WorkflowRunStatus::Failed);
+    assert_eq!(settled.nodes["slow"].attempt_number, 1);
+    assert_eq!(settled.nodes["slow"].failure_class, Some(TaskFailureClass::OutcomeUnknown));
     assert!(settled.nodes["slow"].error.as_deref().unwrap().contains("timed out"));
 }
 

@@ -516,15 +516,15 @@ impl AgentEngine {
                 .map_err(AgentError::ResourceBudgetExceeded)?;
         }
         let phase = if tool_statuses.contains(&ToolResultStatus::OutcomeUnknown) {
-            DurableTaskPhase::OutcomeUnknown
+            DurableTaskPhase::SideEffectUnknown
         } else {
             DurableTaskPhase::ToolsCompleted
         };
         self.emit_tool_results(tool_calls, &tool_results, &tool_statuses, &executable_metadata);
-        if phase == DurableTaskPhase::OutcomeUnknown {
+        if phase == DurableTaskPhase::SideEffectUnknown {
             self.messages.push(Message::now(Role::User, tool_results.clone()));
             self.save_session()?;
-            task_phase.complete(DurableTaskPhase::OutcomeUnknown)?;
+            task_phase.complete(DurableTaskPhase::SideEffectUnknown)?;
             return Err(AgentError::SideEffectUnknown(format!(
                 "tool round {round_call_id} completed with an unknown side-effect outcome"
             )));

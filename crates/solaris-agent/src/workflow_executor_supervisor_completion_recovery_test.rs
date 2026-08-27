@@ -189,6 +189,7 @@ async fn assert_supervisor_completion_tamper_is_rejected(name: &str, tamper: Sup
             permission_mode: solaris_types::permission::PermissionMode::Auto,
             ledger: Some(runtime_ledger.clone()),
             concurrency_gate: None,
+            max_tasks_per_run: None,
         },
     )
     .await;

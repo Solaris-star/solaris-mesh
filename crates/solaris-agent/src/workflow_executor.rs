@@ -303,14 +303,18 @@ fn parse_structured_result(text: &str) -> Result<Value, String> {
     serde_json::from_str(fenced).map_err(|error| error.to_string())
 }
 
-fn normalize_role_output(role_id: &str, schema: Option<&Value>, text: &str) -> Result<Value, String> {
+fn normalize_role_output(role_id: &str, schema: Option<&Value>, text: &str) -> Result<Value, WorkflowNodeError> {
     let parsed = parse_structured_result(text);
     match (schema, parsed) {
         (Some(schema), Ok(value)) => {
-            validate_value(&value, schema).map_err(|error| format!("role {role_id} output invalid: {error}"))?;
+            validate_value(&value, schema).map_err(|error| {
+                WorkflowNodeError::non_convergent(format!("role {role_id} output invalid: {error}"))
+            })?;
             Ok(value)
         }
-        (Some(_), Err(error)) => Err(format!("role {role_id} did not return valid JSON: {error}")),
+        (Some(_), Err(error)) => Err(WorkflowNodeError::non_convergent(format!(
+            "role {role_id} did not return valid JSON: {error}"
+        ))),
         (None, Ok(value)) => Ok(value),
         (None, Err(_)) => Ok(json!({"text": text, "completed": true})),
     }
@@ -506,7 +510,9 @@ impl AgentWorkflowExecutor {
                 .await?
                 .into_iter()
                 .next()
-                .ok_or_else(|| WorkflowNodeError::retryable("Single collaboration returned no result"));
+                .ok_or_else(|| {
+                    WorkflowNodeError::outcome_unknown("Single collaboration returned no result after child execution")
+                });
         }
 
         let worker_count = collaboration_worker_count(&context.parameters);
@@ -852,7 +858,9 @@ impl WorkflowNodeExecutor for AgentWorkflowExecutor {
                 )
                 .await?;
             if let Some(schema) = &role.output_schema {
-                validate_value(&output, schema).map_err(|error| format!("role {} output invalid: {error}", role.id))?;
+                validate_value(&output, schema).map_err(|error| {
+                    WorkflowNodeError::non_convergent(format!("role {} output invalid: {error}", role.id))
+                })?;
             }
             self.finish_plugin_contributions(&context, &plugin_input, &output)
                 .await?;

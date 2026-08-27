@@ -66,10 +66,20 @@ fn only_explicit_transient_provider_failures_are_retryable() {
         .failure_class(),
         TaskFailureClass::Retryable
     );
+    for status in [401, 403] {
+        assert_eq!(
+            AgentError::Provider(ProviderError::Api {
+                status,
+                message: "permission denied".to_owned(),
+            })
+            .failure_class(),
+            TaskFailureClass::PermissionDenied
+        );
+    }
     assert_eq!(
         AgentError::Provider(ProviderError::Api {
-            status: 403,
-            message: "forbidden".to_owned(),
+            status: 500,
+            message: "server error".to_owned(),
         })
         .failure_class(),
         TaskFailureClass::NonRetryable
@@ -78,4 +88,17 @@ fn only_explicit_transient_provider_failures_are_retryable() {
         AgentError::Provider(ProviderError::PromptTooLong("large".to_owned())).failure_class(),
         TaskFailureClass::NonRetryable
     );
+}
+
+#[test]
+fn dispatched_provider_transport_and_parse_failures_are_outcome_unknown() {
+    for error in [
+        ProviderError::Connection("reset".to_owned()),
+        ProviderError::Parse("truncated response".to_owned()),
+    ] {
+        assert_eq!(
+            AgentError::from_dispatched_provider(error).failure_class(),
+            TaskFailureClass::OutcomeUnknown
+        );
+    }
 }

@@ -63,13 +63,34 @@ macro_rules! forward_compare_and_append {
                 .append_under_workflow_lease(lease, now_unix_ms, durability, record_type, payload)
         }
 
-        fn admit_collaboration_tasks(
+        fn admit_collaboration_tasks_for_root(
             &self,
+            root_run_id: &solaris_types::identity::RunId,
             run_id: &solaris_types::identity::RunId,
             max_tasks: usize,
             tasks: &[solaris_types::runtime::TaskRecord],
         ) -> std::io::Result<Vec<$crate::runtime_ledger::LedgerRecord>> {
-            self.inner.admit_collaboration_tasks(run_id, max_tasks, tasks)
+            self.inner
+                .admit_collaboration_tasks_for_root(root_run_id, run_id, max_tasks, tasks)
+        }
+
+        fn admit_tasks_and_append_under_workflow_lease(
+            &self,
+            lease: &$crate::runtime_ledger::WorkflowMutationLease,
+            now_unix_ms: i64,
+            root_run_id: &solaris_types::identity::RunId,
+            max_tasks: usize,
+            tasks: &[solaris_types::runtime::TaskRecord],
+            records: &[(solaris_types::effect::DurabilityClass, String, serde_json::Value)],
+        ) -> std::io::Result<Vec<$crate::runtime_ledger::LedgerRecord>> {
+            self.inner.admit_tasks_and_append_under_workflow_lease(
+                lease,
+                now_unix_ms,
+                root_run_id,
+                max_tasks,
+                tasks,
+                records,
+            )
         }
 
         fn compare_and_append_under_workflow_lease(
@@ -240,6 +261,25 @@ macro_rules! forward_workflow_mutation_lease {
         ) -> std::io::Result<$crate::runtime_ledger::LedgerRecord> {
             self.inner
                 .append_under_workflow_lease(lease, now_unix_ms, durability, record_type, payload)
+        }
+
+        fn admit_tasks_and_append_under_workflow_lease(
+            &self,
+            lease: &$crate::runtime_ledger::WorkflowMutationLease,
+            now_unix_ms: i64,
+            root_run_id: &solaris_types::identity::RunId,
+            max_tasks: usize,
+            tasks: &[solaris_types::runtime::TaskRecord],
+            records: &[(solaris_types::effect::DurabilityClass, String, serde_json::Value)],
+        ) -> std::io::Result<Vec<$crate::runtime_ledger::LedgerRecord>> {
+            self.inner.admit_tasks_and_append_under_workflow_lease(
+                lease,
+                now_unix_ms,
+                root_run_id,
+                max_tasks,
+                tasks,
+                records,
+            )
         }
 
         fn compare_and_append_under_workflow_lease(

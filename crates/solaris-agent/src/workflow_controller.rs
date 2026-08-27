@@ -16,6 +16,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use solaris_types::effect::DurabilityClass;
 use solaris_types::identity::{AttemptId, OperationId, RunId, TaskId};
 use solaris_types::plugin::ImplementationIdentity;
 use solaris_types::runtime::{TaskFailureClass, TaskRecord, TaskState};
@@ -179,6 +180,8 @@ pub struct WorkflowController {
     ledger: Arc<dyn RuntimeLedger>,
     mutation: Arc<RunMutationCoordinator>,
     mutation_owner_id: String,
+    max_tasks_per_run: usize,
+    quota_root_run_id: Option<RunId>,
     tasks: Arc<TaskRegistry>,
     runtime_events: Option<Arc<CollaborationRuntime<()>>>,
     roles: Option<Arc<crate::role_registry::AgentRoleRegistry>>,
@@ -205,6 +208,8 @@ impl WorkflowController {
             ledger,
             mutation: Arc::new(RunMutationCoordinator::default()),
             mutation_owner_id: Uuid::now_v7().to_string(),
+            max_tasks_per_run: solaris_config::config::MultiAgentConfig::DEFAULT_MAX_TASKS_PER_RUN as usize,
+            quota_root_run_id: None,
             tasks,
             runtime_events: None,
             roles: None,
@@ -229,10 +234,18 @@ impl WorkflowController {
             ledger: runtime.ledger(),
             mutation,
             mutation_owner_id: Uuid::now_v7().to_string(),
+            max_tasks_per_run: solaris_config::config::MultiAgentConfig::DEFAULT_MAX_TASKS_PER_RUN as usize,
+            quota_root_run_id: None,
             tasks: runtime.tasks(),
             runtime_events: Some(runtime),
             roles,
         }
+    }
+
+    pub fn with_task_admission(mut self, root_run_id: RunId, max_tasks_per_run: usize) -> Self {
+        self.quota_root_run_id = Some(root_run_id);
+        self.max_tasks_per_run = max_tasks_per_run;
+        self
     }
 
     pub fn task_registry(&self) -> Arc<TaskRegistry> {
@@ -686,7 +699,14 @@ impl WorkflowController {
                 failure_class: None,
             })
             .collect();
-        let outcome = self.mutate_projection(&run_id, |guard, prepared| {
+        let quota_root_run_id = self.quota_root_run_id.clone().unwrap_or_else(|| {
+            run_id
+                .as_str()
+                .split_once(":workflow:")
+                .map(|(root, _)| RunId::from(root))
+                .unwrap_or_else(|| run_id.clone())
+        });
+        let (outcome, admitted_records) = self.mutate_projection(&run_id, |guard, prepared| {
             if let Some(parent_run_id) = parent_run_id.as_ref() {
                 let parent = self
                     .runs
@@ -708,31 +728,61 @@ impl WorkflowController {
                     parent_run_id.as_ref(),
                     runtime_identity.as_ref(),
                 )
-                .map(|snapshot| WorkflowStartOutcome {
-                    snapshot,
-                    started: false,
+                .map(|snapshot| {
+                    (
+                        WorkflowStartOutcome {
+                            snapshot,
+                            started: false,
+                        },
+                        Vec::new(),
+                    )
                 });
             }
-            self.append_record(
-                guard,
-                &run_id,
-                "workflow_started",
-                json!({
-                    "workflow_id": definition.id,
-                    "workflow_version": definition.version,
-                    "snapshot": snapshot,
-                }),
-            )?;
+            let lease = guard
+                .lease
+                .as_ref()
+                .ok_or_else(|| "runtime ledger cannot fence Workflow task admission".to_owned())?;
+            let admitted_records = self
+                .ledger
+                .admit_tasks_and_append_under_workflow_lease(
+                    lease,
+                    chrono::Utc::now().timestamp_millis(),
+                    &quota_root_run_id,
+                    self.max_tasks_per_run,
+                    &task_records,
+                    &[(
+                        DurabilityClass::SyncCritical,
+                        "workflow_started".to_owned(),
+                        json!({
+                            "workflow_id": definition.id,
+                            "workflow_version": definition.version,
+                            "snapshot": snapshot,
+                        }),
+                    )],
+                )
+                .map_err(|error| error.to_string())?;
             *prepared = Some(snapshot.clone());
-            Ok(WorkflowStartOutcome {
-                snapshot: snapshot.clone(),
-                started: true,
-            })
+            Ok((
+                WorkflowStartOutcome {
+                    snapshot: snapshot.clone(),
+                    started: true,
+                },
+                admitted_records,
+            ))
         })?;
         if outcome.started {
-            for task in &task_records {
+            for record in admitted_records
+                .into_iter()
+                .filter(|record| record.record_type == "task_created")
+            {
+                let task: TaskRecord = serde_json::from_value(record.payload).map_err(|error| error.to_string())?;
                 self.tasks.upsert(task.clone());
-                self.emit_task_event(&run_id, "task_created", task);
+                self.emit_task_event(&run_id, "task_created", &task);
+            }
+            for task in &task_records {
+                if self.tasks.get(&task.task_id).is_none() {
+                    self.tasks.upsert(task.clone());
+                }
             }
         }
         Ok(outcome)
@@ -841,7 +891,9 @@ impl WorkflowController {
                     tokio::time::timeout(Duration::from_millis(timeout_ms.max(1)), execute)
                         .await
                         .map_err(|_| {
-                            WorkflowNodeError::retryable(format!("workflow node timed out after {timeout_ms}ms"))
+                            WorkflowNodeError::outcome_unknown(format!(
+                                "workflow node timed out after {timeout_ms}ms; execution outcome is unknown"
+                            ))
                         })?
                 } else {
                     execute.await
@@ -918,8 +970,8 @@ impl WorkflowController {
                     Ok(result) => result,
                     Err(_) => {
                         let _ = self.cancel(&child_run_id, "parent workflow node timed out");
-                        return Err(WorkflowNodeError::retryable(format!(
-                            "workflow node timed out after {timeout_ms}ms"
+                        return Err(WorkflowNodeError::outcome_unknown(format!(
+                            "workflow node timed out after {timeout_ms}ms; child execution outcome is unknown"
                         )));
                     }
                 }

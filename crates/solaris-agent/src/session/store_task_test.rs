@@ -138,6 +138,45 @@ fn user_checkpoint_atomically_saves_session_and_distinguishes_commit_then_error(
     assert_eq!(checkpointed.task_revision, 1);
 }
 
+#[test]
+fn side_effect_unknown_is_a_terminal_durable_task_phase() {
+    let directory = tempdir().unwrap();
+    let store = SessionStore::open(directory.path()).unwrap();
+    let session = sample_session("session-side-effect-unknown");
+    let lease = store.create_active(&session, "owner-side-effect-unknown").unwrap();
+    let task = store
+        .begin_or_resume_task(&lease, "task-key-v1:side-effect-unknown", &[9; 32])
+        .unwrap();
+
+    let unknown = store
+        .transition_task(
+            &lease,
+            &task.task_key,
+            task.task_revision,
+            DurableTaskPhase::SideEffectUnknown,
+            Some("tool-call-v3:unknown"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(unknown.phase, DurableTaskPhase::SideEffectUnknown);
+    assert_eq!(unknown.call_id.as_deref(), Some("tool-call-v3:unknown"));
+    assert_eq!(
+        store.load_task(&lease, &task.task_key).unwrap().unwrap().phase,
+        DurableTaskPhase::SideEffectUnknown
+    );
+    assert!(matches!(
+        store.transition_task(
+            &lease,
+            &task.task_key,
+            unknown.task_revision,
+            DurableTaskPhase::Completed,
+            None,
+            Some(br#"{"text":"unsafe retry"}"#),
+        ),
+        Err(SessionStoreError::InvalidTaskTransition { .. })
+    ));
+}
+
 fn sample_session(id: &str) -> Session {
     let now = Utc::now();
     Session {

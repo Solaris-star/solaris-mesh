@@ -175,6 +175,25 @@ impl RuntimeLedger for TaskAssignmentCrashLedger {
         )
     }
 
+    fn admit_tasks_and_append_under_workflow_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+        root_run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> std::io::Result<Vec<LedgerRecord>> {
+        self.inner.admit_tasks_and_append_under_workflow_lease(
+            lease,
+            now_unix_ms,
+            root_run_id,
+            max_tasks,
+            tasks,
+            records,
+        )
+    }
+
     fn run_ids(&self) -> std::io::Result<Vec<RunId>> {
         self.inner.run_ids()
     }
