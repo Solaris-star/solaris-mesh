@@ -22,7 +22,7 @@ use solaris_types::llm::{LlmEvent, LlmRequest};
 use solaris_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
 use solaris_types::permission::{PermissionCeiling, PermissionMode};
 use solaris_types::resource::ResourceBudget;
-use solaris_types::runtime::{AgentLifecycleState, TaskRecord, TaskState};
+use solaris_types::runtime::{AgentLifecycleState, TaskFailureClass, TaskRecord, TaskState};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
@@ -757,7 +757,7 @@ async fn cancelling_spawn_marks_committed_child_cancelled() {
 }
 
 #[tokio::test]
-async fn supervisor_retries_failed_worker_and_records_settlement() {
+async fn supervisor_does_not_retry_unknown_worker_outcome() {
     let provider = Arc::new(MockLlmProvider::with_turns(vec![
         vec![LlmEvent::Error("retry".into())],
         vec![
@@ -788,22 +788,23 @@ async fn supervisor_retries_failed_worker_and_records_settlement() {
     };
     let result = SupervisorCoordinator::new(Arc::clone(&spawner)).execute(spec, 2).await;
 
-    assert!(!result.is_error);
-    assert_eq!(result.text, "done");
+    assert!(result.is_error);
+    assert_eq!(result.status, AgentOutcomeStatus::OutcomeUnknown);
+    assert_eq!(result.failure_class, Some(TaskFailureClass::OutcomeUnknown));
     let records = runtime.ledger().records_for_run(&run_id).unwrap();
     assert_eq!(
         records
             .iter()
             .filter(|record| record.record_type == "supervisor_assignment")
             .count(),
-        2
+        1
     );
     assert!(
         records
             .iter()
             .any(|record| record.record_type == "supervisor_attempt_failed")
     );
-    assert!(records.iter().any(|record| record.record_type == "supervisor_settled"));
+    assert!(!records.iter().any(|record| record.record_type == "supervisor_settled"));
     assert_eq!(
         records
             .iter()
