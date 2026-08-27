@@ -106,6 +106,7 @@ impl WorkflowController {
             attempt.output_ref = None;
             attempt.committed_at_unix_ms = None;
             attempt.error = None;
+            attempt.failure_class = None;
             Ok(context)
         })?;
         Ok(context)
@@ -140,6 +141,7 @@ impl WorkflowController {
             )?;
             attempt.status = WorkflowNodeStatus::Failed;
             attempt.error = Some(error);
+            attempt.failure_class = Some(TaskFailureClass::NonRetryable);
             attempt.resume_existing_attempt = false;
             self.update_workflow_task(
                 guard,
@@ -230,6 +232,7 @@ impl WorkflowController {
             attempt.output_ref = Some(output_ref);
             attempt.committed_at_unix_ms = Some(committed_at_unix_ms);
             attempt.error = None;
+            attempt.failure_class = None;
             self.update_workflow_task(
                 guard,
                 run_id,
@@ -332,6 +335,7 @@ impl WorkflowController {
                 }),
             )?;
             attempt.error = Some(error.message.clone());
+            attempt.failure_class = Some(error.failure_class);
             attempt.status = status;
             attempt
                 .deferred_task_terminal_write

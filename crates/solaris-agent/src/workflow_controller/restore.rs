@@ -183,6 +183,7 @@ impl WorkflowController {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                     attempt.error = None;
+                    attempt.failure_class = None;
                     attempt.resume_existing_attempt = false;
                 }
                 "workflow_node_completed" => {
@@ -302,6 +303,12 @@ impl WorkflowController {
                     if let Some(attempt) = snapshot.nodes.get_mut(node_id) {
                         attempt.status = status;
                         attempt.error = record.payload.get("error").and_then(Value::as_str).map(str::to_owned);
+                        attempt.failure_class = record
+                            .payload
+                            .get("failure_class")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                            .or(Some(TaskFailureClass::NonRetryable));
                         attempt.resume_existing_attempt = false;
                         attempt.deferred_task_terminal_write = deferred_task_terminal_write;
                     }
@@ -518,6 +525,7 @@ impl WorkflowController {
             ) {
                 attempt.status = WorkflowNodeStatus::Failed;
                 attempt.error = Some(reason.clone());
+                attempt.failure_class = Some(TaskFailureClass::ReconciliationRequired);
                 attempt.resume_existing_attempt = false;
             }
         }
@@ -617,7 +625,10 @@ fn restore_deferred_task_terminal_write(
 ) -> Result<Option<DeferredTaskTerminalWrite>, String> {
     let legacy_deferred = payload.get("task_terminal_write_deferred").and_then(Value::as_bool);
     let canonical_operation_id = OperationId::new(format!("workflow:{run_id}:{node_id}:{attempt_id}:failed"));
-    let Some(typed_value) = payload.get("deferred_task_terminal_write") else {
+    let Some(typed_value) = payload
+        .get("deferred_task_terminal_write")
+        .filter(|value| !value.is_null())
+    else {
         if legacy_deferred != Some(true) {
             return Ok(None);
         }

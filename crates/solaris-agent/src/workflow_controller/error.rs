@@ -82,13 +82,13 @@ impl std::error::Error for WorkflowNodeError {}
 
 impl From<String> for WorkflowNodeError {
     fn from(message: String) -> Self {
-        Self::retryable(message)
+        Self::non_retryable(message)
     }
 }
 
 impl From<&str> for WorkflowNodeError {
     fn from(message: &str) -> Self {
-        Self::retryable(message)
+        Self::non_retryable(message)
     }
 }
 

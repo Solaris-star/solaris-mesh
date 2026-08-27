@@ -33,6 +33,7 @@ fn node(id: &str, depends_on: &[&str]) -> WorkflowNode {
 }
 
 include!("workflow_controller_execution_test.rs");
+include!("workflow_nested_failure_test.rs");
 include!("workflow_controller_registration_test.rs");
 include!("workflow_controller_restore_test.rs");
 include!("workflow_controller_deferred_restore_validation_test.rs");

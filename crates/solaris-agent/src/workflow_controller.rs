@@ -59,6 +59,8 @@ pub struct WorkflowNodeAttempt {
     pub committed_at_unix_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<TaskFailureClass>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume_existing_attempt: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -639,6 +641,7 @@ impl WorkflowController {
                         output_ref: None,
                         committed_at_unix_ms: None,
                         error: None,
+                        failure_class: None,
                         resume_existing_attempt: false,
                         deferred_task_terminal_write: None,
                     },
@@ -857,14 +860,39 @@ impl WorkflowController {
             self.start_child(child_run_id.clone(), &workflow_ref, parameters, context.run_id.clone())
                 .map_err(WorkflowNodeError::from)?;
             let execute_child = async {
-                let settled = Box::pin(self.execute_until_settled(&child_run_id, Arc::clone(&executor)))
-                    .await
-                    .map_err(WorkflowNodeError::from)?;
+                let settled = match Box::pin(self.execute_until_settled(&child_run_id, Arc::clone(&executor))).await {
+                    Ok(settled) => settled,
+                    Err(message) => {
+                        let failure_class = self
+                            .snapshot(&child_run_id)
+                            .and_then(|snapshot| {
+                                snapshot
+                                    .nodes
+                                    .values()
+                                    .filter(|attempt| attempt.status == WorkflowNodeStatus::Failed)
+                                    .filter_map(|attempt| attempt.failure_class)
+                                    .next()
+                            })
+                            .unwrap_or(TaskFailureClass::NonRetryable);
+                        return Err(WorkflowNodeError { failure_class, message });
+                    }
+                };
                 if settled.status != WorkflowRunStatus::Completed {
-                    return Err(WorkflowNodeError::retryable(format!(
-                        "subworkflow {workflow_ref} settled as {:?}",
-                        settled.status
-                    )));
+                    let failure_class = match settled.status {
+                        WorkflowRunStatus::Cancelled => TaskFailureClass::Cancelled,
+                        WorkflowRunStatus::Failed => settled
+                            .nodes
+                            .values()
+                            .filter(|attempt| attempt.status == WorkflowNodeStatus::Failed)
+                            .filter_map(|attempt| attempt.failure_class)
+                            .next()
+                            .unwrap_or(TaskFailureClass::NonRetryable),
+                        WorkflowRunStatus::Running | WorkflowRunStatus::Completed => TaskFailureClass::NonRetryable,
+                    };
+                    return Err(WorkflowNodeError {
+                        failure_class,
+                        message: format!("subworkflow {workflow_ref} settled as {:?}", settled.status),
+                    });
                 }
                 let definition = self.definition(&workflow_ref).ok_or_else(|| {
                     WorkflowNodeError::non_retryable(format!("subworkflow definition disappeared: {workflow_ref}"))
@@ -929,6 +957,7 @@ impl WorkflowController {
                 ) {
                     attempt.status = WorkflowNodeStatus::Cancelled;
                     attempt.error = Some(reason.to_owned());
+                    attempt.failure_class = Some(TaskFailureClass::Cancelled);
                 }
             }
             self.append_record(
