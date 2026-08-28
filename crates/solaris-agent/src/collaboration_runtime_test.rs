@@ -981,7 +981,15 @@ fn jsonl_restart_restores_collaboration_projection() {
         runtime
             .set_agent_state(&run, &child_id, AgentLifecycleState::Completed)
             .unwrap();
-        runtime.create_team(run.clone(), team.clone(), "restart").unwrap();
+        runtime
+            .create_collaboration_team(
+                run.clone(),
+                team.clone(),
+                "restart",
+                CollaborationStrategy::Team,
+                Some(root.clone()),
+            )
+            .unwrap();
         runtime.join_team(&run, &team, root.clone()).unwrap();
         runtime.join_team(&run, &team, child_id.clone()).unwrap();
         runtime.set_team_fact(&run, &team, &root, "answer", json!(42)).unwrap();
@@ -1081,6 +1089,7 @@ fn jsonl_restart_restores_collaboration_projection() {
         assert_eq!(restored_task.owner_agent_id, Some(child_id.clone()));
         assert_eq!(restored_task.state, TaskState::Completed);
         let restored_team = runtime.teams().get(&team).unwrap();
+        assert_eq!(restored_team.coordinator.as_ref(), Some(&root));
         assert!(restored_team.members.contains(&root));
         assert!(restored_team.members.contains(&child_id));
 
