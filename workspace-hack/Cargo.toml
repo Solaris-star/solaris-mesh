@@ -16,9 +16,12 @@ publish = false
 [dependencies]
 aho-corasick = { version = "1" }
 base64 = { version = "0.22" }
+bitflags = { version = "2", default-features = false, features = ["std"] }
+derive_more = { version = "2", features = ["display", "from", "is_variant"] }
 digest = { version = "0.10", features = ["mac", "oid", "std"] }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
+futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
@@ -29,14 +32,15 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "client-proxy", "http1", "http2", "server"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", default-features = false, features = ["i128", "std"] }
-once_cell = { version = "1" }
 percent-encoding = { version = "2" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "hooks"] }
 rustls = { version = "0.23", default-features = false, features = ["prefer-post-quantum", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
-serde_core = { version = "1", default-features = false, features = ["alloc", "result", "std"] }
+serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
+serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
 subtle = { version = "2" }
@@ -47,19 +51,18 @@ toml_parser = { version = "1" }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 winnow = { version = "1" }
 zeroize = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 aho-corasick = { version = "1" }
 cc = { version = "1", default-features = false, features = ["parallel"] }
+derive_more-impl = { version = "2", features = ["display", "from", "is_variant"] }
 memchr = { version = "2" }
-proc-macro2 = { version = "1" }
-quote = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
-serde_core = { version = "1", default-features = false, features = ["alloc", "result", "std"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
@@ -67,10 +70,10 @@ winnow = { version = "1" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "native-tokio", "ring", "tls12", "webpki-tokio"] }
-linux-raw-sys = { version = "0.12", default-features = false, features = ["auxvec", "elf", "errno", "general", "ioctl", "no_std", "prctl"] }
+linux-raw-sys = { version = "0.12", default-features = false, features = ["auxvec", "elf", "errno", "general", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "xdp"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "1", features = ["fs", "process", "stdio", "termios", "time"] }
+rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "stdio", "termios", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
@@ -78,7 +81,7 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "native-tokio", "ring", "tls12", "webpki-tokio"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "1", features = ["fs", "process", "stdio", "termios", "time"] }
+rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "stdio", "termios", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
@@ -87,7 +90,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 libc = { version = "0.2" }
 log = { version = "0.4", default-features = false, features = ["std"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-rustix = { version = "1", features = ["fs", "process", "stdio", "termios", "time"] }
+rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "stdio", "termios", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
@@ -98,7 +101,7 @@ libc = { version = "0.2" }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "native-tokio", "ring", "tls12", "webpki-tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
-windows-sys-4db8c43aad08e7ae = { package = "windows-sys", version = "0.60", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Kernel", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell"] }
-windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_Networking_WinSock", "Win32_Security_Authentication_Identity", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }
+windows-sys-4db8c43aad08e7ae = { package = "windows-sys", version = "0.60", features = ["Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
+windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security_Authentication_Identity", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_System_Com", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }
 
 ### END HAKARI SECTION
