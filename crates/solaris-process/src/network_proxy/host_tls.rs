@@ -27,6 +27,7 @@ use super::{
 
 pub(super) const CA_CERTIFICATE_FILE_NAME: &str = "network-proxy-ca.pem";
 const CONNECT_ESTABLISHED_RESPONSE: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+const NETWORK_PROOF_HEADER: &[u8] = b"\r\nX-Solaris-Network-Proof: 1\r\n";
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const TLS_HANDSHAKE_POLL: Duration = Duration::from_millis(100);
 const MAX_TLS_BUFFER_BYTES: usize = 256 * 1024;
@@ -276,6 +277,13 @@ pub(super) fn handle_connect(
         return Err(error);
     }
     context.authority.verify_certificate_file()?;
+    if context
+        .header
+        .windows(NETWORK_PROOF_HEADER.len())
+        .any(|window| window == NETWORK_PROOF_HEADER)
+    {
+        return handle_network_proof_connect(client, context);
+    }
     client.write_all(CONNECT_ESTABLISHED_RESPONSE)?;
     let config = context.authority.core.server_config(context.host)?;
     let mut server = ServerConnection::new(config).map_err(|_| tls_configuration_error())?;
@@ -308,6 +316,22 @@ pub(super) fn handle_connect(
         };
         relay_tls_request(&mut tls, request_state.buffered(), prepared, upstream, &relay)?;
     }
+}
+
+fn handle_network_proof_connect(client: &mut ProxyClientStream, context: ConnectContext<'_>) -> io::Result<()> {
+    let deadline = Instant::now() + DESTINATION_DEADLINE;
+    let upstream = context
+        .connector
+        .connect(context.host, context.port, context.stopped, deadline)?;
+    let peer = upstream.peer_addr()?;
+    context.connection.set_upstream(&upstream, context.stopped)?;
+    let response = format!(
+        "HTTP/1.1 200 Connection Established\r\nX-Solaris-Upstream-Address: {peer}\r\nConnection: close\r\n\r\n"
+    );
+    let result = client.write_all(response.as_bytes()).and_then(|_| client.flush());
+    let _ = upstream.shutdown(Shutdown::Both);
+    context.connection.clear_upstream();
+    result
 }
 
 struct TlsRelayContext<'a> {

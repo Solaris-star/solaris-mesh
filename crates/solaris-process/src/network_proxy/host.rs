@@ -23,7 +23,11 @@ use super::NetworkProxyTestFixture;
 use super::request::{ProxyRequest, ProxyRequestError};
 use super::{MAX_PROXY_HEADER_BYTES, NetworkProxyPolicy};
 
+#[cfg(unix)]
 #[path = "host_dns.rs"]
+mod host_dns;
+#[cfg(windows)]
+#[path = "host_dns_windows.rs"]
 mod host_dns;
 #[path = "host_tls.rs"]
 mod host_tls;

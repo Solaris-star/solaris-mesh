@@ -163,16 +163,68 @@ impl<T> CollaborationRuntime<T> {
         if task.task_id.as_str().trim().is_empty() {
             return Err(std::io::Error::other("runtime task id cannot be empty"));
         }
-        if let Some(owner) = task.owner_agent_id.as_ref() {
+        let owner = task.owner_agent_id.as_ref();
+        if let Some(owner) = owner {
             let agent = self
                 .agents
                 .get(owner)
                 .ok_or_else(|| std::io::Error::other(format!("unknown task owner: {owner}")))?;
             if !Arc::ptr_eq(&self.mutation.line_for(&agent.run_id), &self.mutation.line_for(run_id)) {
                 return Err(std::io::Error::other(
-                    "runtime task owner belongs to a different run lineage",
+                    "runtime task owner belongs to a different Run lineage",
                 ));
             }
+        }
+        if let Some(team_id) = task.team_id.as_ref() {
+            let team = self
+                .teams
+                .get(team_id)
+                .ok_or_else(|| std::io::Error::other(format!("unknown task Team: {team_id}")))?;
+            if !Arc::ptr_eq(&self.mutation.line_for(&team.run_id), &self.mutation.line_for(run_id)) {
+                return Err(std::io::Error::other(
+                    "runtime task Team belongs to a different Run lineage",
+                ));
+            }
+            let coordinator = team
+                .coordinator
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("runtime Team task has no coordinator"))?;
+            if !team.members.contains(coordinator) {
+                return Err(std::io::Error::other(
+                    "runtime Team task coordinator is not a Team member",
+                ));
+            }
+            match task.state {
+                TaskState::Created => {
+                    return Err(std::io::Error::other(
+                        "Team task cannot be durably registered in Created state",
+                    ));
+                }
+                TaskState::Queued if owner.is_some() => {
+                    return Err(std::io::Error::other("Queued Team task must not have an owner"));
+                }
+                TaskState::Assigned | TaskState::Running => {
+                    let owner = owner.ok_or_else(|| {
+                        std::io::Error::other(format!("{:?} Team task must have an owner", task.state))
+                    })?;
+                    if !team.members.contains(owner) {
+                        return Err(std::io::Error::other("runtime Team task owner is not a Team member"));
+                    }
+                }
+                TaskState::Completed | TaskState::Failed | TaskState::Cancelled | TaskState::Skipped => {
+                    if owner.is_some_and(|owner| !team.members.contains(owner)) {
+                        return Err(std::io::Error::other(
+                            "runtime Team task historical owner is not a Team member",
+                        ));
+                    }
+                }
+                TaskState::Queued => {}
+            }
+        } else if matches!(task.state, TaskState::Assigned | TaskState::Running) && owner.is_none() {
+            return Err(std::io::Error::other(format!(
+                "{:?} task must have an owner",
+                task.state
+            )));
         }
         Ok(())
     }
@@ -582,7 +634,20 @@ impl<T> CollaborationRuntime<T> {
         if !Arc::ptr_eq(&line, &self.mutation.line_for(&task.run_id))
             || !Arc::ptr_eq(&line, &self.mutation.line_for(&agent.run_id))
         {
-            return Err(std::io::Error::other("task and Agent must belong to the requested run"));
+            return Err(std::io::Error::other(
+                "task and Agent must belong to the requested Run lineage",
+            ));
+        }
+        if let Some(team_id) = task.team_id.as_ref() {
+            let team = self
+                .teams
+                .get(team_id)
+                .ok_or_else(|| std::io::Error::other(format!("unknown task Team: {team_id}")))?;
+            if !Arc::ptr_eq(&line, &self.mutation.line_for(&team.run_id)) || !team.members.contains(agent_id) {
+                return Err(std::io::Error::other(
+                    "task owner must belong to the task Team in the requested Run",
+                ));
+            }
         }
         Ok(())
     }

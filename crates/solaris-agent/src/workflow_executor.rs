@@ -390,6 +390,15 @@ impl AgentWorkflowExecutor {
         &self,
         specs: Vec<(AgentSpawnSpec, bool)>,
     ) -> Result<Vec<(AgentHandle, bool)>, WorkflowNodeError> {
+        if specs
+            .iter()
+            .any(|(spec, create_task)| *create_task && spec.overrides.collaboration.is_some())
+            && !self.spawner.supports_atomic_collaboration_batch()
+        {
+            return Err(WorkflowNodeError::non_retryable(
+                "runtime ledger cannot atomically persist collaboration Task/Team membership batch",
+            ));
+        }
         let mut handles = Vec::with_capacity(specs.len());
         for (spec, is_collaboration_task) in specs {
             let handle = match self.spawner.spawn(spec.clone()).await {

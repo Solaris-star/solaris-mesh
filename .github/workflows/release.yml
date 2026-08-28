@@ -115,6 +115,12 @@ jobs:
               shasum -a 256 "$1" | awk '{print $1}'
             fi
           }
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            vx cargo build --release --target ${{ matrix.target }} -p solaris-process \
+              --bin solaris-windows-network-proxy --features windows-packaged-network-proxy
+            proxy="target/${{ matrix.target }}/release/solaris-windows-network-proxy.exe"
+            export SOLARIS_PACKAGED_WINDOWS_NETWORK_PROXY_SHA256="$(digest_file "${proxy}")"
+          fi
           if [[ "${{ matrix.use_cross }}" == "true" ]]; then
             cross build --release --target ${{ matrix.target }} -p solaris-process --bin solaris-process-sandbox-helper
           else
@@ -215,10 +221,39 @@ jobs:
           $archive = "solaris-v${env:VERSION}-${{ matrix.target }}.zip"
           $helper = "target/${{ matrix.target }}/release/${{ matrix.helper_name }}"
           $helperManifest = "${helper}.sha256"
+          $proxy = "target/${{ matrix.target }}/release/solaris-windows-network-proxy.exe"
+          $proxyManifest = "${proxy}.sha256"
+          $proxyPackage = "target/${{ matrix.target }}/release/solaris-windows-network-proxy.msix"
+          $proxyPackageManifest = "${proxyPackage}.sha256"
           $installer = "target/${{ matrix.target }}/release/install-solaris.ps1"
           $installerEntry = "target/${{ matrix.target }}/release/install-solaris.cmd"
           $helperDigest = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText($helperManifest, "sha256:${helperDigest}`n", [Text.UTF8Encoding]::new($false))
+          $proxyDigest = (Get-FileHash -LiteralPath $proxy -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText($proxyManifest, "sha256:${proxyDigest}`n", [Text.UTF8Encoding]::new($false))
+          if ("${{ matrix.target }}" -eq "x86_64-pc-windows-msvc") {
+            $packageArchitecture = "x64"
+          } elseif ("${{ matrix.target }}" -eq "aarch64-pc-windows-msvc") {
+            $packageArchitecture = "arm64"
+          } else {
+            throw "unsupported Windows package target ${{ matrix.target }}"
+          }
+          if ($env:VERSION -notmatch '^(\d+)\.(\d+)\.(\d+)') {
+            throw "Windows MSIX version requires a semantic x.y.z release version"
+          }
+          $packageVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+          & crates/solaris-process/windows-network-proxy/build-unsigned-package.ps1 `
+            -BinaryPath $proxy `
+            -OutputPath $proxyPackage `
+            -PackageName 'Solaris.Mesh.NetworkProxy' `
+            -Publisher 'CN=Solaris Mesh' `
+            -Version $packageVersion `
+            -Architecture $packageArchitecture
+          if (-not (Test-Path -LiteralPath $proxyPackage -PathType Leaf)) {
+            throw "Windows network proxy MSIX was not created"
+          }
+          $proxyPackageDigest = (Get-FileHash -LiteralPath $proxyPackage -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText($proxyPackageManifest, "sha256:${proxyPackageDigest}`n", [Text.UTF8Encoding]::new($false))
           $extensionManifest = "target/${{ matrix.target }}/release/solaris-extension.json"
           Copy-Item -LiteralPath packaging/windows/install-solaris.ps1 -Destination $installer
           Copy-Item -LiteralPath packaging/windows/install-solaris.cmd -Destination $installerEntry
@@ -228,6 +263,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "failed to tighten sandbox helper DACL" }
           & icacls.exe $helperManifest /inheritance:r /grant:r "*${currentSid}:(R)" '*S-1-5-18:(R)' '*S-1-5-32-544:(R)'
           if ($LASTEXITCODE -ne 0) { throw "failed to tighten sandbox helper manifest DACL" }
+          & icacls.exe $proxy /inheritance:r /grant:r "*${currentSid}:(RX)" '*S-1-5-18:(RX)' '*S-1-5-32-544:(RX)'
+          if ($LASTEXITCODE -ne 0) { throw "failed to tighten Windows network proxy DACL" }
+          & icacls.exe $proxyManifest /inheritance:r /grant:r "*${currentSid}:(R)" '*S-1-5-18:(R)' '*S-1-5-32-544:(R)'
+          if ($LASTEXITCODE -ne 0) { throw "failed to tighten Windows network proxy manifest DACL" }
+          & icacls.exe $proxyPackage /inheritance:r /grant:r "*${currentSid}:(R)" '*S-1-5-18:(R)' '*S-1-5-32-544:(R)'
+          if ($LASTEXITCODE -ne 0) { throw "failed to tighten Windows network proxy MSIX DACL" }
+          & icacls.exe $proxyPackageManifest /inheritance:r /grant:r "*${currentSid}:(R)" '*S-1-5-18:(R)' '*S-1-5-32-544:(R)'
+          if ($LASTEXITCODE -ne 0) { throw "failed to tighten Windows network proxy MSIX manifest DACL" }
           $writeMask = [Security.AccessControl.FileSystemRights]::WriteData `
             -bor [Security.AccessControl.FileSystemRights]::AppendData `
             -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes `
@@ -236,7 +279,7 @@ jobs:
             -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles `
             -bor [Security.AccessControl.FileSystemRights]::ChangePermissions `
             -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-          foreach ($path in @($helper, $helperManifest)) {
+          foreach ($path in @($helper, $helperManifest, $proxy, $proxyManifest, $proxyPackage, $proxyPackageManifest)) {
             $writableAllow = (Get-Acl -LiteralPath $path).Access | Where-Object {
               $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
               ($_.FileSystemRights -band $writeMask) -ne 0
@@ -247,6 +290,10 @@ jobs:
             "target/${{ matrix.target }}/release/${{ matrix.binary_name }}",
             $helper,
             $helperManifest,
+            $proxy,
+            $proxyManifest,
+            $proxyPackage,
+            $proxyPackageManifest,
             $installer,
             $installerEntry,
             $extensionManifest
@@ -266,9 +313,23 @@ jobs:
           if (-not (Test-Path -LiteralPath "$smoke/${{ matrix.helper_name }}" -PathType Leaf)) {
             throw "release archive is missing the sandbox helper"
           }
+          if (-not (Test-Path -LiteralPath "$smoke/solaris-windows-network-proxy.exe" -PathType Leaf)) {
+            throw "release archive is missing the Windows network proxy"
+          }
+          if (-not (Test-Path -LiteralPath "$smoke/solaris-windows-network-proxy.msix" -PathType Leaf)) {
+            throw "release archive is missing the Windows network proxy MSIX"
+          }
           $manifest = "$smoke/${{ matrix.helper_name }}.sha256"
+          $proxyManifest = "$smoke/solaris-windows-network-proxy.exe.sha256"
+          $proxyPackageManifest = "$smoke/solaris-windows-network-proxy.msix.sha256"
           if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
             throw "release archive is missing the sandbox helper manifest"
+          }
+          if (-not (Test-Path -LiteralPath $proxyManifest -PathType Leaf)) {
+            throw "release archive is missing the Windows network proxy manifest"
+          }
+          if (-not (Test-Path -LiteralPath $proxyPackageManifest -PathType Leaf)) {
+            throw "release archive is missing the Windows network proxy MSIX manifest"
           }
           $installer = "$smoke/install-solaris.ps1"
           $installerEntry = "$smoke/install-solaris.cmd"
@@ -287,11 +348,19 @@ jobs:
           if ((Get-Content -LiteralPath $manifest -Raw).Trim() -ne "sha256:${helperDigest}") {
             throw "sandbox helper manifest does not match the packaged helper"
           }
+          $proxyDigest = (Get-FileHash -LiteralPath "$smoke/solaris-windows-network-proxy.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-Content -LiteralPath $proxyManifest -Raw).Trim() -ne "sha256:${proxyDigest}") {
+            throw "Windows network proxy manifest does not match the packaged proxy"
+          }
+          $proxyPackageDigest = (Get-FileHash -LiteralPath "$smoke/solaris-windows-network-proxy.msix" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-Content -LiteralPath $proxyPackageManifest -Raw).Trim() -ne "sha256:${proxyPackageDigest}") {
+            throw "Windows network proxy MSIX manifest does not match the packaged MSIX"
+          }
           & $installerEntry -InstallDirectory "$smoke/installed"
           if ($LASTEXITCODE -ne 0) {
             throw "Windows package installer failed with exit code $LASTEXITCODE"
           }
-          foreach ($name in @('${{ matrix.binary_name }}', '${{ matrix.helper_name }}', '${{ matrix.helper_name }}.sha256', 'solaris-extension.json')) {
+          foreach ($name in @('${{ matrix.binary_name }}', '${{ matrix.helper_name }}', '${{ matrix.helper_name }}.sha256', 'solaris-windows-network-proxy.exe', 'solaris-windows-network-proxy.exe.sha256', 'solaris-windows-network-proxy.msix', 'solaris-windows-network-proxy.msix.sha256', 'solaris-extension.json')) {
             if (-not (Test-Path -LiteralPath "$smoke/installed/$name" -PathType Leaf)) {
               throw "installed package is missing $name"
             }
@@ -306,7 +375,15 @@ jobs:
             -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
           $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
           $broadSids = @($currentSid, 'S-1-5-32-545', 'S-1-1-0')
-          foreach ($path in @("$smoke/${{ matrix.helper_name }}", $manifest)) {
+          $installedRuntimeFiles = @(
+            "$smoke/installed/${{ matrix.helper_name }}",
+            "$smoke/installed/${{ matrix.helper_name }}.sha256",
+            "$smoke/installed/solaris-windows-network-proxy.exe",
+            "$smoke/installed/solaris-windows-network-proxy.exe.sha256"
+          )
+          $identityPath = "$smoke/installed/solaris-windows-network-proxy.identity.json"
+          if (Test-Path -LiteralPath $identityPath -PathType Leaf) { $installedRuntimeFiles += $identityPath }
+          foreach ($path in $installedRuntimeFiles) {
             $writableAllow = (Get-Acl -LiteralPath $path).Access | Where-Object {
               $sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
               $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
@@ -318,6 +395,21 @@ jobs:
           $installedDigest = (Get-FileHash -LiteralPath "$smoke/${{ matrix.helper_name }}" -Algorithm SHA256).Hash.ToLowerInvariant()
           if ((Get-Content -LiteralPath $manifest -Raw).Trim() -ne "sha256:${installedDigest}") {
             throw "installed helper digest no longer matches its manifest"
+          }
+          $installedProxyDigest = (Get-FileHash -LiteralPath "$smoke/installed/solaris-windows-network-proxy.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-Content -LiteralPath "$smoke/installed/solaris-windows-network-proxy.exe.sha256" -Raw).Trim() -ne "sha256:${installedProxyDigest}") {
+            throw "installed Windows network proxy digest no longer matches its manifest"
+          }
+          $installedPackage = @(Get-AppxPackage -Name 'Solaris.Mesh.NetworkProxy') | Sort-Object Version -Descending | Select-Object -First 1
+          if (Test-Path -LiteralPath $identityPath -PathType Leaf) {
+            $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+            if (-not $installedPackage -or $identity.package_family_name -ne $installedPackage.PackageFamilyName -or $identity.application_user_model_id -ne "$($installedPackage.PackageFamilyName)!Proxy") {
+              throw "installed Windows network proxy identity does not match the registered package"
+            }
+          } elseif ($installedPackage) {
+            throw "a network proxy package is registered but the installer did not publish its verified identity"
+          } else {
+            Write-Warning "Windows runner cannot register the unsigned AppContainer proxy package; approved-domain networking remains fail-closed on this account"
           }
           $nativePair = "${{ matrix.target }}:${{ runner.arch }}"
           if ($nativePair -eq "x86_64-pc-windows-msvc:X64" -or $nativePair -eq "aarch64-pc-windows-msvc:ARM64") {

@@ -116,6 +116,14 @@ fn require_non_writable_package_file(path: &Path, _metadata: &std::fs::Metadata)
         .ok_or_else(helper_unavailable)
 }
 
+#[cfg(windows)]
+pub(crate) fn windows_package_file_is_trusted(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.is_file() && !metadata.file_type().is_symlink() && windows_dacl_has_no_writable_allow_ace(path)
+}
+
 #[cfg(not(any(unix, windows)))]
 fn require_non_writable_package_file(_path: &Path, _metadata: &std::fs::Metadata) -> io::Result<()> {
     Err(helper_unavailable())

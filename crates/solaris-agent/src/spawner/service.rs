@@ -88,6 +88,16 @@ impl AgentSpawnService for AgentSpawner {
                 "durable child identity version does not match its AgentId",
             ));
         }
+        if let Some(collaboration) = spec.overrides.collaboration.as_ref() {
+            if !self.supports_atomic_collaboration_batch() {
+                return Err(AgentSpawnError::non_retryable(
+                    "runtime ledger cannot atomically persist collaboration Team membership",
+                ));
+            }
+            self.lifecycle_runtime
+                .prepare_collaboration_team(&self.run_id, &agent_id, collaboration)
+                .map_err(|error| AgentSpawnError::reconciliation_required(error.to_string()))?;
+        }
         let handle = AgentHandle {
             run_id: spec.run_id.clone(),
             agent_id,
@@ -154,6 +164,17 @@ impl AgentSpawnService for AgentSpawner {
             return Err(self.abort_reservation_after_spawn_failure(
                 &reservation,
                 "durable spawn reservation returned a different child identity".to_owned(),
+            ));
+        }
+        if self.lifecycle_runtime.tasks().get(&handle.task_id).is_some()
+            && let Some(collaboration) = spec.overrides.collaboration.as_ref()
+            && let Err(error) =
+                self.lifecycle_runtime
+                    .prepare_collaboration_membership(&handle.run_id, &handle.agent_id, collaboration)
+        {
+            return Err(self.abort_reservation_after_spawn_failure(
+                &reservation,
+                format!("failed to persist reserved Agent Team membership before task assignment: {error}"),
             ));
         }
         if let Some(task) = self.lifecycle_runtime.tasks().get(&handle.task_id) {

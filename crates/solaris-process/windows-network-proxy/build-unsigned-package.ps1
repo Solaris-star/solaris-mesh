@@ -29,6 +29,17 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Windows 11 reserves a distinct publisher namespace for packages installed
+# through the AllowUnsigned deployment path. A package without this OID is rejected
+# with ERROR_UNSIGNED_PACKAGE_INVALID_PUBLISHER_NAMESPACE (0x80073D2C).
+$unsignedPublisherOid = 'OID.2.25.311729368913984317654407730594956997722=1'
+if ($Publisher -match '(?i)(?:^|,\s*)OID\.2\.25\.\d+=1(?:,|$)') {
+    $unsignedPublisher = $Publisher
+}
+else {
+    $unsignedPublisher = "$Publisher, $unsignedPublisherOid"
+}
+
 function Resolve-MakeAppx {
     param([string]$ExplicitPath)
 
@@ -112,7 +123,7 @@ try {
         throw 'The package manifest identity is missing.'
     }
     $identity.SetAttribute('Name', $PackageName)
-    $identity.SetAttribute('Publisher', $Publisher)
+    $identity.SetAttribute('Publisher', $unsignedPublisher)
     $identity.SetAttribute('Version', $Version)
     $identity.SetAttribute('ProcessorArchitecture', $Architecture)
     $xmlSettings = [System.Xml.XmlWriterSettings]::new()
@@ -152,7 +163,7 @@ try {
         package_sha256 = (Get-FileHash -LiteralPath $resolvedOutput -Algorithm SHA256).Hash.ToLowerInvariant()
         binary_sha256 = $verifiedBinaryHash.ToLowerInvariant()
         package_name = $PackageName
-        publisher = $Publisher
+        publisher = $unsignedPublisher
         application_id = 'Proxy'
         signed = $false
     }

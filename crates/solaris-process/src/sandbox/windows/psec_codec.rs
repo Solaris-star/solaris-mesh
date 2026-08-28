@@ -2,7 +2,6 @@ use process_security_environment_spec::process_security_environment_layout::{
     NetworkPolicyT, ProcessSecurityEnvironmentT, ProxyInfoT, SchemaVersionT, finish_process_security_environment_buffer,
 };
 
-const PRIVATE_NETWORK_CAPABILITY: &str = "privateNetworkClientServer";
 const LOOPBACK_PROXY_PREFIX: &str = "http://127.0.0.1:";
 // Windows package string and PublisherId rules:
 // https://learn.microsoft.com/windows/apps/desktop/modernize/package-identity-overview
@@ -93,7 +92,7 @@ fn encode_policy(input: NetworkPolicyInput<'_>) -> Result<Vec<u8>, PsecCodecErro
     network_policy.allowed_appcontainer_peer = Some(allowed_appcontainer_peer.to_owned());
     let mut spec = ProcessSecurityEnvironmentT::default();
     spec.version = SchemaVersionT { major: 1, minor: 0 };
-    spec.capabilities = Some(PRIVATE_NETWORK_CAPABILITY.to_owned());
+    spec.capabilities = None;
     spec.network_policy = Some(Box::new(network_policy));
     let root = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, root);

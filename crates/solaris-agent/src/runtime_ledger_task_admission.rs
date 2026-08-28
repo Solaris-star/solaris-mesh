@@ -3,8 +3,13 @@ use std::io;
 
 use rusqlite::{Transaction, TransactionBehavior, params};
 use solaris_types::effect::DurabilityClass;
-use solaris_types::identity::{RunId, TaskId};
-use solaris_types::runtime::TaskRecord;
+use solaris_types::identity::{AgentId, RunId, TaskId, TeamId};
+use solaris_types::runtime::{TaskRecord, TaskState};
+
+use crate::team_registry::TeamRecord;
+
+type CollaborationBatchPayload = (Vec<TeamRecord>, Vec<(TeamId, AgentId)>, Vec<TaskRecord>);
+type DurableCollaborationMetadata = (HashMap<TeamId, TeamRecord>, HashSet<(TeamId, AgentId)>);
 
 use super::runtime_ledger_workflow_lease::{
     advance_workflow_mutation_lease_in_memory, advance_workflow_mutation_lease_sqlite_transaction,
@@ -17,6 +22,256 @@ use super::{
 
 fn decode_task(payload: &[u8]) -> io::Result<TaskRecord> {
     serde_json::from_slice(payload).map_err(|error| io::Error::other(format!("decode task_created payload: {error}")))
+}
+
+fn decode_collaboration_batch(payload: &serde_json::Value) -> io::Result<CollaborationBatchPayload> {
+    let teams = serde_json::from_value(payload.get("teams").cloned().unwrap_or_else(|| serde_json::json!([])))
+        .map_err(|error| io::Error::other(format!("decode collaboration batch teams: {error}")))?;
+    let memberships = serde_json::from_value(
+        payload
+            .get("memberships")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|error| io::Error::other(format!("decode collaboration batch memberships: {error}")))?;
+    let tasks = serde_json::from_value(payload.get("tasks").cloned().unwrap_or_else(|| serde_json::json!([])))
+        .map_err(|error| io::Error::other(format!("decode collaboration batch tasks: {error}")))?;
+    Ok((teams, memberships, tasks))
+}
+
+fn same_team_metadata(left: &TeamRecord, right: &TeamRecord) -> bool {
+    left.run_id == right.run_id
+        && left.team_id == right.team_id
+        && left.name == right.name
+        && left.strategy == right.strategy
+        && left.coordinator == right.coordinator
+        && left.direct_peer_messaging == right.direct_peer_messaging
+        && left.max_pending_messages == right.max_pending_messages
+        && left.max_message_bytes == right.max_message_bytes
+}
+
+fn register_team_metadata(teams: &mut HashMap<TeamId, TeamRecord>, team: TeamRecord) -> io::Result<()> {
+    team.validate_message_limits()?;
+    if let Some(existing) = teams.get(&team.team_id) {
+        if !same_team_metadata(existing, &team) {
+            return Err(io::Error::other(format!(
+                "team {} was durably created with different metadata",
+                team.team_id
+            )));
+        }
+        return Ok(());
+    }
+    teams.insert(team.team_id.clone(), team);
+    Ok(())
+}
+
+fn collaboration_metadata_from_records(
+    run_id: &RunId,
+    records: &[(String, serde_json::Value)],
+) -> io::Result<DurableCollaborationMetadata> {
+    let mut teams = HashMap::new();
+    let mut memberships = HashSet::new();
+    for (record_type, payload) in records {
+        match record_type.as_str() {
+            "team_created" => {
+                let team: TeamRecord = serde_json::from_value(payload.clone())
+                    .map_err(|error| io::Error::other(format!("decode team_created payload: {error}")))?;
+                if team.run_id != *run_id {
+                    return Err(io::Error::other("durable Team belongs to a different Run"));
+                }
+                register_team_metadata(&mut teams, team)?;
+            }
+            "collaboration_team_prepared" | "collaboration_batch_prepared" => {
+                let (batch_teams, batch_memberships, _) = decode_collaboration_batch(payload)?;
+                for team in batch_teams {
+                    if team.run_id != *run_id {
+                        return Err(io::Error::other(
+                            "durable collaboration Team belongs to a different Run",
+                        ));
+                    }
+                    register_team_metadata(&mut teams, team)?;
+                }
+                memberships.extend(batch_memberships);
+            }
+            "team_member_joined" => {
+                let team_id = payload
+                    .get("team_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(TeamId::from)
+                    .ok_or_else(|| io::Error::other("team_member_joined is missing team_id"))?;
+                let agent_id = payload
+                    .get("agent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(AgentId::from)
+                    .ok_or_else(|| io::Error::other("team_member_joined is missing agent_id"))?;
+                memberships.insert((team_id, agent_id));
+            }
+            _ => {}
+        }
+    }
+    Ok((teams, memberships))
+}
+
+fn validate_team_task_admission(
+    task: &TaskRecord,
+    teams: &HashMap<TeamId, TeamRecord>,
+    memberships: &HashSet<(TeamId, AgentId)>,
+) -> io::Result<()> {
+    let Some(team_id) = task.team_id.as_ref() else {
+        return Ok(());
+    };
+    let team = teams.get(team_id).ok_or_else(|| {
+        io::Error::other(format!(
+            "task {} references Team {} that is not durable in the same atomic batch",
+            task.task_id, team_id
+        ))
+    })?;
+    let coordinator = team.coordinator.as_ref().ok_or_else(|| {
+        io::Error::other(format!(
+            "team task {} references Team {} without a coordinator",
+            task.task_id, team_id
+        ))
+    })?;
+    if !memberships.contains(&(team_id.clone(), coordinator.clone())) {
+        return Err(io::Error::other(format!(
+            "team task {} coordinator {} is not durably a member of Team {}",
+            task.task_id, coordinator, team_id
+        )));
+    }
+
+    match task.state {
+        TaskState::Created => {
+            return Err(io::Error::other(format!(
+                "team task {} cannot be durably admitted in Created state",
+                task.task_id
+            )));
+        }
+        TaskState::Queued => {
+            if task.owner_agent_id.is_some() {
+                return Err(io::Error::other(format!(
+                    "queued team task {} must not have an assigned owner",
+                    task.task_id
+                )));
+            }
+        }
+        TaskState::Assigned | TaskState::Running => {
+            let owner = task.owner_agent_id.as_ref().ok_or_else(|| {
+                io::Error::other(format!(
+                    "team task {} in {:?} state has no assigned owner membership",
+                    task.task_id, task.state
+                ))
+            })?;
+            if !memberships.contains(&(team_id.clone(), owner.clone())) {
+                return Err(io::Error::other(format!(
+                    "task {} owner {} is not durably a member of Team {}",
+                    task.task_id, owner, team_id
+                )));
+            }
+        }
+        TaskState::Completed | TaskState::Failed | TaskState::Cancelled | TaskState::Skipped => {
+            if let Some(owner) = task.owner_agent_id.as_ref()
+                && !memberships.contains(&(team_id.clone(), owner.clone()))
+            {
+                return Err(io::Error::other(format!(
+                    "task {} historical owner {} is not durably a member of Team {}",
+                    task.task_id, owner, team_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_additional_records(
+    run_id: &RunId,
+    existing_records: &[(String, serde_json::Value)],
+    tasks: &[TaskRecord],
+    additional: &[(DurabilityClass, String, serde_json::Value)],
+) -> io::Result<Vec<(DurabilityClass, String, serde_json::Value)>> {
+    let has_collaboration_batch = additional
+        .iter()
+        .any(|(_, record_type, _)| record_type == "collaboration_batch_prepared");
+    if !has_collaboration_batch {
+        return Ok(additional
+            .iter()
+            .filter(|(durability, _, _)| *durability != DurabilityClass::Ephemeral)
+            .cloned()
+            .collect());
+    }
+
+    let (mut teams, mut memberships) = collaboration_metadata_from_records(run_id, existing_records)?;
+    for (_, record_type, payload) in additional {
+        if record_type != "collaboration_batch_prepared" {
+            continue;
+        }
+        let (batch_teams, batch_memberships, batch_tasks) = decode_collaboration_batch(payload)?;
+        if batch_tasks != tasks {
+            return Err(io::Error::other(
+                "collaboration batch marker tasks do not match the atomically admitted task set",
+            ));
+        }
+        for team in batch_teams {
+            if team.run_id != *run_id {
+                return Err(io::Error::other("collaboration batch Team belongs to a different Run"));
+            }
+            register_team_metadata(&mut teams, team)?;
+        }
+        for (team_id, agent_id) in batch_memberships {
+            if !teams.contains_key(&team_id) {
+                return Err(io::Error::other(format!(
+                    "collaboration batch membership for Agent {agent_id} references unknown Team {team_id}"
+                )));
+            }
+            memberships.insert((team_id, agent_id));
+        }
+    }
+    for task in tasks {
+        validate_team_task_admission(task, &teams, &memberships)?;
+    }
+
+    Ok(additional
+        .iter()
+        .filter(|(durability, record_type, payload)| {
+            *durability != DurabilityClass::Ephemeral
+                && !(record_type == "collaboration_batch_prepared"
+                    && existing_records.iter().any(|(existing_type, existing_payload)| {
+                        existing_type == record_type && existing_payload == payload
+                    }))
+        })
+        .cloned()
+        .collect())
+}
+
+fn existing_metadata_in_memory(state: &InMemoryLedgerState, run_id: &RunId) -> Vec<(String, serde_json::Value)> {
+    state
+        .records
+        .get(run_id)
+        .into_iter()
+        .flatten()
+        .map(|record| (record.record_type.clone(), record.payload.clone()))
+        .collect()
+}
+
+fn existing_metadata_sqlite(
+    transaction: &Transaction<'_>,
+    run_id: &RunId,
+) -> io::Result<Vec<(String, serde_json::Value)>> {
+    let mut statement = transaction
+        .prepare("SELECT record_type, payload FROM runtime_ledger_records WHERE run_id = ?1 ORDER BY sequence")
+        .map_err(|error| sqlite_error("prepare collaboration metadata query", error))?;
+    let rows = statement
+        .query_map(params![run_id.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| sqlite_error("query collaboration metadata", error))?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (record_type, payload) = row.map_err(|error| sqlite_error("read collaboration metadata", error))?;
+        let payload = serde_json::from_slice(&payload)
+            .map_err(|error| io::Error::other(format!("decode collaboration metadata payload: {error}")))?;
+        records.push((record_type, payload));
+    }
+    Ok(records)
 }
 
 pub(super) fn validate_collaboration_batch(
@@ -225,17 +480,15 @@ fn admit_tasks_and_append_in_memory_inner(
     }
     let existing = existing_root_tasks_in_memory(state, root_run_id)?;
     let admitted = validate_collaboration_batch(&existing, max_tasks, tasks)?;
+    let existing_metadata = existing_metadata_in_memory(state, run_id);
+    let additional = prepare_additional_records(run_id, &existing_metadata, tasks, additional)?;
     let mut pending: Vec<(DurabilityClass, String, serde_json::Value)> =
         Vec::with_capacity(admitted.len() + additional.len());
     for task in admitted {
         let payload = serde_json::to_value(task).map_err(|error| io::Error::other(error.to_string()))?;
         pending.push((DurabilityClass::SyncCritical, "task_created".to_owned(), payload));
     }
-    for (durability, record_type, payload) in additional {
-        if *durability != DurabilityClass::Ephemeral {
-            pending.push((*durability, record_type.clone(), payload.clone()));
-        }
-    }
+    pending.extend(additional);
     let pending_len = u64::try_from(pending.len()).map_err(|_| io::Error::other("admission batch is too large"))?;
     state
         .next_sequence
@@ -320,6 +573,8 @@ fn admit_tasks_and_append_sqlite_inner(
     }
     let existing = existing_root_tasks_sqlite(&transaction, root_run_id)?;
     let admitted = validate_collaboration_batch(&existing, max_tasks, tasks)?;
+    let existing_metadata = existing_metadata_sqlite(&transaction, run_id)?;
+    let additional = prepare_additional_records(run_id, &existing_metadata, tasks, additional)?;
     let mut records = Vec::with_capacity(admitted.len() + additional.len());
     for task in admitted {
         records.push(insert_record_sqlite(
@@ -331,15 +586,13 @@ fn admit_tasks_and_append_sqlite_inner(
         )?);
     }
     for (durability, record_type, payload) in additional {
-        if *durability != DurabilityClass::Ephemeral {
-            records.push(insert_record_sqlite(
-                &transaction,
-                run_id,
-                *durability,
-                record_type,
-                payload.clone(),
-            )?);
-        }
+        records.push(insert_record_sqlite(
+            &transaction,
+            run_id,
+            durability,
+            &record_type,
+            payload,
+        )?);
     }
     if let Some((lease, now_unix_ms)) = workflow_lease {
         let observed_sequence = records.last().map_or(lease.observed_sequence, |record| record.seq);

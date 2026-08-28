@@ -458,8 +458,17 @@ impl WorkflowController {
             } else {
                 snapshot.status
             };
-            self.append_record(guard, run_id, "workflow_settled", json!({"status": status}))?;
+            let failure_summary = (status == WorkflowRunStatus::Failed)
+                .then(|| super::aggregate_workflow_failures(&snapshot.nodes))
+                .flatten();
+            self.append_record(
+                guard,
+                run_id,
+                "workflow_settled",
+                json!({"status": status, "failure_summary": failure_summary}),
+            )?;
             snapshot.status = status;
+            snapshot.failure_summary = failure_summary;
             Ok(snapshot.clone())
         })
     }

@@ -330,6 +330,193 @@ fn only_supervisor_coordinator_can_cancel_a_queued_workflow_task_and_replay_is_s
 }
 
 #[test]
+fn atomic_team_batch_accepts_queued_unowned_task_and_cold_restores_it() {
+    let ledger = Arc::new(InMemoryRuntimeLedger::default());
+    let runtime: CollaborationRuntime<()> =
+        CollaborationRuntime::with_ledger(Scheduler::new(ResourcePolicy::new(2)), ledger.clone());
+    let run = RunId::from("queued-unowned-atomic-run");
+    let coordinator = AgentId::from("queued-unowned-coordinator");
+    let team_id = TeamId::from("queued-unowned-team");
+    runtime.agents().upsert(AgentRecord {
+        run_id: run.clone(),
+        agent_id: coordinator.clone(),
+        team_id: None,
+        parent_agent_id: None,
+        state: AgentLifecycleState::Active,
+    });
+    let collaboration = AgentCollaborationContext {
+        team_id: team_id.clone(),
+        strategy: CollaborationStrategy::Fanout,
+        coordinator_agent_id: coordinator.clone(),
+        max_pending_messages: CollaborationRuntimeConfig::DEFAULT_MAX_PENDING_MESSAGES,
+        max_message_bytes: CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
+    };
+    let task_id = TaskId::from("queued-unowned-task");
+    let task = TaskRecord {
+        run_id: run.clone(),
+        task_id: task_id.clone(),
+        revision: 0,
+        task_key: Some("queued-unowned".into()),
+        team_id: Some(team_id.clone()),
+        workflow_id: None,
+        node_id: None,
+        role: Some("worker".into()),
+        depends_on: Vec::new(),
+        content: None,
+        expected_write_scope: Vec::new(),
+        owner_agent_id: None,
+        state: TaskState::Queued,
+        outcome_ref: None,
+        failure_class: None,
+    };
+
+    runtime
+        .prepare_collaboration_task_batch(&run, &collaboration, 16, vec![task.clone()])
+        .unwrap();
+    assert_eq!(runtime.tasks().get(&task_id), Some(task.clone()));
+    let team = runtime.teams().get(&team_id).expect("Team projected");
+    assert!(team.members.contains(&coordinator));
+    let records = ledger.records_for_run(&run).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "task_created")
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "collaboration_batch_prepared")
+            .count(),
+        1
+    );
+
+    let restored: CollaborationRuntime<()> =
+        CollaborationRuntime::with_ledger(Scheduler::new(ResourcePolicy::new(2)), ledger);
+    restored.agents().upsert(AgentRecord {
+        run_id: run.clone(),
+        agent_id: coordinator.clone(),
+        team_id: None,
+        parent_agent_id: None,
+        state: AgentLifecycleState::Active,
+    });
+    restored.restore_projection(&run).unwrap();
+    let restored_task = restored.tasks().get(&task_id).expect("Queued task restores");
+    assert_eq!(restored_task.state, TaskState::Queued);
+    assert!(restored_task.owner_agent_id.is_none());
+    let restored_team = restored.teams().get(&team_id).expect("Team restores");
+    assert_eq!(restored_team.coordinator.as_ref(), Some(&coordinator));
+    assert!(restored_team.members.contains(&coordinator));
+}
+
+#[test]
+fn team_task_active_states_require_owner_membership() {
+    let runtime: CollaborationRuntime<()> = CollaborationRuntime::new(Scheduler::new(ResourcePolicy::new(2)));
+    let run = RunId::from("team-active-owner-run");
+    let coordinator = AgentId::from("team-active-coordinator");
+    let outsider = AgentId::from("team-active-outsider");
+    for agent_id in [&coordinator, &outsider] {
+        runtime.agents().upsert(AgentRecord {
+            run_id: run.clone(),
+            agent_id: agent_id.clone(),
+            team_id: None,
+            parent_agent_id: None,
+            state: AgentLifecycleState::Active,
+        });
+    }
+    let team_id = TeamId::from("team-active-owner-team");
+    runtime
+        .create_collaboration_team(
+            run.clone(),
+            team_id.clone(),
+            "fanout",
+            CollaborationStrategy::Fanout,
+            Some(coordinator.clone()),
+        )
+        .unwrap();
+    runtime.join_team(&run, &team_id, coordinator.clone()).unwrap();
+
+    for state in [TaskState::Assigned, TaskState::Running] {
+        let task = TaskRecord {
+            run_id: run.clone(),
+            task_id: TaskId::new(format!("missing-owner-{state:?}")),
+            revision: 0,
+            task_key: None,
+            team_id: Some(team_id.clone()),
+            workflow_id: None,
+            node_id: None,
+            role: Some("worker".into()),
+            depends_on: Vec::new(),
+            content: None,
+            expected_write_scope: Vec::new(),
+            owner_agent_id: None,
+            state,
+            outcome_ref: None,
+            failure_class: None,
+        };
+        assert!(runtime.register_runtime_task(&run, task).is_err());
+    }
+
+    let queued_task_id = TaskId::from("queued-outsider-assignment-task");
+    runtime
+        .register_runtime_task(
+            &run,
+            TaskRecord {
+                run_id: run.clone(),
+                task_id: queued_task_id.clone(),
+                revision: 0,
+                task_key: None,
+                team_id: Some(team_id.clone()),
+                workflow_id: None,
+                node_id: None,
+                role: Some("worker".into()),
+                depends_on: Vec::new(),
+                content: None,
+                expected_write_scope: Vec::new(),
+                owner_agent_id: None,
+                state: TaskState::Queued,
+                outcome_ref: None,
+                failure_class: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .assign_task_owner(
+                &run,
+                &queued_task_id,
+                &outsider,
+                0,
+                &OperationId::from("reject-outsider-assignment"),
+            )
+            .is_err()
+    );
+    let queued = runtime.tasks().get(&queued_task_id).unwrap();
+    assert_eq!(queued.state, TaskState::Queued);
+    assert!(queued.owner_agent_id.is_none());
+
+    let outsider_task = TaskRecord {
+        run_id: run.clone(),
+        task_id: TaskId::from("outsider-owner-task"),
+        revision: 0,
+        task_key: None,
+        team_id: Some(team_id),
+        workflow_id: None,
+        node_id: None,
+        role: Some("worker".into()),
+        depends_on: Vec::new(),
+        content: None,
+        expected_write_scope: Vec::new(),
+        owner_agent_id: Some(outsider),
+        state: TaskState::Assigned,
+        outcome_ref: None,
+        failure_class: None,
+    };
+    assert!(runtime.register_runtime_task(&run, outsider_task).is_err());
+}
+
+#[test]
 fn spawn_reservation_is_idempotent_after_commit() {
     let runtime: CollaborationRuntime<()> = CollaborationRuntime::new(Scheduler::new(ResourcePolicy::new(2)));
     let permissions = PermissionContext::new(PermissionMode::Plan, PermissionCeiling::plan());

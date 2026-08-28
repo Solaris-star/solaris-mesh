@@ -15,8 +15,10 @@ fn encodes_minimal_proxy_only_psec_v1_environment() {
     let spec = root_as_process_security_environment(&bytes).expect("PSEC should decode");
     assert_eq!(spec.version().major(), 1);
     assert_eq!(spec.version().minor(), 0);
-    assert_eq!(spec.capabilities(), Some(PRIVATE_NETWORK_CAPABILITY));
-    assert_ne!(spec.capabilities(), Some("internetClient"));
+    assert!(
+        spec.capabilities().is_none(),
+        "the Target must not receive internetClient or privateNetworkClientServer; only the packaged proxy peer owns network capabilities"
+    );
     assert!(spec.fs_read_write().is_none());
     assert!(spec.fs_read_only().is_none());
     assert!(spec.fs_deny().is_none());

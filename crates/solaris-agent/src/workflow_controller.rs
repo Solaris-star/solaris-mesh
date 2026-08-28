@@ -78,6 +78,69 @@ pub struct DeferredTaskTerminalWrite {
     pub operation_id: OperationId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowFailureSummary {
+    pub primary_failure_class: TaskFailureClass,
+    pub failures: BTreeMap<String, TaskFailureClass>,
+}
+
+impl WorkflowFailureSummary {
+    fn from_nodes(nodes: &BTreeMap<String, WorkflowNodeAttempt>) -> Option<Self> {
+        aggregate_workflow_failures(nodes)
+    }
+
+    fn primary_for_parent(&self) -> TaskFailureClass {
+        if self
+            .failures
+            .values()
+            .all(|class| *class == TaskFailureClass::Retryable)
+        {
+            TaskFailureClass::Retryable
+        } else if self.primary_failure_class == TaskFailureClass::Retryable {
+            // Fail closed if a future priority-table edit would otherwise let a
+            // Retryable class mask any blocking sibling.
+            TaskFailureClass::NonRetryable
+        } else {
+            self.primary_failure_class
+        }
+    }
+}
+
+fn failure_priority(class: TaskFailureClass) -> u8 {
+    match class {
+        TaskFailureClass::ReconciliationRequired => 9,
+        TaskFailureClass::SideEffectUnknown => 8,
+        TaskFailureClass::OutcomeUnknown => 7,
+        TaskFailureClass::Cancelled => 6,
+        TaskFailureClass::PermissionDenied => 5,
+        TaskFailureClass::NonConvergent => 4,
+        TaskFailureClass::MaxTurns => 3,
+        TaskFailureClass::NonRetryable => 2,
+        TaskFailureClass::Retryable => 1,
+    }
+}
+
+fn aggregate_workflow_failures(nodes: &BTreeMap<String, WorkflowNodeAttempt>) -> Option<WorkflowFailureSummary> {
+    let failures: BTreeMap<_, _> = nodes
+        .iter()
+        .filter(|(_, attempt)| attempt.status == WorkflowNodeStatus::Failed)
+        .map(|(node_id, attempt)| {
+            (
+                node_id.clone(),
+                attempt.failure_class.unwrap_or(TaskFailureClass::NonRetryable),
+            )
+        })
+        .collect();
+    let primary_failure_class = failures
+        .values()
+        .copied()
+        .max_by_key(|class| failure_priority(*class))?;
+    Some(WorkflowFailureSummary {
+        primary_failure_class,
+        failures,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowRunSnapshot {
     pub run_id: RunId,
@@ -94,6 +157,8 @@ pub struct WorkflowRunSnapshot {
     pub status: WorkflowRunStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciliation_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_summary: Option<WorkflowFailureSummary>,
     pub nodes: BTreeMap<String, WorkflowNodeAttempt>,
     #[serde(default)]
     pub parameters: Value,
@@ -671,6 +736,7 @@ impl WorkflowController {
             parent_run_id: parent_run_id.clone(),
             status: WorkflowRunStatus::Running,
             reconciliation_reason: None,
+            failure_summary: None,
             nodes,
             parameters,
         };
@@ -919,12 +985,10 @@ impl WorkflowController {
                             .snapshot(&child_run_id)
                             .and_then(|snapshot| {
                                 snapshot
-                                    .nodes
-                                    .values()
-                                    .filter(|attempt| attempt.status == WorkflowNodeStatus::Failed)
-                                    .filter_map(|attempt| attempt.failure_class)
-                                    .next()
+                                    .failure_summary
+                                    .or_else(|| WorkflowFailureSummary::from_nodes(&snapshot.nodes))
                             })
+                            .map(|summary| summary.primary_for_parent())
                             .unwrap_or(TaskFailureClass::NonRetryable);
                         return Err(WorkflowNodeError { failure_class, message });
                     }
@@ -933,11 +997,9 @@ impl WorkflowController {
                     let failure_class = match settled.status {
                         WorkflowRunStatus::Cancelled => TaskFailureClass::Cancelled,
                         WorkflowRunStatus::Failed => settled
-                            .nodes
-                            .values()
-                            .filter(|attempt| attempt.status == WorkflowNodeStatus::Failed)
-                            .filter_map(|attempt| attempt.failure_class)
-                            .next()
+                            .failure_summary
+                            .or_else(|| WorkflowFailureSummary::from_nodes(&settled.nodes))
+                            .map(|summary| summary.primary_for_parent())
                             .unwrap_or(TaskFailureClass::NonRetryable),
                         WorkflowRunStatus::Running | WorkflowRunStatus::Completed => TaskFailureClass::NonRetryable,
                     };

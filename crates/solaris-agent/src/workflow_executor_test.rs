@@ -19,8 +19,11 @@ use tokio::sync::mpsc;
 
 use crate::collaboration_runtime::CollaborationRuntime;
 use crate::resource_policy::ResourcePolicy;
-use crate::runtime_ledger::{InMemoryRuntimeLedger, LedgerRecord, RuntimeLedger};
+use crate::runtime_ledger::{
+    InMemoryRuntimeLedger, JsonlRuntimeLedger, LedgerRecord, RuntimeLedger, SqliteRuntimeLedger,
+};
 use crate::scheduler::Scheduler;
+use crate::spawn_tool::ParsedSpawnRequest;
 use crate::workflow_controller::{WorkflowController, WorkflowRunStatus};
 
 fn stable_agent_id(spec: &AgentSpawnSpec) -> AgentId {
@@ -125,6 +128,160 @@ impl RuntimeLedger for FailOnceTaskSettlementLedger {
             return Err(std::io::Error::other("injected task settlement failure"));
         }
         self.inner.append(run_id, durability, record_type, payload)
+    }
+
+    fn run_ids(&self) -> std::io::Result<Vec<RunId>> {
+        self.inner.run_ids()
+    }
+
+    fn records_for_run(&self, run_id: &RunId) -> std::io::Result<Vec<LedgerRecord>> {
+        self.inner.records_for_run(run_id)
+    }
+
+    fn effect_output_root(&self) -> Option<std::path::PathBuf> {
+        self.inner.effect_output_root()
+    }
+}
+
+struct FailAtomicBatchLedger {
+    inner: InMemoryRuntimeLedger,
+    fail_batch: AtomicBool,
+}
+
+impl Default for FailAtomicBatchLedger {
+    fn default() -> Self {
+        Self {
+            inner: InMemoryRuntimeLedger::default(),
+            fail_batch: AtomicBool::new(true),
+        }
+    }
+}
+
+impl RuntimeLedger for FailAtomicBatchLedger {
+    fn logical_append_capability(&self) -> crate::runtime_ledger::LogicalAppendCapability {
+        self.inner.logical_append_capability()
+    }
+
+    fn supports_atomic_task_metadata_admission(&self) -> bool {
+        self.inner.supports_atomic_task_metadata_admission()
+    }
+
+    fn acquire_workflow_mutation_lease(
+        &self,
+        run_id: &RunId,
+        owner_id: &str,
+        now_unix_ms: i64,
+    ) -> std::io::Result<crate::runtime_ledger::WorkflowMutationLease> {
+        self.inner
+            .acquire_workflow_mutation_lease(run_id, owner_id, now_unix_ms)
+    }
+
+    fn renew_workflow_mutation_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+    ) -> std::io::Result<crate::runtime_ledger::WorkflowMutationLease> {
+        self.inner.renew_workflow_mutation_lease(lease, now_unix_ms)
+    }
+
+    fn commit_workflow_restore(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        expected_sequence: u64,
+        now_unix_ms: i64,
+    ) -> std::io::Result<crate::runtime_ledger::WorkflowRestoreCommit> {
+        self.inner
+            .commit_workflow_restore(lease, expected_sequence, now_unix_ms)
+    }
+
+    fn release_workflow_mutation_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+    ) -> std::io::Result<()> {
+        self.inner.release_workflow_mutation_lease(lease)
+    }
+
+    fn append(
+        &self,
+        run_id: &RunId,
+        durability: DurabilityClass,
+        record_type: &str,
+        payload: Value,
+    ) -> std::io::Result<LedgerRecord> {
+        self.inner.append(run_id, durability, record_type, payload)
+    }
+
+    fn compare_and_append(
+        &self,
+        run_id: &RunId,
+        durability: DurabilityClass,
+        record_type: &str,
+        identity_fields: &[&str],
+        payload: Value,
+    ) -> std::io::Result<LedgerRecord> {
+        self.inner
+            .compare_and_append(run_id, durability, record_type, identity_fields, payload)
+    }
+
+    fn append_under_workflow_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+        durability: DurabilityClass,
+        record_type: &str,
+        payload: Value,
+    ) -> std::io::Result<LedgerRecord> {
+        self.inner
+            .append_under_workflow_lease(lease, now_unix_ms, durability, record_type, payload)
+    }
+
+    fn compare_and_append_under_workflow_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+        durability: DurabilityClass,
+        record_type: &str,
+        identity_fields: &[&str],
+        payload: Value,
+    ) -> std::io::Result<LedgerRecord> {
+        self.inner.compare_and_append_under_workflow_lease(
+            lease,
+            now_unix_ms,
+            durability,
+            record_type,
+            identity_fields,
+            payload,
+        )
+    }
+
+    fn admit_collaboration_tasks_for_root(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+    ) -> std::io::Result<Vec<LedgerRecord>> {
+        self.inner
+            .admit_collaboration_tasks_for_root(root_run_id, run_id, max_tasks, tasks)
+    }
+
+    fn admit_tasks_and_append(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> std::io::Result<Vec<LedgerRecord>> {
+        if records
+            .iter()
+            .any(|(_, record_type, _)| record_type == "collaboration_batch_prepared")
+            && self.fail_batch.swap(false, Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other("injected atomic collaboration batch failure"));
+        }
+        self.inner
+            .admit_tasks_and_append(root_run_id, run_id, max_tasks, tasks, records)
     }
 
     fn run_ids(&self) -> std::io::Result<Vec<RunId>> {
@@ -751,20 +908,397 @@ async fn collaboration_prepare_failure_leaves_no_assigned_tasks_or_agents() {
         .await
         .expect_err("second Team preparation must fail");
 
-    assert!(error.message.contains("prepare collaboration"));
+    assert!(error.message.contains("unknown collaboration coordinator Agent"));
     assert!(runtime.tasks().get(&first.task_id).is_none());
     assert!(runtime.tasks().get(&second.task_id).is_none());
     assert_eq!(
         runtime.agents().get(&first_agent).map(|agent| agent.state),
         Some(AgentLifecycleState::Cancelled)
     );
-    assert_eq!(
-        runtime.agents().get(&second_agent).map(|agent| agent.state),
-        Some(AgentLifecycleState::Cancelled)
+    assert!(
+        runtime.agents().get(&second_agent).is_none(),
+        "invalid missing-coordinator spec must fail before child reservation"
     );
-    assert!(runtime.teams().get(&TeamId::from("prepared-team")).is_none());
+    let prepared_team = runtime
+        .teams()
+        .get(&TeamId::from("prepared-team"))
+        .expect("the first durable Team shell remains valid");
+    assert!(prepared_team.members.contains(&root_agent));
     assert!(runtime.teams().get(&TeamId::from("broken-team")).is_none());
-    assert_eq!(runtime.agents().get(&root_agent).and_then(|agent| agent.team_id), None);
+    assert_eq!(
+        runtime.agents().get(&root_agent).and_then(|agent| agent.team_id),
+        Some(TeamId::from("prepared-team"))
+    );
+}
+
+#[tokio::test]
+async fn unsupported_collaboration_batch_backend_fails_before_child_reservation() {
+    let directory = tempfile::tempdir().unwrap();
+    let ledger = Arc::new(JsonlRuntimeLedger::open(directory.path().join("legacy.jsonl")).unwrap());
+    let runtime = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger.clone(),
+    ));
+    let root_run = RunId::from("unsupported-atomic-batch-root");
+    let root_agent = AgentId::from("unsupported-atomic-batch-agent");
+    let (_, executor) = workflow_executor_for_runtime(Arc::clone(&runtime), &root_run, &root_agent);
+    let before_agents = runtime.agents().snapshot();
+    let spec = collaboration_spawn_spec(
+        &root_run,
+        &root_agent,
+        "unsupported",
+        CollaborationRuntimeConfig::DEFAULT_MAX_PENDING_MESSAGES,
+        CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
+    );
+
+    let error = executor
+        .spawn_handles(vec![(spec, true)])
+        .await
+        .expect_err("non-atomic backend must fail before reserving a child");
+    assert_eq!(error.failure_class, TaskFailureClass::NonRetryable);
+    assert!(error.message.contains("atomically persist collaboration"));
+    assert_eq!(runtime.agents().snapshot(), before_agents);
+    assert!(runtime.tasks().snapshot().is_empty());
+    assert!(runtime.teams().snapshot().is_empty());
+    assert!(ledger.records_for_run(&root_run).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn direct_initial_collaboration_batch_failure_leaves_no_partial_state() {
+    let ledger = Arc::new(FailAtomicBatchLedger::default());
+    let runtime = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger.clone(),
+    ));
+    let root_run = RunId::from("direct-initial-atomic-failure-root");
+    let root_agent = AgentId::from("direct-initial-atomic-failure-agent");
+    runtime.agents().upsert(AgentRecord {
+        run_id: root_run.clone(),
+        agent_id: root_agent.clone(),
+        team_id: None,
+        parent_agent_id: None,
+        state: AgentLifecycleState::Active,
+    });
+    let before_agents = runtime.agents().snapshot();
+    let mut config = test_config();
+    config.session.enabled = false;
+    let workspace = tempfile::tempdir().unwrap();
+    let spawner = AgentSpawner::new(Arc::new(JsonProvider), config, workspace.path().to_path_buf())
+        .with_runtime_context(Arc::clone(&runtime), root_run.clone(), root_agent);
+
+    let result = spawner
+        .spawn_collaboration(ParsedSpawnRequest {
+            strategy: CollaborationSelection::Fixed(CollaborationStrategy::Fanout),
+            tasks: vec![solaris_types::workflow::CollaborationTaskInput {
+                id: Some("initial-atomic-failure".into()),
+                name: "initial-atomic-failure".into(),
+                prompt: "must fail before any child is created".into(),
+                role: Some("worker".into()),
+                depends_on: Vec::new(),
+                expected_output: None,
+                resource_budget: None,
+            }],
+        })
+        .await;
+
+    assert_eq!(result.status, solaris_types::workflow::CollaborationRunStatus::Failed);
+    assert!(result.summary.contains("atomic collaboration batch failure"));
+    assert_eq!(runtime.agents().snapshot(), before_agents);
+    assert!(runtime.tasks().snapshot().is_empty());
+    assert!(runtime.teams().snapshot().is_empty());
+    assert!(ledger.records_for_run(&root_run).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn atomic_collaboration_batch_failure_leaves_only_durable_team_shell() {
+    let ledger = Arc::new(FailAtomicBatchLedger::default());
+    let runtime = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger.clone(),
+    ));
+    let root_run = RunId::from("atomic-batch-failure-root");
+    let root_agent = AgentId::from("atomic-batch-failure-agent");
+    let (_, executor) = workflow_executor_for_runtime(Arc::clone(&runtime), &root_run, &root_agent);
+    let spec = collaboration_spawn_spec(
+        &root_run,
+        &root_agent,
+        "atomic-fail",
+        CollaborationRuntimeConfig::DEFAULT_MAX_PENDING_MESSAGES,
+        CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
+    );
+    let task_id = spec.task_id.clone();
+    let team_id = spec.overrides.collaboration.as_ref().unwrap().team_id.clone();
+    let child_id = stable_agent_id(&spec);
+
+    let error = executor
+        .spawn_handles(vec![(spec, true)])
+        .await
+        .expect_err("atomic ledger failure must fail the batch");
+    assert!(error.message.contains("atomic collaboration batch failure"));
+    let records = ledger.records_for_run(&root_run).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "task_created")
+            .count(),
+        0
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "collaboration_batch_prepared")
+            .count(),
+        0
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "collaboration_team_prepared")
+            .count(),
+        1,
+        "the earlier safe Team shell is a distinct durable preparation"
+    );
+    assert!(runtime.tasks().get(&task_id).is_none());
+    assert_eq!(
+        runtime.agents().get(&child_id).map(|agent| agent.state),
+        Some(AgentLifecycleState::Cancelled),
+        "the durable Reserved child must be terminally cancelled when final batch preparation fails"
+    );
+    let team = runtime
+        .teams()
+        .get(&team_id)
+        .expect("durable Team shell remains projected");
+    assert!(team.members.contains(&root_agent));
+    assert!(!team.members.contains(&child_id));
+    assert_eq!(
+        runtime.agents().get(&root_agent).and_then(|agent| agent.team_id),
+        Some(team_id)
+    );
+}
+
+#[tokio::test]
+async fn collaboration_batch_replay_is_one_durable_atomic_batch_and_cold_restores_complete() {
+    let ledger = Arc::new(InMemoryRuntimeLedger::default());
+    let runtime = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger.clone(),
+    ));
+    let root_run = RunId::from("atomic-batch-replay-root");
+    let root_agent = AgentId::from("atomic-batch-replay-agent");
+    let (spawner, executor) = workflow_executor_for_runtime(Arc::clone(&runtime), &root_run, &root_agent);
+    let spec = collaboration_spawn_spec(
+        &root_run,
+        &root_agent,
+        "atomic-replay",
+        CollaborationRuntimeConfig::DEFAULT_MAX_PENDING_MESSAGES,
+        CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
+    );
+    let task_id = spec.task_id.clone();
+    let child_id = stable_agent_id(&spec);
+    let team_id = spec.overrides.collaboration.as_ref().unwrap().team_id.clone();
+
+    let handles = executor.spawn_handles(vec![(spec.clone(), true)]).await.unwrap();
+    spawner
+        .prepare_collaboration_handles(&handles)
+        .expect("exact replay of the same batch succeeds");
+
+    let records = ledger.records_for_run(&root_run).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "task_created")
+            .count(),
+        1
+    );
+    let markers = records
+        .iter()
+        .filter(|record| record.record_type == "collaboration_batch_prepared")
+        .collect::<Vec<_>>();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].payload["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(markers[0].payload["teams"].as_array().unwrap().len(), 1);
+    assert_eq!(markers[0].payload["memberships"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.record_type.as_str(), "team_created" | "team_member_joined"))
+            .count(),
+        0,
+        "spawn batch Team and memberships must exist only inside the same atomic marker commit"
+    );
+
+    let restored: CollaborationRuntime<()> =
+        CollaborationRuntime::with_ledger(Scheduler::new(ResourcePolicy::new(4)), ledger);
+    restored.agents().upsert(AgentRecord {
+        run_id: root_run.clone(),
+        agent_id: root_agent.clone(),
+        team_id: None,
+        parent_agent_id: None,
+        state: AgentLifecycleState::Active,
+    });
+    restored.restore_projection(&root_run).unwrap();
+    let team = restored.teams().get(&team_id).expect("Team restores");
+    assert!(team.members.contains(&root_agent));
+    assert!(team.members.contains(&child_id));
+    let task = restored.tasks().get(&task_id).expect("Task restores");
+    assert_eq!(task.team_id.as_ref(), Some(&team_id));
+    assert_eq!(task.owner_agent_id.as_ref(), Some(&child_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_dual_runtime_exact_collaboration_batch_replay_is_one_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.sqlite3");
+    let ledger_a = Arc::new(SqliteRuntimeLedger::open(&path).unwrap());
+    let ledger_b = Arc::new(SqliteRuntimeLedger::open(&path).unwrap());
+    let runtime_a = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger_a.clone(),
+    ));
+    let runtime_b = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger_b.clone(),
+    ));
+    let root_run = RunId::from("dual-runtime-atomic-replay-root");
+    let root_agent = AgentId::from("dual-runtime-atomic-replay-agent");
+    let (_, executor_a) = workflow_executor_for_runtime(Arc::clone(&runtime_a), &root_run, &root_agent);
+    let (_, executor_b) = workflow_executor_for_runtime(Arc::clone(&runtime_b), &root_run, &root_agent);
+    let spec = collaboration_spawn_spec(
+        &root_run,
+        &root_agent,
+        "same",
+        CollaborationRuntimeConfig::DEFAULT_MAX_PENDING_MESSAGES,
+        CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
+    );
+    let child_id = stable_agent_id(&spec);
+    let task_id = spec.task_id.clone();
+    let team_id = spec.overrides.collaboration.as_ref().unwrap().team_id.clone();
+
+    let (left, right) = tokio::join!(
+        executor_a.spawn_handles(vec![(spec.clone(), true)]),
+        executor_b.spawn_handles(vec![(spec, true)]),
+    );
+    left.unwrap();
+    right.unwrap();
+
+    let records = ledger_a.records_for_run(&root_run).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "task_created")
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "collaboration_batch_prepared")
+            .count(),
+        1
+    );
+
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.record_type.as_str(), "team_created" | "team_member_joined"))
+            .count(),
+        0
+    );
+
+    let restored_ledger = Arc::new(SqliteRuntimeLedger::open(&path).unwrap());
+    let restored: CollaborationRuntime<()> =
+        CollaborationRuntime::with_ledger(Scheduler::new(ResourcePolicy::new(4)), restored_ledger);
+    restored.agents().upsert(AgentRecord {
+        run_id: root_run.clone(),
+        agent_id: root_agent.clone(),
+        team_id: None,
+        parent_agent_id: None,
+        state: AgentLifecycleState::Active,
+    });
+    restored.restore_projection(&root_run).unwrap();
+    let team = restored.teams().get(&team_id).unwrap();
+    assert!(team.members.contains(&root_agent));
+    assert!(team.members.contains(&child_id));
+    assert_eq!(restored.tasks().get(&task_id).unwrap().team_id.as_ref(), Some(&team_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_dual_runtime_conflicting_team_metadata_never_commits_losing_task() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.sqlite3");
+    let ledger_a = Arc::new(SqliteRuntimeLedger::open(&path).unwrap());
+    let ledger_b = Arc::new(SqliteRuntimeLedger::open(&path).unwrap());
+    let runtime_a = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger_a.clone(),
+    ));
+    let runtime_b = Arc::new(CollaborationRuntime::with_ledger(
+        Scheduler::new(ResourcePolicy::new(4)),
+        ledger_b.clone(),
+    ));
+    let root_run = RunId::from("dual-runtime-atomic-conflict-root");
+    let root_agent = AgentId::from("dual-runtime-atomic-conflict-agent");
+    let (_, executor_a) = workflow_executor_for_runtime(Arc::clone(&runtime_a), &root_run, &root_agent);
+    let (_, executor_b) = workflow_executor_for_runtime(Arc::clone(&runtime_b), &root_run, &root_agent);
+    let mut left_spec = collaboration_spawn_spec(
+        &root_run,
+        &root_agent,
+        "left",
+        4,
+        CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
+    );
+    let mut right_spec = collaboration_spawn_spec(
+        &root_run,
+        &root_agent,
+        "right",
+        5,
+        CollaborationRuntimeConfig::DEFAULT_MAX_MESSAGE_BYTES,
+    );
+    let shared_team = TeamId::from("dual-runtime-shared-team");
+    left_spec.overrides.collaboration.as_mut().unwrap().team_id = shared_team.clone();
+    right_spec.overrides.collaboration.as_mut().unwrap().team_id = shared_team.clone();
+    let left_task = left_spec.task_id.clone();
+    let right_task = right_spec.task_id.clone();
+
+    let (left, right) = tokio::join!(
+        executor_a.spawn_handles(vec![(left_spec, true)]),
+        executor_b.spawn_handles(vec![(right_spec, true)]),
+    );
+    assert_ne!(
+        left.is_ok(),
+        right.is_ok(),
+        "exactly one incompatible Team metadata batch may commit"
+    );
+
+    let records = ledger_a.records_for_run(&root_run).unwrap();
+    let durable_tasks = records
+        .iter()
+        .filter(|record| record.record_type == "task_created")
+        .map(|record| serde_json::from_value::<solaris_types::runtime::TaskRecord>(record.payload.clone()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(durable_tasks.len(), 1);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "collaboration_batch_prepared")
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.record_type.as_str(), "team_created" | "team_member_joined"))
+            .count(),
+        0
+    );
+    let winner_task = &durable_tasks[0].task_id;
+    assert!(winner_task == &left_task || winner_task == &right_task);
+    let loser_task = if winner_task == &left_task {
+        &right_task
+    } else {
+        &left_task
+    };
+    assert!(durable_tasks.iter().all(|task| &task.task_id != loser_task));
 }
 
 #[tokio::test]
@@ -819,12 +1353,20 @@ async fn collaboration_prepare_rejects_mismatched_message_limits_without_leaks()
         runtime.agents().get(&first_agent).map(|agent| agent.state),
         Some(AgentLifecycleState::Cancelled)
     );
-    assert_eq!(
-        runtime.agents().get(&second_agent).map(|agent| agent.state),
-        Some(AgentLifecycleState::Cancelled)
+    assert!(
+        runtime.agents().get(&second_agent).is_none(),
+        "conflicting Team metadata must fail before second child reservation"
     );
-    assert!(runtime.teams().get(&team_id).is_none());
-    assert_eq!(runtime.agents().get(&root_agent).and_then(|agent| agent.team_id), None);
+    let team = runtime
+        .teams()
+        .get(&team_id)
+        .expect("first Team metadata remains durable");
+    assert_eq!(team.max_pending_messages, 1);
+    assert!(team.members.contains(&root_agent));
+    assert_eq!(
+        runtime.agents().get(&root_agent).and_then(|agent| agent.team_id),
+        Some(team_id)
+    );
 }
 
 #[test]

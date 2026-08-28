@@ -110,12 +110,37 @@ admission limits the entire Run to 32 logical collaboration tasks by default
 or at most 256 when configured. Replays and retries reuse their logical task
 identity; `single` creates no Child Agent task, while an automatic independent
 reviewer consumes one task slot.
+For collaboration Spawn batches, the Task records and the complete Team/member
+batch marker are committed together before the in-memory Task, Team, or
+membership projection changes. Conversation/fork/configured-Supervisor paths
+prepare the exact Team shell before a Child Agent can be durably reserved, then
+commit the child membership as one atomic batch before the conversation becomes
+usable. Backends that cannot provide these atomic metadata commits reject the
+operation before the corresponding projection changes; exact replay reuses the
+same durable state.
 
 Workflow retries are failure-class based. Only an explicit `Retryable` failure
-is retried automatically. A bare `Failed` result defaults to `NonRetryable`;
-permission, cancellation, convergence, turn-budget, `SideEffectUnknown`,
-`OutcomeUnknown`, and `ReconciliationRequired` keep their terminal or
-reconciliation semantics and are not silently replayed.
+is retried automatically. When a child Workflow has multiple failed branches,
+its durable failure summary keeps the complete failure set and the parent can
+retry only when every failed branch is `Retryable`; reconciliation/unknown
+outcomes take priority as the deterministic primary failure. A bare `Failed`
+result defaults to `NonRetryable`; permission, cancellation, convergence,
+turn-budget, `SideEffectUnknown`, `OutcomeUnknown`, and
+`ReconciliationRequired` keep their terminal or reconciliation semantics and
+are not silently replayed.
+
+On Windows, approved-domain Auto networking is implemented as a separate
+capability boundary: the Target remains an AppContainer with no network
+capabilities, while an installed packaged proxy peer owns network access. PSEC
+binds the Target to that peer, and the helper returns Full only after a real
+pre-target proof reaches an approved endpoint through the proxy and fails a
+direct connection to the exact upstream address. Unsupported PSEC/package
+registration stays typed fail-closed; it never falls back to Ambient. The
+currently validated host does not export the required V2 PSEC create/query/close
+API from `processmodel.dll`, so approved-domain networking remains unavailable
+here even though the proxy, DNS, codec, package, and fail-closed paths are
+implemented and tested under both the service identity and an interactive
+Administrator session.
 
 `CollaborationRunSummary` reports `duplicate_call_rate` for terminal tool calls.
 A duplicate is a later call in the same Agent execution scope with the same

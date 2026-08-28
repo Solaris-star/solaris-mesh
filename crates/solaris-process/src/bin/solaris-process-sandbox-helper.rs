@@ -33,6 +33,15 @@ fn main() {
         std::process::exit(125);
     }
     #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--solaris-windows-network-proof")) {
+        if let Err(error) = windows::run_network_proof_child() {
+            eprintln!("solaris sandbox network proof failed: {error}");
+            std::process::exit(126);
+        }
+        return;
+    }
+
+    #[cfg(windows)]
     if let Err(error) = windows::run() {
         eprintln!(
             "solaris-sandbox-helper: setup failed (kind={:?}, os={:?}, detail={})",
@@ -67,6 +76,9 @@ fn main() {
 #[cfg(windows)]
 #[path = "sandbox_helper_windows/mod.rs"]
 mod windows;
+#[cfg(windows)]
+#[path = "../windows_psec_runtime.rs"]
+mod windows_psec_runtime;
 
 #[cfg(target_os = "linux")]
 mod linux {

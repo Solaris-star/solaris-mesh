@@ -76,6 +76,7 @@ fn restored_workflow_requires_the_same_durable_provider_and_model() {
         parent_run_id: None,
         status: WorkflowRunStatus::Running,
         reconciliation_reason: None,
+        failure_summary: None,
         nodes: BTreeMap::new(),
         parameters: json!({}),
     };

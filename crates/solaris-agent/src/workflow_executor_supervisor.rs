@@ -333,7 +333,7 @@ impl AgentWorkflowExecutor {
             .allowed_tools
             .retain(|tool| matches!(tool.as_str(), "Read" | "Grep" | "Glob"));
         let conversation_id = supervisor_conversation_id(context);
-        let spec = AgentConversationSpec {
+        let mut spec = AgentConversationSpec {
             run_id: base.run_id,
             parent_agent_id: base.parent_agent_id,
             task_id: base.task_id,
@@ -356,6 +356,18 @@ impl AgentWorkflowExecutor {
             context_policy: base.context_policy,
             recursion_limit: base.recursion_limit,
         };
+        let team_id = TeamId::new(format!(
+            "workflow:{}:{}:{}:supervisor",
+            context.run_id, context.node.id, context.attempt_id
+        ));
+        let coordinator_agent_id = AgentConversationService::expected_agent_id(&spec);
+        spec.overrides.collaboration = Some(AgentCollaborationContext {
+            team_id: team_id.clone(),
+            strategy: CollaborationStrategy::Supervisor,
+            coordinator_agent_id: coordinator_agent_id.clone(),
+            max_pending_messages: config.max_pending_messages,
+            max_message_bytes: config.max_message_bytes,
+        });
         let conversation = AgentConversationService::new(Arc::clone(&self.spawner));
         let handle = match self.find_supervisor_conversation_handle(&conversation_id)? {
             Some(handle) => {
@@ -367,24 +379,11 @@ impl AgentWorkflowExecutor {
                 .await
                 .map_err(workflow_error_from_conversation)?,
         };
-        let team_id = TeamId::new(format!(
-            "workflow:{}:{}:{}:supervisor",
-            context.run_id, context.node.id, context.attempt_id
-        ));
-        let collaboration = AgentCollaborationContext {
-            team_id: team_id.clone(),
-            strategy: CollaborationStrategy::Supervisor,
-            coordinator_agent_id: handle.agent_id.clone(),
-            max_pending_messages: config.max_pending_messages,
-            max_message_bytes: config.max_message_bytes,
-        };
-        let lifecycle = self.spawner.lifecycle_runtime();
-        lifecycle
-            .ensure_collaboration_team(self.spawner.run_id().clone(), "workflow Supervisor", &collaboration)
-            .map_err(|error| WorkflowNodeError::reconciliation_required(error.to_string()))?;
-        lifecycle
-            .join_team(self.spawner.run_id(), &team_id, handle.agent_id.clone())
-            .map_err(|error| WorkflowNodeError::reconciliation_required(error.to_string()))?;
+        if handle.agent_id != coordinator_agent_id {
+            return Err(WorkflowNodeError::reconciliation_required(
+                "configured Supervisor conversation resolved a different coordinator Agent identity",
+            ));
+        }
         Ok(SupervisorRuntime {
             context,
             config,

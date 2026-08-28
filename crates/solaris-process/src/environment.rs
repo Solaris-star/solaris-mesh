@@ -64,7 +64,7 @@ const NETWORK_PROXY_ENVIRONMENT_KEYS: &[&str] = &[
     "PIP_CERT",
 ];
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const NETWORK_PROXY_CA_ENVIRONMENT_KEYS: &[&str] = &[
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
@@ -200,7 +200,7 @@ pub(crate) fn is_network_proxy_environment_key(key: &OsStr) -> bool {
         .any(|candidate| key.eq_ignore_ascii_case(candidate))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn append_network_proxy_ca_environment(
     environment: &mut Vec<(OsString, OsString)>,
     certificate_path: &Path,

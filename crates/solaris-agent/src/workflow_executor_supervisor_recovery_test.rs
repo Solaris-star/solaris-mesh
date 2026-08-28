@@ -76,6 +76,32 @@ impl RuntimeLedger for SupervisorRecoveryLedger {
         self.inner.logical_append_capability()
     }
 
+    fn supports_atomic_task_metadata_admission(&self) -> bool {
+        self.inner.supports_atomic_task_metadata_admission()
+    }
+
+    fn admit_tasks_and_append(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> std::io::Result<Vec<LedgerRecord>> {
+        if let SupervisorRecoveryFault::TaskCreate { task_key } = &self.fault
+            && tasks
+                .iter()
+                .any(|task| task.task_key.as_deref() == Some(task_key.as_str()))
+            && self.armed.swap(false, Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other(format!(
+                "injected Supervisor failure before atomic task batch for {task_key}"
+            )));
+        }
+        self.inner
+            .admit_tasks_and_append(root_run_id, run_id, max_tasks, tasks, records)
+    }
+
     fn admit_collaboration_tasks(
         &self,
         run_id: &RunId,

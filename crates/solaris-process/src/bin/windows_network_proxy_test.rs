@@ -182,7 +182,7 @@ fn fake_activation_rejects_the_wrong_nonce_without_exposing_it() {
 }
 
 #[test]
-fn package_manifest_is_multi_instance_appcontainer_with_bounded_inbound_ports() {
+fn package_manifest_is_multi_instance_appcontainer_without_full_trust_or_firewall_bypass() {
     for expected in [
         "uap10:RuntimeBehavior=\"packagedClassicApp\"",
         "uap10:TrustLevel=\"appContainer\"",
@@ -190,16 +190,20 @@ fn package_manifest_is_multi_instance_appcontainer_with_bounded_inbound_ports() 
         "uap10:SupportsMultipleInstances=\"true\"",
         "<Capability Name=\"internetClient\" />",
         "<Capability Name=\"privateNetworkClientServer\" />",
-        "Category=\"windows.firewallRules\"",
-        "LocalPortMin=\"49152\"",
-        "LocalPortMax=\"65535\"",
     ] {
         assert!(
             PACKAGE_MANIFEST.contains(expected),
             "missing manifest contract: {expected}"
         );
     }
-    for forbidden in ["loopbackExempt", "NetworkIsolationSetAppContainerConfig", "Certificate"] {
+    for forbidden in [
+        "loopbackExempt",
+        "NetworkIsolationSetAppContainerConfig",
+        "Certificate",
+        "runFullTrust",
+        "rescap:Capability",
+        "windows.firewallRules",
+    ] {
         assert!(!PACKAGE_MANIFEST.contains(forbidden));
     }
 }
@@ -212,9 +216,11 @@ fn package_builder_only_creates_and_verifies_an_unsigned_package() {
         " unpack ",
         "AppxSignature.p7x",
         "signed = $false",
+        "OID.2.25.311729368913984317654407730594956997722=1",
     ] {
         assert!(PACKAGE_SCRIPT.contains(expected), "missing package check: {expected}");
     }
+    assert!(PACKAGE_SCRIPT.contains("$identity.SetAttribute('Publisher', $unsignedPublisher)"));
     for forbidden in [
         "Add-AppxPackage",
         "Import-Certificate",

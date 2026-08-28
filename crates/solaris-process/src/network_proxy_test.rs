@@ -2,6 +2,62 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::{NetworkProxyPolicy, NetworkProxyPolicyError, is_public_destination, permission_domain_is_covered};
 
+#[cfg(all(windows, feature = "sandbox-test-fixtures"))]
+#[test]
+fn windows_network_proof_connects_upstream_before_reporting_200() {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::time::Duration;
+
+    use super::HostNetworkProxy;
+
+    let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let origin_address = origin.local_addr().unwrap();
+    let origin_thread = std::thread::spawn(move || {
+        let (stream, _) = origin.accept().unwrap();
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    let policy = NetworkProxyPolicy::from_permission_domains(["example.test:443"])
+        .unwrap()
+        .with_test_connector(
+            "example.test",
+            443,
+            "93.184.216.34".parse::<IpAddr>().unwrap(),
+            origin_address,
+        )
+        .unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let port = {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let proxy = HostNetworkProxy::start_on_port(&temporary.path().join("proxy.state"), port, policy).unwrap();
+    let proxy_address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut client = TcpStream::connect_timeout(&proxy_address, Duration::from_secs(2)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    client
+        .write_all(b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\nX-Solaris-Network-Proof: 1\r\n\r\n")
+        .unwrap();
+    client.flush().unwrap();
+    let mut response = Vec::new();
+    let mut byte = [0_u8; 1];
+    while response.len() < 4096 {
+        if client.read(&mut byte).unwrap() == 0 {
+            break;
+        }
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains(&format!("X-Solaris-Upstream-Address: {origin_address}\r\n")));
+    drop(proxy);
+    origin_thread.join().unwrap();
+}
+
 #[test]
 fn permission_domains_are_normalized_to_exact_host_and_port() {
     let policy = NetworkProxyPolicy::from_permission_domains([
@@ -29,6 +85,9 @@ fn dangerous_or_ambiguous_permission_values_are_rejected() {
         ("[::1]", NetworkProxyPolicyError::IpLiteral),
         ("http://169.254.169.254/latest", NetworkProxyPolicyError::IpLiteral),
         ("metadata.google.internal", NetworkProxyPolicyError::MetadataService),
+        ("localhost", NetworkProxyPolicyError::MetadataService),
+        ("service.localhost", NetworkProxyPolicyError::MetadataService),
+        ("instance-data.ec2.internal", NetworkProxyPolicyError::MetadataService),
         ("file://example.test/socket", NetworkProxyPolicyError::InvalidDomain),
         ("unix:/tmp/proxy.sock", NetworkProxyPolicyError::InvalidDomain),
         ("https://example.test:0", NetworkProxyPolicyError::InvalidDomain),

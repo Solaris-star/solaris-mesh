@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 
 use super::identity::ProtectedIdentitySnapshot;
@@ -12,18 +13,16 @@ use super::{
     SandboxBackend, SandboxCommandDisposition, SandboxEnforcement, SandboxError, SandboxReason, SandboxReport,
     SandboxRunner, insufficient_enforcement_error, sandbox_io_error, trusted_sandbox_helper,
 };
-use crate::environment::is_network_proxy_environment_key;
+use crate::environment::{append_network_proxy_ca_environment, is_network_proxy_environment_key};
 use crate::network_proxy::NetworkProxyPolicy;
 use crate::recovery::process_recovery_required;
 use crate::runner::{PinnedExecutable, inspect_executable, pin_executable};
 
+#[path = "windows/network_peer.rs"]
+mod network_peer;
 #[path = "windows/psec.rs"]
 mod psec;
 #[path = "windows/psec_codec.rs"]
-#[allow(
-    dead_code,
-    reason = "the packaged PSEC launcher is implemented in the next Windows sandbox phase"
-)]
 mod psec_codec;
 
 const START_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,6 +84,20 @@ fn run_capability_probe() -> SandboxReport {
     }
 }
 
+struct WindowsNetworkState {
+    peer: network_peer::WindowsNetworkPeer,
+    psec_path: PathBuf,
+    psec_digest: String,
+    ca_path: PathBuf,
+    proof_host: String,
+}
+
+impl WindowsNetworkState {
+    fn verify_alive(&self) -> io::Result<()> {
+        self.peer.verify_alive()
+    }
+}
+
 pub(super) struct WindowsSandbox {
     // Restore temporary ACL changes before releasing the workspace component
     // handles which prevent path replacement.
@@ -98,21 +111,16 @@ pub(super) struct WindowsSandbox {
     private_tmp: tempfile::TempDir,
     _private_state: tempfile::TempDir,
     start_marker: PathBuf,
+    network: Option<WindowsNetworkState>,
     report: SandboxReport,
     configured: bool,
 }
 
 impl WindowsSandbox {
     pub(super) fn prepare(layout: ResolvedSandboxLayout, network_policy: NetworkProxyPolicy) -> io::Result<Self> {
-        if !network_policy.is_empty() {
-            let capability = psec::probe_network_capability();
-            debug_assert!(
-                !capability.is_fully_proven(),
-                "the probe-only PSEC path must not claim complete network enforcement"
-            );
-            return Err(sandbox_io_error(SandboxError::NetworkProxyUnavailable {
-                report: network_proxy_unavailable_report(),
-            }));
+        let network_enabled = !network_policy.is_empty();
+        if network_enabled {
+            psec::preflight_runtime().map_err(|_| network_proxy_unavailable_error())?;
         }
         #[cfg(feature = "sandbox-test-fixtures")]
         let fixture_helper = layout._test_helper_path.as_deref();
@@ -147,6 +155,11 @@ impl WindowsSandbox {
                 insufficient_enforcement_error(partial_report(SandboxReason::WorkspaceAclUnavailable))
             }
         })?;
+        let network = if network_enabled {
+            Some(prepare_network_state(&network_policy, &private_home, &private_state)?)
+        } else {
+            None
+        };
         let start_marker = private_state.path().join("ready");
         Ok(Self {
             _acl: acl,
@@ -159,6 +172,7 @@ impl WindowsSandbox {
             private_tmp,
             _private_state: private_state,
             start_marker,
+            network,
             report: full_report(),
             configured: false,
         })
@@ -178,6 +192,15 @@ impl WindowsSandbox {
         {
             self._acl.fail_next_cleanup_for_test();
         }
+        #[cfg(feature = "sandbox-test-fixtures")]
+        if command
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "SOLARIS_SANDBOX_FIXTURE_KILL_NETWORK_PROXY_BEFORE_SPAWN" && value.is_some())
+            && let Some(network) = self.network.as_ref()
+        {
+            network.peer.terminate_for_test();
+        }
         let target = resolve_path(Path::new(command.as_std().get_program()))?;
         let target_args = command.as_std().get_args().map(OsStr::to_os_string).collect::<Vec<_>>();
         let current_dir = command
@@ -189,7 +212,14 @@ impl WindowsSandbox {
         if !current_dir.starts_with(&self.layout.workspace_root) {
             return Err(sandbox_io_error(SandboxError::UnrepresentableSandboxLayout));
         }
-        let environment = explicit_environment(command, self.private_home.path(), self.private_tmp.path())?;
+        let environment = explicit_environment(
+            command,
+            self.private_home.path(),
+            self.private_tmp.path(),
+            self.network
+                .as_ref()
+                .map(|network| (network.peer.proxy_url(), network.ca_path.as_path())),
+        )?;
         let helper = self
             .helper
             .take()
@@ -220,6 +250,15 @@ impl WindowsSandbox {
                 .sid_string()
                 .map_err(|_| sandbox_io_error(SandboxError::PreparationFailed))?,
         );
+        if let Some(network) = self.network.as_ref() {
+            wrapper
+                .command
+                .arg("--security-environment")
+                .arg(&network.psec_path)
+                .arg("--security-environment-sha256")
+                .arg(&network.psec_digest);
+            wrapper.command.arg("--network-proof-host").arg(&network.proof_host);
+        }
         wrapper
             .command
             .arg("--status")
@@ -244,12 +283,18 @@ impl WindowsSandbox {
         Err(insufficient_enforcement_error(self.report))
     }
 
+    fn fail_network_start<T>(&mut self) -> io::Result<T> {
+        self.report = network_proxy_unavailable_report();
+        Err(network_proxy_unavailable_error())
+    }
+
     fn wait_for_start(&mut self, child: &mut Child) -> io::Result<()> {
         let deadline = Instant::now() + START_CONFIRMATION_TIMEOUT;
         loop {
             match std::fs::read(&self.start_marker) {
                 Ok(marker) => match classify_start_confirmation(&marker) {
                     StartConfirmation::Confirmed => return Ok(()),
+                    StartConfirmation::NetworkUnavailable => return self.fail_network_start(),
                     StartConfirmation::Pending => {}
                     StartConfirmation::Invalid => {
                         return self.fail_start(SandboxReason::StartConfirmationFailed);
@@ -274,13 +319,18 @@ impl WindowsSandbox {
 enum StartConfirmation {
     Pending,
     Confirmed,
+    NetworkUnavailable,
     Invalid,
 }
 
 fn classify_start_confirmation(marker: &[u8]) -> StartConfirmation {
-    if marker == b"full\n" {
+    const FULL: &[u8] = b"full\n";
+    const NETWORK_UNAVAILABLE: &[u8] = b"network-unavailable\n";
+    if marker == FULL {
         StartConfirmation::Confirmed
-    } else if b"full\n".starts_with(marker) {
+    } else if marker == NETWORK_UNAVAILABLE {
+        StartConfirmation::NetworkUnavailable
+    } else if FULL.starts_with(marker) || NETWORK_UNAVAILABLE.starts_with(marker) {
         StartConfirmation::Pending
     } else {
         StartConfirmation::Invalid
@@ -300,6 +350,9 @@ impl SandboxRunner for WindowsSandbox {
     fn verify_before_spawn(&mut self) -> io::Result<()> {
         self.identities
             .verify_workspace(&self.layout.protected_roots, &self.layout.workspace_root)?;
+        if let Some(network) = self.network.as_ref() {
+            network.verify_alive().map_err(|_| network_proxy_unavailable_error())?;
+        }
         Ok(())
     }
 
@@ -316,6 +369,7 @@ fn explicit_environment(
     command: &Command,
     private_home: &Path,
     private_tmp: &Path,
+    network: Option<(&str, &Path)>,
 ) -> io::Result<Vec<(OsString, OsString)>> {
     let mut environment = command
         .as_std()
@@ -336,6 +390,21 @@ fn explicit_environment(
         (OsString::from("TMPDIR"), private_tmp.as_os_str().to_os_string()),
         (OsString::from("TEMP"), private_tmp.as_os_str().to_os_string()),
     ]);
+    if let Some((proxy_url, ca_path)) = network {
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            environment.push((OsString::from(key), OsString::from(proxy_url)));
+        }
+        environment.push((OsString::from("NO_PROXY"), OsString::new()));
+        environment.push((OsString::from("no_proxy"), OsString::new()));
+        append_network_proxy_ca_environment(&mut environment, ca_path);
+    }
     for key in ["SystemRoot", "WINDIR"] {
         if let Some(value) = std::env::var_os(key) {
             environment.push((OsString::from(key), value));
@@ -350,6 +419,46 @@ fn explicit_environment(
         }
     }
     Ok(environment)
+}
+
+fn prepare_network_state(
+    policy: &NetworkProxyPolicy,
+    private_home: &tempfile::TempDir,
+    private_state: &tempfile::TempDir,
+) -> io::Result<WindowsNetworkState> {
+    let peer = network_peer::WindowsNetworkPeer::start(policy).map_err(|_| network_proxy_unavailable_error())?;
+    let (proof_host_name, proof_port) = policy
+        .windows_proof_endpoint()
+        .ok_or_else(network_proxy_unavailable_error)?;
+    let proof_host = format!("{proof_host_name}:{proof_port}");
+    let specification = psec::prepare_proxy_policy(peer.proxy_url(), peer.package_family_name())
+        .map_err(|_| network_proxy_unavailable_error())?;
+    let ca_path = private_home.path().join(".solaris-network-proxy-ca.pem");
+    write_sync(&ca_path, peer.ca_certificate_pem()).map_err(|_| network_proxy_unavailable_error())?;
+    let psec_path = private_state.path().join("network-policy.psec");
+    write_sync(&psec_path, &specification).map_err(|_| network_proxy_unavailable_error())?;
+    let psec_digest = format!("{:x}", Sha256::digest(&specification));
+    Ok(WindowsNetworkState {
+        peer,
+        psec_path,
+        psec_digest,
+        ca_path,
+        proof_host,
+    })
+}
+
+fn write_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn network_proxy_unavailable_error() -> io::Error {
+    sandbox_io_error(SandboxError::NetworkProxyUnavailable {
+        report: network_proxy_unavailable_report(),
+    })
 }
 
 fn private_directory(prefix: &str) -> io::Result<tempfile::TempDir> {

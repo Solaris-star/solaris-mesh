@@ -106,6 +106,10 @@ pub struct AgentConversationService {
 }
 
 impl AgentConversationService {
+    pub(crate) fn expected_agent_id(spec: &AgentConversationSpec) -> AgentId {
+        child_key(spec).agent_id()
+    }
+
     /// Persist and publish an idle child Agent without calling its Provider.
     pub async fn open(&self, spec: AgentConversationSpec) -> Result<AgentConversationHandle, AgentConversationError> {
         self.validate_open_spec(&spec)?;
@@ -224,10 +228,40 @@ impl AgentConversationService {
                 "conversation spawn resolved a different child session identity",
             ));
         }
-        let fresh_reservation = runtime.reservation.clone();
-        self.spawner
+        let fresh_reservation = AgentSpawnReservation {
+            reattached: false,
+            ..runtime.reservation.clone()
+        };
+        if let Err(error) = self
+            .spawner
             .attach_collaboration(&fresh_reservation, spec.overrides.collaboration.as_ref())
-            .map_err(AgentConversationError::reconciliation_required)?;
+        {
+            let mut cleanup_failures = Vec::new();
+            if let Err(cleanup) = self
+                .spawner
+                .lifecycle_runtime
+                .abort_spawn(&fresh_reservation, "conversation collaboration preparation failed")
+            {
+                cleanup_failures.push(format!("reserved Agent cleanup failed: {cleanup}"));
+            }
+            if let Err(cleanup) = opening_heartbeat.finish().await {
+                cleanup_failures.push(format!("opening heartbeat cleanup failed: {}", cleanup.message));
+            }
+            match store
+                .abandon_open(&durable_identity, &self.service_id, epoch, revision)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => cleanup_failures.push("opening claim changed before abandonment".to_owned()),
+                Err(cleanup) => cleanup_failures.push(format!("opening claim cleanup failed: {}", cleanup.message)),
+            }
+            let message = if cleanup_failures.is_empty() {
+                error
+            } else {
+                format!("{error}; {}", cleanup_failures.join("; "))
+            };
+            return Err(AgentConversationError::reconciliation_required(message));
+        }
 
         let handle = AgentConversationHandle {
             schema_version: CONVERSATION_SCHEMA_VERSION,

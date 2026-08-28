@@ -341,6 +341,12 @@ impl WorkflowController {
                         .cloned()
                         .and_then(|value| serde_json::from_value(value).ok())
                     {
+                        let durable_failure_summary = record
+                            .payload
+                            .get("failure_summary")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok());
+                        snapshot.failure_summary = durable_failure_summary;
                         if snapshot
                             .nodes
                             .values()
@@ -365,6 +371,23 @@ impl WorkflowController {
                 high_watermark,
                 before_commit,
             );
+        }
+        let effective_settled_status = deferred_settled_status.unwrap_or(snapshot.status);
+        if effective_settled_status == WorkflowRunStatus::Failed {
+            let recomputed = super::aggregate_workflow_failures(&snapshot.nodes);
+            if snapshot.failure_summary.is_some() && snapshot.failure_summary != recomputed {
+                return self.restore_as_reconciliation_required_locked(
+                    run_id,
+                    snapshot,
+                    "durable Workflow failure summary does not match restored failed nodes".to_owned(),
+                    guard,
+                    high_watermark,
+                    before_commit,
+                );
+            }
+            snapshot.failure_summary = recomputed;
+        } else {
+            snapshot.failure_summary = None;
         }
         if snapshot.status == WorkflowRunStatus::Running {
             for attempt in snapshot.nodes.values_mut() {
@@ -518,6 +541,7 @@ impl WorkflowController {
     ) -> Result<bool, String> {
         snapshot.status = WorkflowRunStatus::Failed;
         snapshot.reconciliation_reason = Some(reason.clone());
+        snapshot.failure_summary = None;
         for attempt in snapshot.nodes.values_mut() {
             if matches!(
                 attempt.status,
@@ -529,6 +553,7 @@ impl WorkflowController {
                 attempt.resume_existing_attempt = false;
             }
         }
+        snapshot.failure_summary = super::aggregate_workflow_failures(&snapshot.nodes);
         if let Some(before_commit) = before_commit.take() {
             before_commit();
         }

@@ -73,6 +73,20 @@ impl NetworkProxyPolicy {
         self.endpoints.is_empty()
     }
 
+    #[cfg(windows)]
+    pub(crate) fn windows_permission_domains(&self) -> impl Iterator<Item = String> + '_ {
+        self.endpoints
+            .iter()
+            .map(|endpoint| format!("{}:{}", endpoint.host, endpoint.port))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn windows_proof_endpoint(&self) -> Option<(String, u16)> {
+        self.endpoints
+            .first()
+            .map(|endpoint| (endpoint.host.clone(), endpoint.port))
+    }
+
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     pub(crate) fn external_runner_endpoints(&self) -> impl Iterator<Item = (&str, u16)> {
         self.endpoints
@@ -181,10 +195,18 @@ fn normalize_host(value: &str) -> Result<String, NetworkProxyPolicyError> {
     if host.parse::<IpAddr>().is_ok() {
         return Err(NetworkProxyPolicyError::IpLiteral);
     }
-    if matches!(
-        host.as_str(),
-        "metadata" | "instance-data" | "metadata.google.internal" | "metadata.azure.internal"
-    ) {
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || matches!(
+            host.as_str(),
+            "metadata"
+                | "instance-data"
+                | "metadata.google.internal"
+                | "metadata.azure.internal"
+                | "instance-data.ec2.internal"
+                | "metadata.aws.internal"
+        )
+    {
         return Err(NetworkProxyPolicyError::MetadataService);
     }
     if host.is_empty() || host.len() > 253 || !host.is_ascii() {

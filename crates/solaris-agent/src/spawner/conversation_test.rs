@@ -14,15 +14,17 @@ use solaris_config::config::{CliArgs, Config};
 use solaris_providers::error::ProviderError;
 use solaris_providers::provider::LlmProvider;
 use solaris_types::effect::DurabilityClass;
-use solaris_types::identity::{AgentId, OperationId, RunId, TaskId};
+use solaris_types::identity::{AgentId, OperationId, RunId, TaskId, TeamId};
 use solaris_types::llm::{LlmEvent, LlmRequest};
 use solaris_types::message::{ContentBlock, Role, StopReason, TokenUsage};
 use solaris_types::permission::PermissionCeiling;
 use solaris_types::resource::ResourceBudget;
 use solaris_types::runtime::{AgentLifecycleState, TaskFailureClass};
 use solaris_types::spawner::{
-    AgentConversationConfig, AgentConversationSpec, AgentOutcomeStatus, AgentTurnSpec, ForkOverrides,
+    AgentCollaborationContext, AgentConversationConfig, AgentConversationSpec, AgentOutcomeStatus, AgentTurnSpec,
+    ForkOverrides,
 };
+use solaris_types::workflow::CollaborationStrategy;
 
 use crate::collaboration_runtime::CollaborationRuntime;
 use crate::resource_manager::ResourceManager;
@@ -362,4 +364,250 @@ impl RuntimeLedger for BeforeIdleFailureLedger {
     fn effect_output_root(&self) -> Option<std::path::PathBuf> {
         self.inner.effect_output_root()
     }
+}
+
+#[derive(Default)]
+struct AtomicMembershipFailureLedger {
+    inner: InMemoryRuntimeLedger,
+    atomic_calls: AtomicUsize,
+    fail_on_call: AtomicUsize,
+}
+
+impl AtomicMembershipFailureLedger {
+    fn fail_atomic_call(&self, call: usize) {
+        self.fail_on_call.store(call, Ordering::SeqCst);
+    }
+}
+
+impl RuntimeLedger for AtomicMembershipFailureLedger {
+    fn logical_append_capability(&self) -> crate::runtime_ledger::LogicalAppendCapability {
+        self.inner.logical_append_capability()
+    }
+
+    fn acquire_workflow_mutation_lease(
+        &self,
+        run_id: &RunId,
+        owner_id: &str,
+        now_unix_ms: i64,
+    ) -> io::Result<crate::runtime_ledger::WorkflowMutationLease> {
+        self.inner
+            .acquire_workflow_mutation_lease(run_id, owner_id, now_unix_ms)
+    }
+
+    fn renew_workflow_mutation_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+    ) -> io::Result<crate::runtime_ledger::WorkflowMutationLease> {
+        self.inner.renew_workflow_mutation_lease(lease, now_unix_ms)
+    }
+
+    fn commit_workflow_restore(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        expected_sequence: u64,
+        now_unix_ms: i64,
+    ) -> io::Result<crate::runtime_ledger::WorkflowRestoreCommit> {
+        self.inner
+            .commit_workflow_restore(lease, expected_sequence, now_unix_ms)
+    }
+
+    fn release_workflow_mutation_lease(&self, lease: &crate::runtime_ledger::WorkflowMutationLease) -> io::Result<()> {
+        self.inner.release_workflow_mutation_lease(lease)
+    }
+
+    fn compare_and_append(
+        &self,
+        run_id: &RunId,
+        durability: DurabilityClass,
+        record_type: &str,
+        identity_fields: &[&str],
+        payload: Value,
+    ) -> io::Result<LedgerRecord> {
+        self.inner
+            .compare_and_append(run_id, durability, record_type, identity_fields, payload)
+    }
+
+    fn append_under_workflow_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+        durability: DurabilityClass,
+        record_type: &str,
+        payload: Value,
+    ) -> io::Result<LedgerRecord> {
+        self.inner
+            .append_under_workflow_lease(lease, now_unix_ms, durability, record_type, payload)
+    }
+
+    fn compare_and_append_under_workflow_lease(
+        &self,
+        lease: &crate::runtime_ledger::WorkflowMutationLease,
+        now_unix_ms: i64,
+        durability: DurabilityClass,
+        record_type: &str,
+        identity_fields: &[&str],
+        payload: Value,
+    ) -> io::Result<LedgerRecord> {
+        self.inner.compare_and_append_under_workflow_lease(
+            lease,
+            now_unix_ms,
+            durability,
+            record_type,
+            identity_fields,
+            payload,
+        )
+    }
+
+    fn admit_collaboration_tasks_for_root(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        self.inner
+            .admit_collaboration_tasks_for_root(root_run_id, run_id, max_tasks, tasks)
+    }
+
+    fn supports_atomic_task_metadata_admission(&self) -> bool {
+        true
+    }
+
+    fn append(
+        &self,
+        run_id: &RunId,
+        durability: DurabilityClass,
+        record_type: &str,
+        payload: Value,
+    ) -> io::Result<LedgerRecord> {
+        self.inner.append(run_id, durability, record_type, payload)
+    }
+
+    fn admit_tasks_and_append(
+        &self,
+        root_run_id: &RunId,
+        run_id: &RunId,
+        max_tasks: usize,
+        tasks: &[solaris_types::runtime::TaskRecord],
+        records: &[(DurabilityClass, String, Value)],
+    ) -> io::Result<Vec<LedgerRecord>> {
+        let call = self.atomic_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_on_call.load(Ordering::SeqCst) == call {
+            return Err(io::Error::other("injected collaboration membership commit failure"));
+        }
+        self.inner
+            .admit_tasks_and_append(root_run_id, run_id, max_tasks, tasks, records)
+    }
+
+    fn run_ids(&self) -> io::Result<Vec<RunId>> {
+        self.inner.run_ids()
+    }
+
+    fn records_for_run(&self, run_id: &RunId) -> io::Result<Vec<LedgerRecord>> {
+        self.inner.records_for_run(run_id)
+    }
+
+    fn effect_output_root(&self) -> Option<std::path::PathBuf> {
+        self.inner.effect_output_root()
+    }
+}
+
+#[tokio::test]
+async fn collaboration_open_membership_commit_failure_aborts_reserved_agent_and_is_retryable_by_exact_open() {
+    let ledger = Arc::new(AtomicMembershipFailureLedger::default());
+    ledger.fail_atomic_call(2);
+    let harness = Harness::with_ledger(ledger.clone());
+    let mut spec = harness.spec();
+    let child_id = AgentConversationService::expected_agent_id(&spec);
+    let team_id = TeamId::from("conversation-atomic-team");
+    spec.overrides.collaboration = Some(AgentCollaborationContext {
+        team_id: team_id.clone(),
+        strategy: CollaborationStrategy::Team,
+        coordinator_agent_id: harness.parent_id.clone(),
+        max_pending_messages: 8,
+        max_message_bytes: 1_024,
+    });
+
+    let error = harness
+        .service
+        .open(spec.clone())
+        .await
+        .expect_err("the second atomic collaboration commit is injected to fail");
+    assert_eq!(error.failure_class, TaskFailureClass::ReconciliationRequired);
+    assert!(
+        error
+            .message
+            .contains("injected collaboration membership commit failure"),
+        "unexpected failure path: {} (atomic calls={})",
+        error.message,
+        ledger.atomic_calls.load(Ordering::SeqCst)
+    );
+
+    let runtime = harness.service.spawner.lifecycle_runtime();
+    assert!(
+        runtime.agents().get(&child_id).is_none(),
+        "failed open must remove the Reserved child"
+    );
+    let team = runtime
+        .teams()
+        .get(&team_id)
+        .expect("the safe Team shell was committed first");
+    assert!(team.members.contains(&harness.parent_id));
+    assert!(!team.members.contains(&child_id));
+    let records = ledger.records_for_run(&harness.run_id).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "collaboration_team_prepared")
+            .count(),
+        1,
+        "only the durable Team shell may survive the failed membership transaction"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "collaboration_batch_prepared")
+            .count(),
+        0,
+        "failed membership transaction must not append a full collaboration batch"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.record_type == "agent_conversation_opened")
+            .count(),
+        0
+    );
+    assert!(records.iter().any(|record| record.record_type == "agent_spawn_aborted"));
+
+    let handle = harness
+        .service
+        .open(spec.clone())
+        .await
+        .expect("exact retry must reacquire the abandoned opening claim and complete the membership batch");
+    assert_eq!(handle.agent_id, child_id);
+    let team = runtime.teams().get(&team_id).unwrap();
+    assert!(team.members.contains(&harness.parent_id));
+    assert!(team.members.contains(&child_id));
+    let marker_count = ledger
+        .records_for_run(&harness.run_id)
+        .unwrap()
+        .iter()
+        .filter(|record| record.record_type == "collaboration_batch_prepared")
+        .count();
+    assert_eq!(marker_count, 1);
+
+    let replay = harness.service.open(spec).await.expect("exact open replay succeeds");
+    assert_eq!(replay.agent_id, child_id);
+    assert_eq!(
+        ledger
+            .records_for_run(&harness.run_id)
+            .unwrap()
+            .iter()
+            .filter(|record| record.record_type == "collaboration_batch_prepared")
+            .count(),
+        marker_count,
+        "exact replay must not append another Team/membership batch"
+    );
 }

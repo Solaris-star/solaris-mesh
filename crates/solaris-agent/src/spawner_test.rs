@@ -428,6 +428,82 @@ async fn collaboration_summary_reports_real_duplicate_call_rate() {
     assert_eq!(result.duplicate_call_rate, Some(0.5));
 }
 
+#[tokio::test]
+async fn all_direct_multi_agent_strategies_execute_children_and_complete_tasks() {
+    for strategy in [
+        solaris_types::workflow::CollaborationStrategy::Fanout,
+        solaris_types::workflow::CollaborationStrategy::Team,
+        solaris_types::workflow::CollaborationStrategy::Supervisor,
+        solaris_types::workflow::CollaborationStrategy::IndependentReviewer,
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(ReviewerProvider {
+            calls: Arc::clone(&calls),
+            responses: Arc::new(std::sync::Mutex::new(vec![
+                "review".to_owned(),
+                "worker".to_owned(),
+                "worker".to_owned(),
+            ])),
+        });
+        let mut config = solaris_config::config::Config::resolve(&solaris_config::config::CliArgs {
+            provider: Some("anthropic".into()),
+            api_key: Some("test".into()),
+            base_url: None,
+            model: Some("test-model".into()),
+            max_tokens: None,
+            thinking: None,
+            thinking_budget: None,
+            max_turns: None,
+            max_tool_call_malformed_turns: None,
+            max_tool_call_failure_turns: None,
+            system_prompt: None,
+            profile: None,
+            auto_approve: true,
+            project_dir: None,
+        })
+        .unwrap();
+        config.session.enabled = false;
+        let workspace = tempfile::tempdir().unwrap();
+        let spawner = AgentSpawner::new(provider, config, workspace.path().to_path_buf());
+        let result = spawner
+            .spawn_collaboration(ParsedSpawnRequest {
+                strategy: solaris_types::workflow::CollaborationSelection::Fixed(strategy),
+                tasks: vec![solaris_types::workflow::CollaborationTaskInput {
+                    id: Some("worker".to_owned()),
+                    name: "worker".to_owned(),
+                    prompt: "execute real child work".to_owned(),
+                    role: Some("worker".to_owned()),
+                    depends_on: Vec::new(),
+                    expected_output: None,
+                    resource_budget: None,
+                }],
+            })
+            .await;
+
+        assert_eq!(
+            result.status,
+            solaris_types::workflow::CollaborationRunStatus::Completed,
+            "strategy {strategy:?}: {}",
+            result.summary
+        );
+        assert!(result.created >= 1, "strategy {strategy:?} must create a Child Agent");
+        assert!(!result.tasks.is_empty());
+        assert!(result.tasks.iter().all(|task| task.status == TaskState::Completed));
+        assert!(result.tasks.iter().all(|task| task.agent_id.is_some()));
+        assert_eq!(calls.load(Ordering::SeqCst), result.tasks.len());
+        for task in &result.tasks {
+            let agent_id = task.agent_id.as_ref().expect("completed task has child");
+            assert!(
+                spawner.lifecycle_runtime().agents().get(agent_id).is_some(),
+                "strategy {strategy:?} child must exist in runtime projection"
+            );
+        }
+        let durable_tasks = spawner.lifecycle_runtime().tasks().snapshot();
+        assert_eq!(durable_tasks.len(), result.tasks.len());
+        assert!(durable_tasks.iter().all(|task| task.state == TaskState::Completed));
+    }
+}
+
 struct SupervisorRetryProvider {
     attempts: std::sync::Mutex<Vec<bool>>,
 }

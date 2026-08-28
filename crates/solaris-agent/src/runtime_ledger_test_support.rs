@@ -4,6 +4,10 @@ macro_rules! forward_compare_and_append {
             self.inner.logical_append_capability()
         }
 
+        fn supports_atomic_task_metadata_admission(&self) -> bool {
+            self.inner.supports_atomic_task_metadata_admission()
+        }
+
         fn acquire_workflow_mutation_lease(
             &self,
             run_id: &solaris_types::identity::RunId,
@@ -72,6 +76,18 @@ macro_rules! forward_compare_and_append {
         ) -> std::io::Result<Vec<$crate::runtime_ledger::LedgerRecord>> {
             self.inner
                 .admit_collaboration_tasks_for_root(root_run_id, run_id, max_tasks, tasks)
+        }
+
+        fn admit_tasks_and_append(
+            &self,
+            root_run_id: &solaris_types::identity::RunId,
+            run_id: &solaris_types::identity::RunId,
+            max_tasks: usize,
+            tasks: &[solaris_types::runtime::TaskRecord],
+            records: &[(solaris_types::effect::DurabilityClass, String, serde_json::Value)],
+        ) -> std::io::Result<Vec<$crate::runtime_ledger::LedgerRecord>> {
+            self.inner
+                .admit_tasks_and_append(root_run_id, run_id, max_tasks, tasks, records)
         }
 
         fn admit_tasks_and_append_under_workflow_lease(

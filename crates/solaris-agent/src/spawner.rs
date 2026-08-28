@@ -433,6 +433,10 @@ impl AgentSpawner {
         self.max_tasks_per_run as usize
     }
 
+    pub(crate) fn supports_atomic_collaboration_batch(&self) -> bool {
+        self.lifecycle_runtime.supports_atomic_task_metadata_admission()
+    }
+
     pub fn resource_manager(&self) -> Arc<ResourceManager> {
         Arc::clone(&self.resources)
     }
@@ -472,6 +476,15 @@ impl AgentSpawner {
         run_id: RunId,
         parent_agent_id: AgentId,
     ) -> Self {
+        if lifecycle_runtime.agents().get(&parent_agent_id).is_none() {
+            lifecycle_runtime.agents().upsert(solaris_types::runtime::AgentRecord {
+                run_id: run_id.clone(),
+                agent_id: parent_agent_id.clone(),
+                team_id: None,
+                parent_agent_id: None,
+                state: solaris_types::runtime::AgentLifecycleState::Active,
+            });
+        }
         self.lifecycle_runtime = lifecycle_runtime;
         self.run_id = run_id;
         self.parent_agent_id = parent_agent_id;
@@ -707,17 +720,7 @@ impl AgentSpawner {
             return Ok(());
         };
         self.lifecycle_runtime
-            .ensure_collaboration_team(self.run_id.clone(), collaboration.strategy.as_str(), collaboration)
-            .map_err(|error| error.to_string())?;
-        self.lifecycle_runtime
-            .join_team(
-                &self.run_id,
-                &collaboration.team_id,
-                collaboration.coordinator_agent_id.clone(),
-            )
-            .map_err(|error| error.to_string())?;
-        self.lifecycle_runtime
-            .join_team(&self.run_id, &collaboration.team_id, reservation.child_agent_id.clone())
+            .prepare_collaboration_membership(&self.run_id, &reservation.child_agent_id, collaboration)
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -1440,15 +1443,16 @@ impl AgentSpawner {
                 failure_class: None,
             });
         }
-        // Durable Run-level admission: the quota check and the task_created
-        // appends happen under the Run mutation line as one atomic step, so
-        // sequential spawns, concurrent races, restarts, and idempotent
-        // replays can neither bypass nor double-count the limit.
+        // The first durable collaboration commit includes every queued Task,
+        // the Team metadata, and coordinator membership. A crash can therefore
+        // never leave a Task that references a Team which does not exist.
         let max_tasks = self.max_tasks_per_run.clamp(1, 256) as usize;
-        if let Err(error) = self
-            .lifecycle_runtime
-            .admit_collaboration_tasks(&self.run_id, max_tasks, batch)
-        {
+        if let Err(error) = self.lifecycle_runtime.prepare_collaboration_task_batch(
+            &self.run_id,
+            collaboration.as_ref().expect("non-single collaboration has a Team"),
+            max_tasks,
+            batch,
+        ) {
             return failed_collaboration_summary(original_tasks.clone(), error.to_string());
         }
 

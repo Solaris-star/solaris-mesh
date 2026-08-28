@@ -30,6 +30,7 @@ const STDIO_PROBE_KEY: &str = "SOLARIS_WINDOWS_SANDBOX_STDIO_PROBE";
 const TARGET_MARKER_KEY: &str = "SOLARIS_WINDOWS_SANDBOX_TARGET_MARKER";
 const ACL_RENAME_TARGET_KEY: &str = "SOLARIS_WINDOWS_SANDBOX_ACL_RENAME_TARGET";
 const ACL_RENAME_DESTINATION_KEY: &str = "SOLARIS_WINDOWS_SANDBOX_ACL_RENAME_DESTINATION";
+const APPROVED_NETWORK_HOST_KEY: &str = "SOLARIS_WINDOWS_SANDBOX_APPROVED_NETWORK_HOST";
 
 #[test]
 fn sandbox_workspace_child_probe() {
@@ -133,6 +134,73 @@ fn sandbox_network_child_probe() {
         std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1)).is_err(),
         "strict Auto must not reach a host loopback listener"
     );
+}
+
+#[test]
+fn sandbox_approved_network_child_probe() {
+    let Some(approved_host) = std::env::var_os(APPROVED_NETWORK_HOST_KEY) else {
+        return;
+    };
+    let approved_host = approved_host.to_string_lossy().to_string();
+    let proxy = std::env::var("HTTP_PROXY").unwrap();
+    let proxy = proxy.strip_prefix("http://127.0.0.1:").unwrap().parse::<u16>().unwrap();
+    let proxy = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, proxy));
+
+    let mut approved = std::net::TcpStream::connect_timeout(&proxy, std::time::Duration::from_secs(2)).unwrap();
+    approved
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        approved,
+        "CONNECT {approved_host} HTTP/1.1\r\nHost: {approved_host}\r\nX-Solaris-Network-Proof: 1\r\n\r\n"
+    )
+    .unwrap();
+    approved.flush().unwrap();
+    let approved_response = read_http_header(&mut approved);
+    let approved_response = std::str::from_utf8(&approved_response).unwrap();
+    assert!(
+        approved_response.starts_with("HTTP/1.1 200"),
+        "approved host did not connect through the Host proxy: {approved_response}"
+    );
+    let direct = approved_response
+        .split("\r\n")
+        .find_map(|line| line.strip_prefix("X-Solaris-Upstream-Address: "))
+        .expect("proof response must identify the exact upstream address")
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+    drop(approved);
+
+    let mut denied = std::net::TcpStream::connect_timeout(&proxy, std::time::Duration::from_secs(2)).unwrap();
+    denied
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    denied
+        .write_all(
+            b"CONNECT denied.invalid:443 HTTP/1.1\r\nHost: denied.invalid:443\r\nX-Solaris-Network-Proof: 1\r\n\r\n",
+        )
+        .unwrap();
+    let denied_response = read_http_header(&mut denied);
+    assert!(String::from_utf8_lossy(&denied_response).starts_with("HTTP/1.1 403"));
+
+    assert!(
+        std::net::TcpStream::connect_timeout(&direct, std::time::Duration::from_secs(2)).is_err(),
+        "strict Windows Auto target reached the approved destination directly instead of through its packaged peer"
+    );
+}
+
+fn read_http_header(stream: &mut impl Read) -> Vec<u8> {
+    let mut response = Vec::with_capacity(256);
+    let mut byte = [0_u8; 1];
+    while response.len() < 4096 {
+        if stream.read(&mut byte).unwrap() == 0 {
+            break;
+        }
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    response
 }
 
 #[test]
@@ -583,20 +651,45 @@ async fn workspace_sandbox_denies_host_loopback_network() {
     drop(listener);
 }
 
-#[test]
-fn approved_domain_policy_fails_closed_before_the_target_starts() {
+#[tokio::test]
+async fn approved_domain_policy_runs_real_proxy_and_denies_direct_egress_or_reports_platform_blocker() {
+    let workspace = tempfile::tempdir().unwrap();
+    let approved_host = "example.com:443";
+    let mut command = pinned_test_command(workspace.path(), "sandbox_approved_network_child_probe");
+    command.env(APPROVED_NETWORK_HOST_KEY, approved_host).launch_policy(
+        ProcessLaunchPolicy::workspace_sandbox_with_network(workspace.path(), [], [], [approved_host]).unwrap(),
+    );
+
+    match command.spawn() {
+        Ok(mut child) => {
+            assert_eq!(child.sandbox_report().enforcement(), SandboxEnforcement::Full);
+            assert!(child.wait().await.unwrap().success());
+        }
+        Err(error) => assert_network_platform_blocker(error),
+    }
+}
+
+#[cfg(feature = "sandbox-test-fixtures")]
+#[tokio::test]
+async fn approved_domain_proxy_crash_fails_closed_before_target_spawn() {
     let workspace = tempfile::tempdir().unwrap();
     let marker = workspace.path().join("target-started");
     let mut command = pinned_test_command(workspace.path(), "sandbox_marker_child_probe");
-    command.env(TARGET_MARKER_KEY, &marker).launch_policy(
-        ProcessLaunchPolicy::workspace_sandbox_with_network(workspace.path(), [], [], ["https://allowed.example.test"])
-            .unwrap(),
-    );
+    command
+        .env(TARGET_MARKER_KEY, &marker)
+        .env("SOLARIS_SANDBOX_FIXTURE_KILL_NETWORK_PROXY_BEFORE_SPAWN", "1")
+        .launch_policy(
+            ProcessLaunchPolicy::workspace_sandbox_with_network(workspace.path(), [], [], ["example.com:443"]).unwrap(),
+        );
+    match command.spawn() {
+        Ok(_) => panic!("a killed packaged proxy must never allow the target to start"),
+        Err(error) => assert_network_platform_blocker(error),
+    }
+    assert!(!marker.exists());
+}
 
-    let error = match command.spawn() {
-        Ok(_) => panic!("Windows approved-domain policy must fail closed until a verified Full transport is available"),
-        Err(error) => error,
-    };
+fn assert_network_platform_blocker(error: std::io::Error) {
+    eprintln!("Windows approved-domain platform blocker: {error:?}");
     let report = solaris_process::SandboxReport::new(
         SandboxEnforcement::Unavailable,
         SandboxBackend::WindowsAppContainer,
@@ -608,7 +701,6 @@ fn approved_domain_policy_fails_closed_before_the_target_starts() {
     );
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     assert_eq!(sandbox_report_from_error(&error), Some(report));
-    assert!(!marker.exists());
 }
 
 #[tokio::test]

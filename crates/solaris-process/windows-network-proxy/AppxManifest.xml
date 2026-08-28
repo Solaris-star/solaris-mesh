@@ -3,9 +3,7 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
-  xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
-  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap10 desktop2 rescap">
+  IgnorableNamespaces="uap uap10">
   <Identity
     Name="__PACKAGE_NAME__"
     Publisher="__PUBLISHER__"
@@ -29,20 +27,7 @@
   <Capabilities>
     <Capability Name="internetClient" />
     <Capability Name="privateNetworkClientServer" />
-    <rescap:Capability Name="runFullTrust" />
   </Capabilities>
-  <Extensions>
-    <desktop2:Extension Category="windows.firewallRules">
-      <desktop2:FirewallRules Executable="solaris-windows-network-proxy.exe">
-        <desktop2:Rule
-          Direction="in"
-          IPProtocol="TCP"
-          Profile="all"
-          LocalPortMin="49152"
-          LocalPortMax="65535" />
-      </desktop2:FirewallRules>
-    </desktop2:Extension>
-  </Extensions>
   <Applications>
     <Application
       Id="Proxy"

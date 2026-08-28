@@ -198,6 +198,12 @@ pub trait RuntimeLedger: Send + Sync {
         ))
     }
 
+    /// Returns whether this backend can guarantee one all-or-nothing durable
+    /// commit for task admission plus related collaboration metadata.
+    fn supports_atomic_task_metadata_admission(&self) -> bool {
+        false
+    }
+
     /// Atomically admits tasks and appends additional records under the task
     /// Run. Implementations must commit the complete batch or nothing.
     fn admit_tasks_and_append(
@@ -345,6 +351,10 @@ struct InMemoryLedgerState {
 impl RuntimeLedger for InMemoryRuntimeLedger {
     fn logical_append_capability(&self) -> LogicalAppendCapability {
         LogicalAppendCapability::ProcessLocal
+    }
+
+    fn supports_atomic_task_metadata_admission(&self) -> bool {
+        true
     }
 
     fn acquire_workflow_mutation_lease(
@@ -677,6 +687,10 @@ impl SqliteRuntimeLedger {
 impl RuntimeLedger for SqliteRuntimeLedger {
     fn logical_append_capability(&self) -> LogicalAppendCapability {
         LogicalAppendCapability::CrossProcess
+    }
+
+    fn supports_atomic_task_metadata_admission(&self) -> bool {
+        true
     }
 
     fn acquire_workflow_mutation_lease(

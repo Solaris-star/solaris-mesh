@@ -49,9 +49,18 @@ fn release_and_windows_install_layout_include_the_extension_manifest() {
         fs::read_to_string(root.join("packaging/windows/install-solaris.ps1")).expect("Windows installer must exist");
 
     assert!(workflow.contains("solaris-extension.json"));
+    assert!(workflow.contains("solaris-windows-network-proxy.exe"));
+    assert!(workflow.contains("solaris-windows-network-proxy.msix"));
+    assert!(workflow.contains("build-unsigned-package.ps1"));
+    assert!(workflow.contains("SOLARIS_PACKAGED_WINDOWS_NETWORK_PROXY_SHA256"));
     assert!(workflow.contains("adapter['cliCommand'] == 'solaris'"));
     assert!(workflow.contains("adapter['acpArgs'] == ['acp']"));
     assert!(installer.contains("\"solaris-extension.json\""));
+    assert!(installer.contains("\"solaris-windows-network-proxy.exe\""));
+    assert!(installer.contains("\"solaris-windows-network-proxy.msix\""));
+    assert!(installer.contains("Add-AppxPackage"));
+    assert!(installer.contains("PackageFamilyName"));
+    assert!(installer.contains("NetworkProxyPackageFamilyName"));
     let release_please =
         fs::read_to_string(root.join("release-please-config.json")).expect("release-please config must exist");
     assert!(release_please.contains("solaris-extension.json"));

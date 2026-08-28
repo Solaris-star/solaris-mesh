@@ -1,5 +1,6 @@
 //! Durable ledger restoration for the collaboration runtime.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -25,7 +26,58 @@ impl<T> CollaborationRuntime<T> {
         self.restore_projection_locked(run_id)
     }
 
+    fn validate_projected_team_task(&self, run_id: &RunId, task: &TaskRecord) -> std::io::Result<()> {
+        let Some(team_id) = task.team_id.as_ref() else {
+            return Ok(());
+        };
+        let team = self
+            .teams
+            .get(team_id)
+            .ok_or_else(|| std::io::Error::other(format!("restored task references unknown Team {team_id}")))?;
+        let line = self.mutation.line_for(run_id);
+        if !Arc::ptr_eq(&line, &self.mutation.line_for(&team.run_id)) {
+            return Err(std::io::Error::other(
+                "restored task Team belongs to a different Run lineage",
+            ));
+        }
+        let coordinator = team
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("restored Team task has no coordinator"))?;
+        if !team.members.contains(coordinator) {
+            return Err(std::io::Error::other(
+                "restored Team task coordinator is not a Team member",
+            ));
+        }
+        let owner = task.owner_agent_id.as_ref();
+        if let Some(owner) = owner {
+            let agent = self
+                .agents
+                .get(owner)
+                .ok_or_else(|| std::io::Error::other(format!("restored Team task owner {owner} is unknown")))?;
+            if !Arc::ptr_eq(&line, &self.mutation.line_for(&agent.run_id)) || !team.members.contains(owner) {
+                return Err(std::io::Error::other(
+                    "restored Team task owner does not belong to the task Team/Run",
+                ));
+            }
+        }
+        match task.state {
+            TaskState::Created => Err(std::io::Error::other(
+                "restored Team task cannot remain in Created state",
+            )),
+            TaskState::Queued if owner.is_some() => Err(std::io::Error::other(
+                "restored Queued Team task must not have an owner",
+            )),
+            TaskState::Assigned | TaskState::Running if owner.is_none() => Err(std::io::Error::other(format!(
+                "restored {:?} Team task has no owner",
+                task.state
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     fn restore_projection_locked(&self, run_id: &RunId) -> std::io::Result<()> {
+        let mut deferred_team_tasks = HashMap::<TaskId, TaskRecord>::new();
         for record in self.ledger.records_for_run(run_id)? {
             match record.record_type.as_str() {
                 "agent_spawn_intent" => {
@@ -169,31 +221,42 @@ impl<T> CollaborationRuntime<T> {
                         self.teams.create(team);
                     }
                 }
-                "collaboration_batch_prepared" => {
-                    let teams: Vec<TeamRecord> = record
-                        .payload
-                        .get("teams")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or_default();
-                    let memberships: Vec<(TeamId, AgentId)> = record
-                        .payload
-                        .get("memberships")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or_default();
-                    let tasks: Vec<TaskRecord> = record
+                "collaboration_team_prepared" => {
+                    let teams: Vec<TeamRecord> =
+                        serde_json::from_value(record.payload.get("teams").cloned().unwrap_or_else(|| json!([])))
+                            .map_err(|error| {
+                                std::io::Error::other(format!("invalid collaboration Team preparation: {error}"))
+                            })?;
+                    let memberships: Vec<(TeamId, AgentId)> =
+                        serde_json::from_value(record.payload.get("memberships").cloned().unwrap_or_else(|| json!([])))
+                            .map_err(|error| {
+                                std::io::Error::other(format!("invalid collaboration Team memberships: {error}"))
+                            })?;
+                    if !record
                         .payload
                         .get("tasks")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or_default();
-                    for team in teams {
+                        .and_then(serde_json::Value::as_array)
+                        .is_none_or(Vec::is_empty)
+                    {
+                        return Err(std::io::Error::other(
+                            "collaboration Team preparation cannot contain Tasks",
+                        ));
+                    }
+                    let mut prepared_teams = HashMap::<TeamId, TeamRecord>::new();
+                    for team in &teams {
                         team.validate_message_limits()?;
+                        if team.run_id != *run_id {
+                            return Err(std::io::Error::other(
+                                "collaboration Team preparation belongs to a different Run",
+                            ));
+                        }
                         if let Some(existing) = self.teams.get(&team.team_id)
                             && (existing.run_id != team.run_id
+                                || existing.team_id != team.team_id
+                                || existing.name != team.name
                                 || existing.strategy != team.strategy
                                 || existing.coordinator != team.coordinator
+                                || existing.direct_peer_messaging != team.direct_peer_messaging
                                 || existing.max_pending_messages != team.max_pending_messages
                                 || existing.max_message_bytes != team.max_message_bytes)
                         {
@@ -202,6 +265,227 @@ impl<T> CollaborationRuntime<T> {
                                 team.team_id
                             )));
                         }
+                        if let Some(previous) = prepared_teams.insert(team.team_id.clone(), team.clone())
+                            && previous != *team
+                        {
+                            return Err(std::io::Error::other(format!(
+                                "collaboration Team preparation contains conflicting Team {} metadata",
+                                team.team_id
+                            )));
+                        }
+                    }
+                    for (team_id, agent_id) in &memberships {
+                        if self.teams.get(team_id).is_none() && !prepared_teams.contains_key(team_id) {
+                            return Err(std::io::Error::other(format!(
+                                "collaboration Team membership references unknown Team {team_id}"
+                            )));
+                        }
+                        let agent = self.agents.get(agent_id).ok_or_else(|| {
+                            std::io::Error::other(format!(
+                                "collaboration Team membership references unknown Agent {agent_id}"
+                            ))
+                        })?;
+                        if agent.run_id != *run_id {
+                            return Err(std::io::Error::other(
+                                "collaboration Team membership Agent belongs to a different Run",
+                            ));
+                        }
+                    }
+                    for team in teams {
+                        self.teams.create(team);
+                    }
+                    for (team_id, agent_id) in memberships {
+                        self.teams.join(&team_id, agent_id.clone());
+                        self.agents.set_team(&agent_id, Some(team_id));
+                    }
+                }
+                "collaboration_batch_prepared" => {
+                    let teams: Vec<TeamRecord> =
+                        serde_json::from_value(record.payload.get("teams").cloned().unwrap_or_else(|| json!([])))
+                            .map_err(|error| {
+                                std::io::Error::other(format!("invalid collaboration batch teams: {error}"))
+                            })?;
+                    let memberships: Vec<(TeamId, AgentId)> =
+                        serde_json::from_value(record.payload.get("memberships").cloned().unwrap_or_else(|| json!([])))
+                            .map_err(|error| {
+                                std::io::Error::other(format!("invalid collaboration batch memberships: {error}"))
+                            })?;
+                    let tasks: Vec<TaskRecord> =
+                        serde_json::from_value(record.payload.get("tasks").cloned().unwrap_or_else(|| json!([])))
+                            .map_err(|error| {
+                                std::io::Error::other(format!("invalid collaboration batch tasks: {error}"))
+                            })?;
+
+                    let mut batch_teams = HashMap::<TeamId, TeamRecord>::new();
+                    for team in &teams {
+                        team.validate_message_limits()?;
+                        if team.run_id != *run_id {
+                            return Err(std::io::Error::other(
+                                "collaboration batch Team belongs to a different Run",
+                            ));
+                        }
+                        if let Some(existing) = self.teams.get(&team.team_id)
+                            && (existing.run_id != team.run_id
+                                || existing.team_id != team.team_id
+                                || existing.name != team.name
+                                || existing.strategy != team.strategy
+                                || existing.coordinator != team.coordinator
+                                || existing.direct_peer_messaging != team.direct_peer_messaging
+                                || existing.max_pending_messages != team.max_pending_messages
+                                || existing.max_message_bytes != team.max_message_bytes)
+                        {
+                            return Err(std::io::Error::other(format!(
+                                "team {} has incompatible restored collaboration metadata",
+                                team.team_id
+                            )));
+                        }
+                        if let Some(previous) = batch_teams.insert(team.team_id.clone(), team.clone())
+                            && previous != *team
+                        {
+                            return Err(std::io::Error::other(format!(
+                                "collaboration batch contains conflicting Team {} metadata",
+                                team.team_id
+                            )));
+                        }
+                    }
+                    for (team_id, agent_id) in &memberships {
+                        if self.teams.get(team_id).is_none() && !batch_teams.contains_key(team_id) {
+                            return Err(std::io::Error::other(format!(
+                                "collaboration batch membership references unknown Team {team_id}"
+                            )));
+                        }
+                        let agent = self.agents.get(agent_id).ok_or_else(|| {
+                            std::io::Error::other(format!(
+                                "collaboration batch membership references unknown Agent {agent_id}"
+                            ))
+                        })?;
+                        if agent.run_id != *run_id {
+                            return Err(std::io::Error::other(
+                                "collaboration batch membership Agent belongs to a different Run",
+                            ));
+                        }
+                    }
+                    for task in &tasks {
+                        if task.run_id != *run_id {
+                            return Err(std::io::Error::other(
+                                "collaboration batch Task belongs to a different Run",
+                            ));
+                        }
+                        let durable_task = deferred_team_tasks
+                            .get(&task.task_id)
+                            .cloned()
+                            .or_else(|| self.tasks.get(&task.task_id))
+                            .ok_or_else(|| {
+                                std::io::Error::other(format!(
+                                    "collaboration batch Task {} has no matching durable task_created record",
+                                    task.task_id
+                                ))
+                            })?;
+                        if durable_task != *task {
+                            return Err(std::io::Error::other(format!(
+                                "collaboration batch Task {} metadata does not match task_created",
+                                task.task_id
+                            )));
+                        }
+                        if let Some(team_id) = task.team_id.as_ref() {
+                            let team = self
+                                .teams
+                                .get(team_id)
+                                .or_else(|| batch_teams.get(team_id).cloned())
+                                .ok_or_else(|| {
+                                    std::io::Error::other(format!(
+                                        "collaboration batch Task {} references unknown Team {team_id}",
+                                        task.task_id
+                                    ))
+                                })?;
+                            let coordinator = team.coordinator.as_ref().ok_or_else(|| {
+                                std::io::Error::other(format!(
+                                    "collaboration batch Team Task {} has no coordinator",
+                                    task.task_id
+                                ))
+                            })?;
+                            let existing_coordinator = self
+                                .teams
+                                .get(team_id)
+                                .is_some_and(|team| team.members.contains(coordinator));
+                            let batch_coordinator = memberships
+                                .iter()
+                                .any(|(member_team, member)| member_team == team_id && member == coordinator);
+                            if !existing_coordinator && !batch_coordinator {
+                                return Err(std::io::Error::other(format!(
+                                    "collaboration batch Task {} Team coordinator is not a member",
+                                    task.task_id
+                                )));
+                            }
+                            match task.state {
+                                TaskState::Created => {
+                                    return Err(std::io::Error::other(format!(
+                                        "collaboration batch Team Task {} cannot remain in Created state",
+                                        task.task_id
+                                    )));
+                                }
+                                TaskState::Queued => {
+                                    if task.owner_agent_id.is_some() {
+                                        return Err(std::io::Error::other(format!(
+                                            "collaboration batch Queued Team Task {} must not have an owner",
+                                            task.task_id
+                                        )));
+                                    }
+                                }
+                                TaskState::Assigned | TaskState::Running => {
+                                    let owner = task.owner_agent_id.as_ref().ok_or_else(|| {
+                                        std::io::Error::other(format!(
+                                            "collaboration batch {:?} Team Task {} has no owner",
+                                            task.state, task.task_id
+                                        ))
+                                    })?;
+                                    let owner_agent = self.agents.get(owner).ok_or_else(|| {
+                                        std::io::Error::other(format!(
+                                            "collaboration batch Task {} owner {owner} is unknown",
+                                            task.task_id
+                                        ))
+                                    })?;
+                                    let existing_member =
+                                        self.teams.get(team_id).is_some_and(|team| team.members.contains(owner));
+                                    let batch_member = memberships
+                                        .iter()
+                                        .any(|(member_team, member)| member_team == team_id && member == owner);
+                                    if owner_agent.run_id != *run_id || (!existing_member && !batch_member) {
+                                        return Err(std::io::Error::other(format!(
+                                            "collaboration batch Task {} owner is not a Team member in the Run",
+                                            task.task_id
+                                        )));
+                                    }
+                                }
+                                TaskState::Completed
+                                | TaskState::Failed
+                                | TaskState::Cancelled
+                                | TaskState::Skipped => {
+                                    if let Some(owner) = task.owner_agent_id.as_ref() {
+                                        let owner_agent = self.agents.get(owner).ok_or_else(|| {
+                                            std::io::Error::other(format!(
+                                                "collaboration batch Task {} historical owner {owner} is unknown",
+                                                task.task_id
+                                            ))
+                                        })?;
+                                        let existing_member =
+                                            self.teams.get(team_id).is_some_and(|team| team.members.contains(owner));
+                                        let batch_member = memberships
+                                            .iter()
+                                            .any(|(member_team, member)| member_team == team_id && member == owner);
+                                        if owner_agent.run_id != *run_id || (!existing_member && !batch_member) {
+                                            return Err(std::io::Error::other(format!(
+                                                "collaboration batch Task {} historical owner is not a Team member in the Run",
+                                                task.task_id
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    for team in teams {
                         self.teams.create(team);
                     }
                     for (team_id, agent_id) in memberships {
@@ -209,6 +493,7 @@ impl<T> CollaborationRuntime<T> {
                         self.agents.set_team(&agent_id, Some(team_id));
                     }
                     for task in tasks {
+                        deferred_team_tasks.remove(&task.task_id);
                         self.tasks.upsert(task);
                     }
                 }
@@ -302,7 +587,56 @@ impl<T> CollaborationRuntime<T> {
                     }
                 }
                 "task_created" => {
-                    if let Ok(task) = serde_json::from_value::<TaskRecord>(record.payload.clone()) {
+                    let task: TaskRecord = serde_json::from_value(record.payload.clone())
+                        .map_err(|error| std::io::Error::other(format!("invalid task_created payload: {error}")))?;
+                    if let Some(team_id) = task.team_id.as_ref() {
+                        match task.state {
+                            TaskState::Created => {
+                                return Err(std::io::Error::other(format!(
+                                    "team Task {} cannot be restored in Created state",
+                                    task.task_id
+                                )));
+                            }
+                            TaskState::Queued if task.owner_agent_id.is_some() => {
+                                return Err(std::io::Error::other(format!(
+                                    "Queued team Task {} cannot carry an owner",
+                                    task.task_id
+                                )));
+                            }
+                            TaskState::Assigned | TaskState::Running if task.owner_agent_id.is_none() => {
+                                return Err(std::io::Error::other(format!(
+                                    "{:?} team Task {} has no owner",
+                                    task.state, task.task_id
+                                )));
+                            }
+                            _ => {}
+                        }
+                        let team_ready = self.teams.get(team_id).is_some_and(|team| {
+                            Arc::ptr_eq(&self.mutation.line_for(&team.run_id), &self.mutation.line_for(run_id))
+                                && team
+                                    .coordinator
+                                    .as_ref()
+                                    .is_some_and(|coordinator| team.members.contains(coordinator))
+                                && task.owner_agent_id.as_ref().is_none_or(|owner| {
+                                    self.agents.get(owner).is_some_and(|agent| {
+                                        Arc::ptr_eq(
+                                            &self.mutation.line_for(&agent.run_id),
+                                            &self.mutation.line_for(run_id),
+                                        ) && team.members.contains(owner)
+                                    })
+                                })
+                        });
+                        if team_ready {
+                            self.tasks.upsert(task);
+                        } else if let Some(previous) = deferred_team_tasks.insert(task.task_id.clone(), task.clone())
+                            && previous != task
+                        {
+                            return Err(std::io::Error::other(format!(
+                                "team Task {} has conflicting durable task_created metadata",
+                                task.task_id
+                            )));
+                        }
+                    } else {
                         self.tasks.upsert(task);
                     }
                 }
@@ -329,6 +663,14 @@ impl<T> CollaborationRuntime<T> {
                 }
                 _ => {}
             }
+        }
+        if let Some((task_id, task)) = deferred_team_tasks.into_iter().next() {
+            return Err(std::io::Error::other(format!(
+                "team Task {task_id} references Team {} without an atomic collaboration batch",
+                task.team_id
+                    .as_ref()
+                    .map_or_else(|| "<missing>".to_owned(), ToString::to_string)
+            )));
         }
         Ok(())
     }
@@ -512,6 +854,7 @@ impl<T> CollaborationRuntime<T> {
         } else {
             validate_task_cas_mutation(transition, &mutation, prior, &task)?;
         }
+        self.validate_projected_team_task(&task.run_id, &task)?;
         self.tasks.restore_cas(
             task.clone(),
             operation_id,

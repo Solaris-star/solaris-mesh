@@ -18,6 +18,8 @@ mod spawn_authorization;
 mod unix_guardian;
 #[cfg(windows)]
 mod windows_job;
+#[cfg(windows)]
+mod windows_psec_runtime;
 mod workspace_root;
 
 pub use command::{ManagedChild, PinnedCommand};
