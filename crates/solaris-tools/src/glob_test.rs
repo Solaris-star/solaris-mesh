@@ -298,10 +298,12 @@ mod tests {
         assert!(checked.lock().unwrap().iter().any(|path| path == &canonical_protected));
     }
 
+    #[cfg(windows)]
     struct IdentityCheckingPolicy;
 
     struct FailingRefreshPolicy;
 
+    #[cfg(windows)]
     impl WorkspaceSearchPolicy for IdentityCheckingPolicy {
         fn allows_read(&self, _path: &Path) -> bool {
             true

@@ -26,7 +26,7 @@ impl ChildContainment {
         ContainmentLaunchGuard::prepare(command)
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     pub(crate) fn configure_process_group(command: &mut Command) {
         configure_command(command);
     }

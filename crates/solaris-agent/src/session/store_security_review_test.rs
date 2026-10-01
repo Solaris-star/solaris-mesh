@@ -75,8 +75,10 @@ fn live_connection_keeps_and_revalidates_sqlite_sidecar_slots() {
             #[cfg(not(windows))]
             panic!("unexpected sidecar removal failure: {error}");
             #[cfg(windows)]
-            let _expected_open_handle_rejection = error;
-            connection.verify_storage_slots().unwrap();
+            {
+                let _expected_open_handle_rejection = error;
+                connection.verify_storage_slots().unwrap();
+            }
         }
     }
 }

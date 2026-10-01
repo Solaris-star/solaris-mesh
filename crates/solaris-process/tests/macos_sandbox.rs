@@ -230,7 +230,7 @@ fn workspace_path_replacement_is_rejected_before_target_exec() {
     std::fs::rename(&workspace, &retained).unwrap();
     std::fs::create_dir(&workspace).unwrap();
 
-    let error = command.spawn().expect_err("replaced workspace path must be rejected");
+    let error = command.spawn().err().expect("replaced workspace path must be rejected");
 
     let report = sandbox_report(&error).expect("expected a structured workspace binding report");
     assert_eq!(report.enforcement(), SandboxEnforcement::Unavailable);
@@ -253,7 +253,7 @@ fn external_hardlink_is_rejected_before_target_exec() {
         .env(TARGET_MARKER_KEY, &marker)
         .launch_policy(ProcessLaunchPolicy::workspace_sandbox(workspace.path(), []));
 
-    let error = command.spawn().expect_err("external hardlink must be rejected");
+    let error = command.spawn().err().expect("external hardlink must be rejected");
 
     assert_eq!(sandbox_error(&error), Some(&SandboxError::ExternalHardlink));
     assert!(!marker.exists());
@@ -275,7 +275,7 @@ fn workspace_fifo_is_rejected_before_target_exec() {
         .env(TARGET_MARKER_KEY, &marker)
         .launch_policy(ProcessLaunchPolicy::workspace_sandbox(workspace.path(), []));
 
-    let error = command.spawn().expect_err("workspace FIFO must be rejected");
+    let error = command.spawn().err().expect("workspace FIFO must be rejected");
 
     assert_eq!(sandbox_error(&error), Some(&SandboxError::HostSocketExposed));
     assert!(!marker.exists());
@@ -372,7 +372,8 @@ fn malformed_start_handshake_fails_before_target_exec() {
 
     let error = command
         .spawn()
-        .expect_err("partial helper marker must reject the target");
+        .err()
+        .expect("partial helper marker must reject the target");
 
     let report = sandbox_report(&error).expect("expected a structured handshake report");
     assert_eq!(report.enforcement(), SandboxEnforcement::Unavailable);

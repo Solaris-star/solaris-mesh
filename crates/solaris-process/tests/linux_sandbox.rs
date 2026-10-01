@@ -364,7 +364,8 @@ async fn target_cannot_run_before_containment_attach_completes() {
 
     let error = command
         .spawn()
-        .expect_err("injected attach failure must reject the child before target execution");
+        .err()
+        .expect("injected attach failure must reject the child before target execution");
     assert!(error.to_string().contains("injected containment attach failure"));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!marker.exists());
@@ -408,7 +409,8 @@ async fn guardian_exec_error_recovery_does_not_retry_the_broken_control_socket()
 
     let error = command
         .spawn()
-        .expect_err("injected EXEC_ERROR must reject the released launch");
+        .err()
+        .expect("injected EXEC_ERROR must reject the released launch");
     let recovery = process_recovery_required(&error).expect("delayed guardian exit must retain recovery ownership");
 
     assert!(process_outcome_unknown(&error));
