@@ -267,7 +267,9 @@ fn sandbox_descendant_parent_helper() {
     let Some(marker) = std::env::var_os("SOLARIS_SANDBOX_DESCENDANT_MARKER") else {
         return;
     };
-    std::process::Command::new(std::env::current_exe().unwrap())
+    // Pinned execution uses a memfd; current_exe() resolves to its deleted name.
+    // Reopen the live executable through procfs when spawning the descendant.
+    std::process::Command::new("/proc/self/exe")
         .args(["--exact", "sandbox_descendant_writer_helper", "--nocapture"])
         .env("SOLARIS_SANDBOX_DESCENDANT_MARKER", marker)
         .spawn()

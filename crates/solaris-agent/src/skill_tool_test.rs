@@ -6,6 +6,8 @@ use super::*;
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use super::*;
     use serde_json::json;
     use solaris_skills::permissions::SkillPermissionChecker;
@@ -43,7 +45,7 @@ mod tests {
     fn tool_with(skills: Vec<SkillMetadata>) -> SkillTool {
         SkillTool::new(
             Arc::new(skills),
-            PathBuf::from("/tmp"),
+            env::temp_dir(),
             SkillPermissionChecker::new(vec![], vec![], false),
         )
     }
@@ -353,10 +355,14 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(matches!(
-                &outcome.results[0],
-                ContentBlock::ToolResult { is_error: false, content, .. } if content.contains("reusable_skill")
-            ));
+            assert!(
+                matches!(
+                    &outcome.results[0],
+                    ContentBlock::ToolResult { is_error: false, content, .. } if content.contains("reusable_skill")
+                ),
+                "{:?}",
+                outcome.results
+            );
         }
 
         assert_eq!(std::fs::read_to_string(marker).unwrap().lines().count(), 1);
@@ -445,10 +451,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(
-            &first.results[0],
-            ContentBlock::ToolResult { is_error: false, .. }
-        ));
+        assert!(
+            matches!(&first.results[0], ContentBlock::ToolResult { is_error: false, .. }),
+            "{:?}",
+            first.results
+        );
 
         let second_tool = tool_with(vec![make_skill(
             "versioned-shell",
