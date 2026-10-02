@@ -12,7 +12,9 @@ use crate::sandbox::trusted_sandbox_helper;
 
 #[path = "unix_guardian_transport.rs"]
 mod transport;
-use transport::{IO_TIMEOUT as HANDSHAKE_TIMEOUT, MAX_PACKET_BYTES as MAX_PLAN_BYTES, PacketReader, send_packet};
+use transport::{
+    IO_TIMEOUT as HANDSHAKE_TIMEOUT, MAX_PACKET_BYTES as MAX_PLAN_BYTES, PacketReader, send_packet, set_nonblocking,
+};
 
 const GUARDIAN_ARGUMENT: &str = "--process-guardian-v2";
 const CONTROL_ARGUMENT: &str = "--control-fd";
@@ -381,6 +383,8 @@ fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     };
     set_cloexec(pair.0.as_raw_fd())?;
     set_cloexec(pair.1.as_raw_fd())?;
+    set_nonblocking(pair.0.as_raw_fd())?;
+    set_nonblocking(pair.1.as_raw_fd())?;
     #[cfg(target_os = "macos")]
     for descriptor in [pair.0.as_raw_fd(), pair.1.as_raw_fd()] {
         let enabled: libc::c_int = 1;
@@ -437,15 +441,6 @@ fn clear_cloexec(descriptor: RawFd) -> io::Result<()> {
 fn set_cloexec(descriptor: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
     if flags == -1 || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn set_nonblocking(descriptor: RawFd) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-    if flags == -1 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())

@@ -70,12 +70,15 @@ fn oversized_plan_is_rejected_before_spawn() {
 }
 
 #[test]
-fn control_sockets_use_platform_transport_and_close_on_exec() {
+fn control_sockets_use_platform_transport_nonblocking_and_close_on_exec() {
     let pair = socket_pair().unwrap();
     for descriptor in [pair.0.as_raw_fd(), pair.1.as_raw_fd()] {
         let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
         assert!(flags >= 0);
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
         #[cfg(target_os = "macos")]
         {
             let mut enabled: libc::c_int = 0;

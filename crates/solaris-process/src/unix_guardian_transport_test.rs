@@ -1,9 +1,21 @@
+use std::env;
+use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::process::Command;
+use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{IO_TIMEOUT, MAX_PACKET_BYTES, PacketReader, send_packet_until};
+use super::{IO_TIMEOUT, MAX_PACKET_BYTES, PacketReader, send_packet_until, set_nonblocking};
+
+fn stream_pair() -> (UnixStream, UnixStream) {
+    let pair = UnixStream::pair().unwrap();
+    for socket in [&pair.0, &pair.1] {
+        set_nonblocking(socket.as_raw_fd()).unwrap();
+    }
+    pair
+}
 
 fn stream_reader() -> PacketReader {
     let mut reader = PacketReader::new();
@@ -39,7 +51,7 @@ fn stream_preserves_every_header_and_body_fragment_across_nonblocking_polls() {
     let bytes = frame(payload);
     // Every possible split includes an incomplete header or body.
     for split in 1..bytes.len() {
-        let (parent, mut peer) = UnixStream::pair().unwrap();
+        let (parent, mut peer) = stream_pair();
         let mut reader = stream_reader();
         peer.write_all(&bytes[..split]).unwrap();
         assert!(
@@ -64,7 +76,7 @@ fn stream_preserves_every_header_and_body_fragment_across_nonblocking_polls() {
 
 #[test]
 fn coalesced_stream_frames_are_distinct_and_survive_peer_hangup() {
-    let (parent, mut peer) = UnixStream::pair().unwrap();
+    let (parent, mut peer) = stream_pair();
     let mut reader = stream_reader();
     let mut bytes = frame(b"O");
     bytes.extend(frame(b"X"));
@@ -84,7 +96,7 @@ fn coalesced_stream_frames_are_distinct_and_survive_peer_hangup() {
 #[test]
 fn stream_rejects_empty_and_oversized_lengths_before_reading_or_allocating_a_body() {
     for length in [0, MAX_PACKET_BYTES as u32 + 1, u32::MAX] {
-        let (parent, mut peer) = UnixStream::pair().unwrap();
+        let (parent, mut peer) = stream_pair();
         let mut reader = stream_reader();
         peer.write_all(&length.to_be_bytes()).unwrap();
         assert_eq!(
@@ -99,7 +111,7 @@ fn stream_rejects_empty_and_oversized_lengths_before_reading_or_allocating_a_bod
 fn stream_distinguishes_clean_eof_from_every_truncated_frame() {
     let bytes = frame(b"PLAN");
     for prefix in 0..bytes.len() {
-        let (parent, mut peer) = UnixStream::pair().unwrap();
+        let (parent, mut peer) = stream_pair();
         let mut reader = stream_reader();
         peer.write_all(&bytes[..prefix]).unwrap();
         drop(peer);
@@ -117,7 +129,7 @@ fn stream_distinguishes_clean_eof_from_every_truncated_frame() {
 
 #[test]
 fn partial_frame_does_not_block_supervision_poll_or_extend_its_deadline() {
-    let (parent, mut peer) = UnixStream::pair().unwrap();
+    let (parent, mut peer) = stream_pair();
     let mut reader = stream_reader();
     peer.write_all(&[0]).unwrap();
     assert!(
@@ -147,7 +159,7 @@ fn partial_frame_does_not_block_supervision_poll_or_extend_its_deadline() {
 
 #[test]
 fn read_timeout_is_absolute_despite_continuing_body_fragments() {
-    let (parent, mut peer) = UnixStream::pair().unwrap();
+    let (parent, mut peer) = stream_pair();
     let mut reader = stream_reader();
     peer.write_all(&100_u32.to_be_bytes()).unwrap();
     let writer = std::thread::spawn(move || {
@@ -173,7 +185,7 @@ fn read_timeout_is_absolute_despite_continuing_body_fragments() {
 
 #[test]
 fn expired_operation_deadline_preserves_readable_frame_for_next_poll() {
-    let (parent, mut peer) = UnixStream::pair().unwrap();
+    let (parent, mut peer) = stream_pair();
     let mut reader = stream_reader();
     let bytes = frame(b"PLAN");
     peer.write_all(&bytes[..5]).unwrap();
@@ -262,7 +274,7 @@ fn packet_transport_rejects_truncated_oversized_record_and_reuses_idle_buffer() 
 
 #[test]
 fn stream_writes_complete_maximum_frame_through_partial_writes() {
-    let (parent, peer) = UnixStream::pair().unwrap();
+    let (parent, peer) = stream_pair();
     small_send_buffer(&peer);
     let payload = vec![0x5a; MAX_PACKET_BYTES];
     let expected = payload.clone();
@@ -276,7 +288,18 @@ fn stream_writes_complete_maximum_frame_through_partial_writes() {
 
 #[test]
 fn stalled_stream_writer_obeys_deadline_after_a_partial_frame() {
-    let (parent, peer) = UnixStream::pair().unwrap();
+    assert_probe_finishes(
+        "stalled_stream_writer_child_probe",
+        "SOLARIS_GUARDIAN_TEST_STALLED_WRITE",
+    );
+}
+
+#[test]
+fn stalled_stream_writer_child_probe() {
+    if env::var_os("SOLARIS_GUARDIAN_TEST_STALLED_WRITE").is_none() {
+        return;
+    }
+    let (parent, peer) = stream_pair();
     small_send_buffer(&peer);
     let started = Instant::now();
     let error = send_packet_until(
@@ -297,12 +320,13 @@ fn stalled_stream_writer_obeys_deadline_after_a_partial_frame() {
             .kind(),
         io::ErrorKind::UnexpectedEof
     );
+    record_probe_success();
 }
 
 #[test]
 fn invalid_outgoing_frame_writes_nothing() {
     for payload in [Vec::new(), vec![0; MAX_PACKET_BYTES + 1]] {
-        let (parent, peer) = UnixStream::pair().unwrap();
+        let (parent, peer) = stream_pair();
         let error = send_packet_until(peer.as_raw_fd(), &payload, true, Instant::now() + IO_TIMEOUT).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(
@@ -316,7 +340,7 @@ fn invalid_outgoing_frame_writes_nothing() {
 
 #[test]
 fn empty_socket_read_has_a_bounded_timeout() {
-    let (parent, _peer) = UnixStream::pair().unwrap();
+    let (parent, _peer) = stream_pair();
     let started = Instant::now();
     let error = stream_reader()
         .recv_packet(parent.as_raw_fd(), Duration::from_millis(20))
@@ -330,31 +354,40 @@ fn empty_socket_read_has_a_bounded_timeout() {
 fn interrupted_poll_and_backpressured_write_keep_absolute_deadlines() {
     // Signal disposition is process-wide: run the signal probe in a dedicated
     // process so no concurrently running test can receive its SIGUSR1 handler.
+    assert_probe_finishes("interrupted_io_child_probe", "SOLARIS_GUARDIAN_TEST_EINTR");
+}
+
+fn assert_probe_finishes(probe_name: &str, enable_key: &str) {
     let directory = tempfile::tempdir().unwrap();
-    let proof = directory.path().join("interrupted-io-verified");
+    let proof = directory.path().join("guardian-io-verified");
     // libtest names omit the binary/crate prefix from module_path!().
     let module = module_path!().split_once("::").unwrap().1;
-    let probe = format!("{module}::interrupted_io_child_probe");
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let probe = format!("{module}::{probe_name}");
+    let mut child = Command::new(env::current_exe().unwrap())
         .args(["--exact", &probe, "--nocapture"])
-        .env("SOLARIS_GUARDIAN_TEST_EINTR", "1")
-        .env("SOLARIS_GUARDIAN_TEST_EINTR_PROOF", &proof)
+        .env(enable_key, "1")
+        .env("SOLARIS_GUARDIAN_TEST_IO_PROOF", &proof)
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success());
-            assert_eq!(std::fs::read(&proof).unwrap(), b"verified");
+            assert_eq!(fs::read(&proof).unwrap(), b"verified");
             break;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("interrupted guardian I/O exceeded the subprocess watchdog");
+            panic!("guardian I/O exceeded the subprocess watchdog");
         }
-        std::thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn record_probe_success() {
+    let proof = env::var_os("SOLARIS_GUARDIAN_TEST_IO_PROOF").unwrap();
+    fs::write(proof, b"verified").unwrap();
 }
 
 #[test]
@@ -395,7 +428,7 @@ fn interrupted_io_child_probe() {
             std::thread::sleep(Duration::from_millis(5));
         }
     });
-    let (parent, peer) = UnixStream::pair().unwrap();
+    let (parent, peer) = stream_pair();
     small_send_buffer(&peer);
     let started = Instant::now();
     let before_read = SIGNALS.load(Ordering::Relaxed);
@@ -418,6 +451,5 @@ fn interrupted_io_child_probe() {
         started.elapsed() < Duration::from_millis(500),
         "signals must not renew either operation's timeout"
     );
-    let proof = std::env::var_os("SOLARIS_GUARDIAN_TEST_EINTR_PROOF").unwrap();
-    std::fs::write(proof, b"verified").unwrap();
+    record_probe_success();
 }

@@ -5,6 +5,17 @@ use std::time::{Duration, Instant};
 pub(super) const MAX_PACKET_BYTES: usize = 256 * 1024;
 pub(super) const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(super) fn set_nonblocking(descriptor: RawFd) -> io::Result<()> {
+    // Darwin's send path can wait for buffer space despite MSG_DONTWAIT.
+    // Set O_NONBLOCK before the first send so every I/O deadline stays bounded.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 // XNU does not implement AF_UNIX/SOCK_SEQPACKET. Keep the Linux packet
 // transport, and use bounded, length-prefixed frames on macOS. Both processes
 // compile this module so the framing and failure rules cannot diverge.

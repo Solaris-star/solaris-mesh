@@ -8,7 +8,7 @@ use std::time::Duration;
 
 #[path = "../unix_guardian_transport.rs"]
 mod transport;
-use transport::{IO_TIMEOUT, MAX_PACKET_BYTES as MAX_PLAN_BYTES, PacketReader, send_packet};
+use transport::{IO_TIMEOUT, MAX_PACKET_BYTES as MAX_PLAN_BYTES, PacketReader, send_packet, set_nonblocking};
 
 const GUARDIAN_ARGUMENT: &str = "--process-guardian-v2";
 const CONTROL_ARGUMENT: &str = "--control-fd";
@@ -33,6 +33,7 @@ pub(super) fn matches(arguments: &[OsString]) -> bool {
 pub(super) fn run(arguments: Vec<OsString>) -> io::Result<()> {
     let control = parse_control_descriptor(arguments.into_iter().skip(2))?;
     set_cloexec(control)?;
+    set_nonblocking(control)?;
     let mut reader = PacketReader::new();
     send_packet(control, &[READY])?;
     let plan = reader.recv_packet(control, IO_TIMEOUT)?;

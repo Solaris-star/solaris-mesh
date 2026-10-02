@@ -57,6 +57,7 @@ jobs:
 
       - name: Verify Unix guardian framing, interrupted I/O, and cleanup
         if: runner.os != 'Windows'
+        timeout-minutes: 10
         shell: bash
         run: |
           vx cargo test -p solaris-process --all-features --lib --bin solaris-process-sandbox-helper unix_guardian -- --test-threads=1
