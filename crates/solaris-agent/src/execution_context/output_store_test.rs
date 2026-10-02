@@ -71,9 +71,10 @@ fn new_write_rejects_a_ledger_that_points_at_the_legacy_global_root() {
 #[test]
 fn missing_directory_aliases_are_compared_case_insensitively() {
     let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
     let suffix = format!("missing-legacy-alias-{}", uuid::Uuid::now_v7());
-    let upper = directory.path().join(suffix.to_uppercase());
-    let lower = directory.path().join(suffix.to_lowercase());
+    let upper = root.join(suffix.to_uppercase());
+    let lower = root.join(suffix.to_lowercase());
 
     assert!(!upper.exists());
     assert!(!lower.exists());
@@ -83,7 +84,8 @@ fn missing_directory_aliases_are_compared_case_insensitively() {
 #[test]
 fn output_reference_is_the_content_sha256_name() {
     let directory = tempfile::tempdir().unwrap();
-    let store = test_store(directory.path().join("run"), None);
+    let root = directory.path().canonicalize().unwrap();
+    let store = test_store(root.join("run"), None);
     let digest = stable_digest_bytes(b"shared-output");
 
     let first = store.write_named("first-effect", "shared-output").unwrap();
@@ -92,7 +94,7 @@ fn output_reference_is_the_content_sha256_name() {
     assert_eq!(first, format!("sha256-{digest}.blob"));
     assert_eq!(second, first);
     assert_eq!(
-        std::fs::read_to_string(directory.path().join("run").join(first)).unwrap(),
+        std::fs::read_to_string(root.join("run").join(first)).unwrap(),
         "shared-output"
     );
 }
@@ -100,7 +102,8 @@ fn output_reference_is_the_content_sha256_name() {
 #[test]
 fn successful_new_write_syncs_file_then_renames_then_syncs_parent() {
     let directory = tempfile::tempdir().unwrap();
-    let store = test_store(directory.path().join("run"), None);
+    let root = directory.path().canonicalize().unwrap();
+    let store = test_store(root.join("run"), None);
     let steps = Mutex::new(Vec::new());
 
     store
@@ -120,7 +123,8 @@ fn successful_new_write_syncs_file_then_renames_then_syncs_parent() {
 #[test]
 fn identical_retry_resyncs_the_existing_file_and_parent() {
     let directory = tempfile::tempdir().unwrap();
-    let store = test_store(directory.path().join("run"), None);
+    let root = directory.path().canonicalize().unwrap();
+    let store = test_store(root.join("run"), None);
     store.write_named("first", "durable-output").unwrap();
     let steps = Mutex::new(Vec::new());
 
@@ -134,7 +138,8 @@ fn identical_retry_resyncs_the_existing_file_and_parent() {
 #[test]
 fn missing_local_blob_can_be_read_from_the_legacy_root_without_writing_there() {
     let directory = tempfile::tempdir().unwrap();
-    let legacy_root = directory.path().join("legacy");
+    let root = directory.path().canonicalize().unwrap();
+    let legacy_root = root.join("legacy");
     std::fs::create_dir(&legacy_root).unwrap();
     let output = "legacy-output";
     let digest = stable_digest_bytes(output.as_bytes());
@@ -155,7 +160,8 @@ fn missing_local_blob_can_be_read_from_the_legacy_root_without_writing_there() {
 #[test]
 fn read_rejects_content_that_does_not_match_the_reference_digest() {
     let directory = tempfile::tempdir().unwrap();
-    let run_root = directory.path().join("run");
+    let root = directory.path().canonicalize().unwrap();
+    let run_root = root.join("run");
     std::fs::create_dir(&run_root).unwrap();
     let reference = format!("sha256-{}.blob", stable_digest_bytes(b"expected"));
     std::fs::write(run_root.join(&reference), "tampered").unwrap();
@@ -169,11 +175,12 @@ fn read_rejects_content_that_does_not_match_the_reference_digest() {
 #[test]
 fn existing_hardlink_is_rejected_without_changing_the_other_name() {
     let directory = tempfile::tempdir().unwrap();
-    let run_root = directory.path().join("run");
+    let root = directory.path().canonicalize().unwrap();
+    let run_root = root.join("run");
     std::fs::create_dir(&run_root).unwrap();
     let output = "protected-output";
     let reference = format!("sha256-{}.blob", stable_digest_bytes(output.as_bytes()));
-    let outside = directory.path().join("outside.blob");
+    let outside = root.join("outside.blob");
     std::fs::write(&outside, output).unwrap();
     std::fs::hard_link(&outside, run_root.join(&reference)).unwrap();
     let store = test_store(run_root, None);
@@ -185,11 +192,12 @@ fn existing_hardlink_is_rejected_without_changing_the_other_name() {
 #[test]
 fn read_rejects_a_blob_symlink() {
     let directory = tempfile::tempdir().unwrap();
-    let run_root = directory.path().join("run");
+    let root = directory.path().canonicalize().unwrap();
+    let run_root = root.join("run");
     std::fs::create_dir(&run_root).unwrap();
     let output = "outside-output";
     let reference = format!("sha256-{}.blob", stable_digest_bytes(output.as_bytes()));
-    let outside = directory.path().join("outside.blob");
+    let outside = root.join("outside.blob");
     std::fs::write(&outside, output).unwrap();
     if let Err(error) = create_file_symlink(&outside, &run_root.join(&reference)) {
         #[cfg(windows)]
@@ -206,9 +214,10 @@ fn read_rejects_a_blob_symlink() {
 #[test]
 fn write_rejects_a_redirected_run_directory() {
     let directory = tempfile::tempdir().unwrap();
-    let outside = directory.path().join("outside");
+    let root = directory.path().canonicalize().unwrap();
+    let outside = root.join("outside");
     std::fs::create_dir(&outside).unwrap();
-    let run_root = directory.path().join("run");
+    let run_root = root.join("run");
     if let Err(error) = create_directory_symlink(&outside, &run_root) {
         #[cfg(windows)]
         if error.kind() == ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314) {
@@ -225,7 +234,8 @@ fn write_rejects_a_redirected_run_directory() {
 #[test]
 fn local_run_blob_deletion_is_exact_idempotent_and_never_touches_legacy() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime_root = directory.path().join("runtime");
+    let root = directory.path().canonicalize().unwrap();
+    let runtime_root = root.join("runtime");
     let ledger = SqliteRuntimeLedger::open(runtime_root.join("ledger.sqlite3")).unwrap();
     let target = RunId::from("delete-target");
     let similar = RunId::from("delete-target-extra");
@@ -248,7 +258,8 @@ fn local_run_blob_deletion_is_exact_idempotent_and_never_touches_legacy() {
 #[test]
 fn local_run_blob_deletion_rejects_a_hardlinked_blob() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime_root = directory.path().join("runtime");
+    let root = directory.path().canonicalize().unwrap();
+    let runtime_root = root.join("runtime");
     let ledger = SqliteRuntimeLedger::open(runtime_root.join("ledger.sqlite3")).unwrap();
     let run_id = RunId::from("hardlink-delete");
     let store = EffectOutputStore::for_run_with_ledger(&run_id, &ledger);
@@ -257,7 +268,7 @@ fn local_run_blob_deletion_rejects_a_hardlinked_blob() {
         .effect_output_root()
         .unwrap()
         .join(stable_digest_bytes(run_id.as_str().as_bytes()));
-    let outside = directory.path().join("outside.blob");
+    let outside = root.join("outside.blob");
     std::fs::hard_link(run_root.join(&reference), &outside).unwrap();
 
     assert!(delete_local_run_outputs(&run_id, &ledger).is_err());
@@ -268,12 +279,13 @@ fn local_run_blob_deletion_rejects_a_hardlinked_blob() {
 #[test]
 fn local_run_blob_deletion_rejects_a_redirected_run_directory() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime_root = directory.path().join("runtime");
+    let root = directory.path().canonicalize().unwrap();
+    let runtime_root = root.join("runtime");
     let ledger = SqliteRuntimeLedger::open(runtime_root.join("ledger.sqlite3")).unwrap();
     let run_id = RunId::from("redirected-delete");
     let output_root = ledger.effect_output_root().unwrap();
     std::fs::create_dir(&output_root).unwrap();
-    let outside = directory.path().join("outside");
+    let outside = root.join("outside");
     std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("protected.blob"), "keep").unwrap();
     let run_root = output_root.join(stable_digest_bytes(run_id.as_str().as_bytes()));
