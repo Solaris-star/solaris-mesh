@@ -10,9 +10,9 @@ permissions:
 
 jobs:
   snapshot:
-    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '2' && github.run_attempt == '1'
+    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '3' && github.run_attempt == '1'
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -22,6 +22,6 @@ jobs:
         with:
           setup: 'true'
           cache: 'true'
-      - name: Compare named and descriptor routes for identical executable bytes
+      - name: Verify capability-relative directory durability and authority checks
         shell: bash
-        run: vx cargo test -p solaris-process --all-features --test macos_exec_comparison -- --test-threads=1 --nocapture
+        run: vx cargo test -p solaris-agent --lib output_store -- --test-threads=1 --nocapture
