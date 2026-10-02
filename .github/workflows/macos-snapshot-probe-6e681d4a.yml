@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   snapshot:
-    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '1' && github.run_attempt == '1'
+    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '2' && github.run_attempt == '1'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -22,6 +22,6 @@ jobs:
         with:
           setup: 'true'
           cache: 'true'
-      - name: Verify source replacement and frozen executable launch
+      - name: Compare named and descriptor routes for identical executable bytes
         shell: bash
-        run: vx cargo test -p solaris-process --all-features --lib pinned_executable_runs_frozen_snapshot_after_source_overwrite -- --test-threads=1
+        run: vx cargo test -p solaris-process --all-features --test macos_exec_comparison -- --test-threads=1 --nocapture
