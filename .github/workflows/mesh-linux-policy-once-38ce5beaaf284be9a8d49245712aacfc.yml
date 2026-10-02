@@ -1,0 +1,166 @@
+# One approved diagnostic run; remove this entire workflow after it is terminal.
+# Standard ci.yml stays unchanged. Only this new workflow's first run/attempt is allowed.
+name: Linux policy diagnostic 38ce5beaaf284be9a8d49245712aacfc
+
+"on":
+  push:
+    branches: ["Solaris-star/fix/cross-platform-ci"]
+    paths: [".github/workflows/mesh-linux-policy-once-38ce5beaaf284be9a8d49245712aacfc.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mesh-linux-policy-once-38ce5beaaf284be9a8d49245712aacfc
+  cancel-in-progress: false
+
+jobs:
+  linux-policy-once:
+    if: >-
+      github.event_name == 'push' &&
+      github.repository == 'Solaris-star/solaris-mesh' &&
+      github.ref == 'refs/heads/Solaris-star/fix/cross-platform-ci' &&
+      github.run_number == '1' &&
+      github.run_attempt == '1' &&
+      github.event.head_commit.message == 'test(sandbox): run scoped Linux policy diagnostic [mesh-linux-policy-once-38ce5beaaf284be9a8d49245712aacfc]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup the existing Rust toolchain before any policy exception
+        uses: loonghao/vx@v0.9.26
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install the same Bubblewrap prerequisite as standard CI
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
+
+      - name: Record the ordinary runner namespace behavior before the exception
+        shell: bash
+        run: python3 scripts/diagnose-linux-sandbox.py
+
+      - name: Build the Linux strict sandbox test before preparing its profile
+        id: linux_strict_artifact
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          vx cargo test -p solaris-process --all-features --test linux_sandbox \
+            --no-run --message-format=json > "$RUNNER_TEMP/linux-strict-artifacts.jsonl"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import tempfile
+          import uuid
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
+          temporary = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          artifacts = []
+          for line in (temporary / "linux-strict-artifacts.jsonl").read_text().splitlines():
+              message = json.loads(line)
+              target = message.get("target", {})
+              if (message.get("reason") == "compiler-artifact"
+                      and target.get("name") == "linux_sandbox"
+                      and target.get("kind") == ["test"]
+                      and message.get("executable")):
+                  artifacts.append(Path(message["executable"]).resolve(strict=True))
+          if len(artifacts) != 1:
+              raise RuntimeError(f"Expected one Linux strict test executable, found {len(artifacts)}")
+          binary = artifacts[0]
+          expected_parent = (workspace / "target/debug/deps").resolve(strict=True)
+          if binary.parent != expected_parent or not re.fullmatch(r"linux_sandbox-[0-9a-f]+", binary.name):
+              raise RuntimeError("The compiled test executable is outside the expected exact artifact location")
+          if not binary.is_file() or not os.access(binary, os.X_OK):
+              raise RuntimeError("The test artifact is not executable")
+          # Refuse AppArmor glob/metasyntax and output-file line injection rather than
+          # trying to escape arbitrary checkout paths into an attachment expression.
+          if not re.fullmatch(r"/[A-Za-z0-9_./+-]+", str(binary)):
+              raise RuntimeError("The executable path contains unsupported policy characters")
+          run_id = os.environ["GITHUB_RUN_ID"]
+          attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+          if not re.fullmatch(r"[0-9]+", run_id) or not re.fullmatch(r"[0-9]+", attempt):
+              raise RuntimeError("Invalid GitHub run identity")
+          profile_name = f"solaris-mesh-ci-linux-{run_id}-{attempt}-{uuid.uuid4().hex}"
+          directory = Path(tempfile.mkdtemp(prefix="solaris-mesh-aa-", dir=temporary))
+          profile = (
+              "abi <abi/4.0>,\ninclude <tunables/global>\n\n"
+              f'profile {profile_name} "{binary}" flags=(unconfined) {{\n'
+              "  userns,\n}\n"
+          )
+          (directory / "profile").write_text(profile)
+          digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+          (directory / "test.sha256").write_text(f"{digest}  {binary}\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key, value in (("directory", directory), ("profile_name", profile_name), ("binary", binary)):
+                  value = str(value)
+                  if "\n" in value or "\r" in value:
+                      raise RuntimeError("Invalid step output")
+                  output.write(f"{key}={value}\n")
+          print("Prepared profile; it has not been loaded:")
+          print(profile)
+          print(f"Test SHA-256: {digest}")
+          PY
+
+      - name: Validate the exact Linux test binary with the approved temporary profile
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          POLICY_DIRECTORY: ${{ steps.linux_strict_artifact.outputs.directory }}
+          POLICY_NAME: ${{ steps.linux_strict_artifact.outputs.profile_name }}
+          TEST_BINARY: ${{ steps.linux_strict_artifact.outputs.binary }}
+        run: |
+          set -euo pipefail
+          test -x /usr/sbin/apparmor_parser
+          sha256sum --check "$POLICY_DIRECTORY/test.sha256"
+          /usr/sbin/apparmor_parser --skip-kernel-load --skip-cache "$POLICY_DIRECTORY/profile"
+          profiles_before="$(sudo /usr/bin/cat /sys/kernel/security/apparmor/profiles)"
+          if grep -Fq -- "$POLICY_NAME (" <<< "$profiles_before"; then
+            echo "Refusing to replace a profile that already exists" >&2
+            exit 1
+          fi
+          # The unique name was absent. Record intent before the load so cleanup can
+          # reconcile a cancellation or uncertain parser result after kernel loading.
+          touch "$POLICY_DIRECTORY/load-attempted"
+          sudo /usr/sbin/apparmor_parser --add --skip-cache "$POLICY_DIRECTORY/profile"
+          sha256sum --check "$POLICY_DIRECTORY/test.sha256"
+          cd "$GITHUB_WORKSPACE/crates/solaris-process"
+          # No sudo, Cargo, compiler, dependency build script, or inherited token in
+          # this process tree. AppArmor attaches to the exact executable on exec.
+          /usr/bin/timeout --signal=TERM --kill-after=10s 5m \
+            /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME="$HOME" SHELL=/usr/bin/bash \
+            "$TEST_BINARY" --test-threads=1
+
+      - name: Remove only the temporary Linux strict test profile
+        if: always() && runner.os == 'Linux' && steps.linux_strict_artifact.outputs.directory != ''
+        shell: bash
+        env:
+          POLICY_DIRECTORY: ${{ steps.linux_strict_artifact.outputs.directory }}
+          POLICY_NAME: ${{ steps.linux_strict_artifact.outputs.profile_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$POLICY_DIRECTORY/load-attempted" ]]; then
+            echo "No profile load was attempted"
+            exit 0
+          fi
+          profiles_before="$(sudo /usr/bin/cat /sys/kernel/security/apparmor/profiles)"
+          if grep -Fq -- "$POLICY_NAME (" <<< "$profiles_before"; then
+            sudo /usr/sbin/apparmor_parser --remove --skip-cache "$POLICY_DIRECTORY/profile"
+          fi
+          profiles_after="$(sudo /usr/bin/cat /sys/kernel/security/apparmor/profiles)"
+          if grep -Fq -- "$POLICY_NAME (" <<< "$profiles_after"; then
+            echo "Temporary test profile remains loaded; cleanup failed" >&2
+            exit 1
+          fi
+          echo "Temporary test profile is absent"

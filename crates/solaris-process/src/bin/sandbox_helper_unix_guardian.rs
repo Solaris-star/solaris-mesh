@@ -6,11 +6,14 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
+#[path = "../unix_guardian_transport.rs"]
+mod transport;
+use transport::{IO_TIMEOUT, MAX_PACKET_BYTES as MAX_PLAN_BYTES, PacketReader, send_packet};
+
 const GUARDIAN_ARGUMENT: &str = "--process-guardian-v2";
 const CONTROL_ARGUMENT: &str = "--control-fd";
 const PROTOCOL_VERSION: u16 = 2;
 const REQUIRE_VERIFIED_DRAIN: u8 = 1;
-const MAX_PLAN_BYTES: usize = 256 * 1024;
 
 const READY: u8 = b'R';
 const PLAN: u8 = b'P';
@@ -30,11 +33,12 @@ pub(super) fn matches(arguments: &[OsString]) -> bool {
 pub(super) fn run(arguments: Vec<OsString>) -> io::Result<()> {
     let control = parse_control_descriptor(arguments.into_iter().skip(2))?;
     set_cloexec(control)?;
+    let mut reader = PacketReader::new();
     send_packet(control, &[READY])?;
-    let plan = recv_packet(control)?;
+    let plan = reader.recv_packet(control, IO_TIMEOUT)?;
     let plan = decode_plan(&plan)?;
     send_packet(control, &[PLAN_ACCEPTED])?;
-    if recv_one(control)? != RELEASE {
+    if reader.recv_packet(control, IO_TIMEOUT)?.as_slice() != [RELEASE] {
         return Err(permission_denied("guardian launch was not released"));
     }
 
@@ -111,6 +115,7 @@ fn supervise_target(control: RawFd, child: std::process::Child, verified_drain: 
 }
 
 fn supervise_target_inner(control: RawFd, pid: libc::pid_t, verified_drain: bool) -> io::Result<ExitStatus> {
+    let mut reader = PacketReader::new();
     let mut target_status = None;
     let mut exit_reported = false;
     let mut terminate_requested = false;
@@ -133,7 +138,7 @@ fn supervise_target_inner(control: RawFd, pid: libc::pid_t, verified_drain: bool
             drain_reported = true;
         }
 
-        let packet = match poll_packet(control, Duration::from_millis(10)) {
+        let packet = match reader.poll_packet(control, Duration::from_millis(10)) {
             Ok(packet) => packet,
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
                 return terminate_and_reap_target_pid(pid, verified_drain);
@@ -397,72 +402,6 @@ fn target_group_is_drained(_pid: libc::pid_t, verified_drain: bool) -> io::Resul
         ))
     } else {
         Ok(true)
-    }
-}
-
-fn poll_packet(descriptor: RawFd, timeout: Duration) -> io::Result<Option<Vec<u8>>> {
-    let timeout = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-    let mut poll = libc::pollfd {
-        fd: descriptor,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    loop {
-        let result = unsafe { libc::poll(&mut poll, 1, timeout) };
-        if result == 0 {
-            return Ok(None);
-        }
-        if result == 1 {
-            return recv_packet(descriptor).map(Some);
-        }
-        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return Err(io::Error::last_os_error());
-        }
-    }
-}
-
-fn recv_one(descriptor: RawFd) -> io::Result<u8> {
-    let packet = recv_packet(descriptor)?;
-    if packet.len() == 1 {
-        Ok(packet[0])
-    } else {
-        Err(invalid_input())
-    }
-}
-
-fn recv_packet(descriptor: RawFd) -> io::Result<Vec<u8>> {
-    let mut packet = vec![0; MAX_PLAN_BYTES];
-    loop {
-        let read = unsafe { libc::recv(descriptor, packet.as_mut_ptr().cast(), packet.len(), 0) };
-        if read > 0 {
-            packet.truncate(usize::try_from(read).map_err(|_| invalid_input())?);
-            return Ok(packet);
-        }
-        if read == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        return Err(if read == -1 {
-            io::Error::last_os_error()
-        } else {
-            io::Error::new(io::ErrorKind::BrokenPipe, "guardian control channel closed")
-        });
-    }
-}
-
-fn send_packet(descriptor: RawFd, packet: &[u8]) -> io::Result<()> {
-    loop {
-        let written = unsafe { libc::send(descriptor, packet.as_ptr().cast(), packet.len(), 0) };
-        if written == packet.len() as isize {
-            return Ok(());
-        }
-        if written == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        return Err(if written == -1 {
-            io::Error::last_os_error()
-        } else {
-            io::Error::new(io::ErrorKind::WriteZero, "guardian packet write was incomplete")
-        });
     }
 }
 

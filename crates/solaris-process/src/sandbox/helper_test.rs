@@ -141,6 +141,19 @@ fn packaged_helper_rejects_writes_for_current_user_users_or_everyone() {
 
 #[cfg(windows)]
 fn tighten_test_dacl(path: &std::path::Path, rights: &str) {
+    // Windows file copying can retain explicit SYSTEM/Administrators write
+    // grants. Start from the temporary directory's inherited ACL, then remove
+    // all inherited entries before adding the exact read-only fixture grant.
+    let reset = std::process::Command::new("icacls.exe")
+        .arg(path)
+        .arg("/reset")
+        .output()
+        .unwrap();
+    assert!(
+        reset.status.success(),
+        "test ACL reset failed: {}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
     let user = std::env::var("USERNAME").unwrap();
     let grant = format!("{user}:({rights})");
     let status = std::process::Command::new("icacls.exe")

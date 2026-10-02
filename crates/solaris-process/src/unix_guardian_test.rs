@@ -7,8 +7,8 @@ use std::os::fd::AsRawFd;
 use tokio::io::unix::AsyncFd;
 
 use super::{
-    DRAINED, EXEC_ERROR, FINALIZE, GuardianControl, MAX_PLAN_BYTES, PLAN, PROTOCOL_VERSION, encode_plan, recv_packet,
-    send_packet, set_nonblocking, socket_pair,
+    DRAINED, EXEC_ERROR, FINALIZE, GuardianControl, HANDSHAKE_TIMEOUT, MAX_PLAN_BYTES, PLAN, PROTOCOL_VERSION,
+    PacketReader, encode_plan, send_packet, set_nonblocking, socket_pair,
 };
 use crate::process_outcome_unknown;
 
@@ -16,6 +16,7 @@ fn test_control(parent: std::os::fd::OwnedFd) -> GuardianControl {
     set_nonblocking(parent.as_raw_fd()).unwrap();
     GuardianControl {
         control: Some(AsyncFd::new(parent).unwrap()),
+        reader: PacketReader::new(),
         #[cfg(feature = "sandbox-test-fixtures")]
         release_fixture: None,
         released: false,
@@ -23,6 +24,16 @@ fn test_control(parent: std::os::fd::OwnedFd) -> GuardianControl {
         drained: false,
         failed: false,
         finalized: false,
+    }
+}
+
+fn recv_packet(descriptor: std::os::fd::RawFd, flags: libc::c_int) -> std::io::Result<Vec<u8>> {
+    if flags == libc::MSG_DONTWAIT {
+        PacketReader::new()
+            .poll_packet(descriptor, std::time::Duration::ZERO)?
+            .ok_or_else(|| std::io::ErrorKind::WouldBlock.into())
+    } else {
+        PacketReader::new().recv_packet(descriptor, HANDSHAKE_TIMEOUT)
     }
 }
 
@@ -56,6 +67,83 @@ fn oversized_plan_is_rejected_before_spawn() {
     let error = encode_plan(&command, false).unwrap_err();
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn control_sockets_use_platform_transport_and_close_on_exec() {
+    let pair = socket_pair().unwrap();
+    for descriptor in [pair.0.as_raw_fd(), pair.1.as_raw_fd()] {
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        #[cfg(target_os = "macos")]
+        {
+            let mut enabled: libc::c_int = 0;
+            let mut length = std::mem::size_of_val(&enabled) as libc::socklen_t;
+            assert_eq!(
+                unsafe {
+                    libc::getsockopt(
+                        descriptor,
+                        libc::SOL_SOCKET,
+                        libc::SO_NOSIGPIPE,
+                        (&mut enabled as *mut libc::c_int).cast(),
+                        &mut length,
+                    )
+                },
+                0
+            );
+            assert_eq!(enabled, 1);
+        }
+        let mut kind: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&kind) as libc::socklen_t;
+        assert_eq!(
+            unsafe {
+                libc::getsockopt(
+                    descriptor,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    (&mut kind as *mut libc::c_int).cast(),
+                    &mut length,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            kind,
+            if cfg!(target_os = "macos") {
+                libc::SOCK_STREAM
+            } else {
+                libc::SOCK_SEQPACKET
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn finalize_send_failure_closes_channel_before_recovery_can_retry() {
+    let (parent, helper) = socket_pair().unwrap();
+    drop(helper);
+    let mut control = test_control(parent);
+    control.released = true;
+    control.drained = true;
+
+    assert!(control.finalize().is_err());
+    assert!(control.control_is_lost());
+    assert!(control.finalize().is_ok());
+}
+
+#[tokio::test]
+async fn multibyte_control_message_cannot_claim_process_group_drain() {
+    let (parent, helper) = socket_pair().unwrap();
+    let mut control = test_control(parent);
+    control.released = true;
+    send_packet(helper.as_raw_fd(), &[DRAINED, super::TARGET_EXITED]).unwrap();
+
+    let error = control.is_drained().unwrap_err();
+
+    assert!(process_outcome_unknown(&error));
+    assert!(!control.drained);
+    assert!(control.control_is_lost());
 }
 
 #[tokio::test]
