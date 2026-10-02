@@ -106,6 +106,7 @@ pub enum SandboxError {
 }
 
 impl SandboxError {
+    #[cfg(windows)]
     pub(crate) fn cleanup_failed(source: io::Error) -> Self {
         Self::CleanupFailed { source }
     }

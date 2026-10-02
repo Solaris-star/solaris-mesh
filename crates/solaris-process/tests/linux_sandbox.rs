@@ -21,6 +21,55 @@ fn platform_probe_reports_full_only_after_a_real_handshake() {
 }
 
 #[tokio::test]
+async fn pinned_executables_are_executable_and_cannot_be_made_writable() {
+    let workspace = tempfile::tempdir().unwrap();
+    let marker = workspace.path().join("pinned-executable-mounts-verified");
+    let mut command = pinned_test_command("pinned_executable_mount_child_probe");
+    command.env("SOLARIS_PINNED_EXECUTABLE_MOUNT_PROBE", &marker);
+
+    let result = CommandRunner::new_pinned(command)
+        .launch_policy(ProcessLaunchPolicy::workspace_sandbox(workspace.path(), []))
+        .run()
+        .await
+        .expect("supported Linux must start the pinned executable with read-only mounts");
+
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "sandbox child failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(std::fs::read(marker).unwrap(), b"verified");
+}
+
+#[test]
+fn pinned_executable_mount_child_probe() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(marker) = std::env::var_os("SOLARIS_PINNED_EXECUTABLE_MOUNT_PROBE") else {
+        return;
+    };
+    for path in ["/__solaris/target", "/__solaris/runner"] {
+        let metadata = std::fs::metadata(path).unwrap();
+        assert_eq!(
+            metadata.permissions().mode() & 0o7777,
+            0o555,
+            "incorrect mode for {path}"
+        );
+
+        let error = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect_err("pinned executable mount must remain read-only");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EROFS),
+            "mode change denied for the wrong reason: {path}"
+        );
+        assert!(std::fs::OpenOptions::new().write(true).open(path).is_err());
+    }
+    std::fs::write(marker, b"verified").unwrap();
+}
+
+#[tokio::test]
 async fn workspace_sandbox_allows_workspace_but_denies_external_state() {
     let workspace = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -267,7 +316,9 @@ fn sandbox_descendant_parent_helper() {
     let Some(marker) = std::env::var_os("SOLARIS_SANDBOX_DESCENDANT_MARKER") else {
         return;
     };
-    std::process::Command::new(std::env::current_exe().unwrap())
+    // Pinned execution uses a memfd; current_exe() resolves to its deleted name.
+    // Reopen the live executable through procfs when spawning the descendant.
+    std::process::Command::new("/proc/self/exe")
         .args(["--exact", "sandbox_descendant_writer_helper", "--nocapture"])
         .env("SOLARIS_SANDBOX_DESCENDANT_MARKER", marker)
         .spawn()
@@ -364,7 +415,8 @@ async fn target_cannot_run_before_containment_attach_completes() {
 
     let error = command
         .spawn()
-        .expect_err("injected attach failure must reject the child before target execution");
+        .err()
+        .expect("injected attach failure must reject the child before target execution");
     assert!(error.to_string().contains("injected containment attach failure"));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!marker.exists());
@@ -408,7 +460,8 @@ async fn guardian_exec_error_recovery_does_not_retry_the_broken_control_socket()
 
     let error = command
         .spawn()
-        .expect_err("injected EXEC_ERROR must reject the released launch");
+        .err()
+        .expect("injected EXEC_ERROR must reject the released launch");
     let recovery = process_recovery_required(&error).expect("delayed guardian exit must retain recovery ownership");
 
     assert!(process_outcome_unknown(&error));

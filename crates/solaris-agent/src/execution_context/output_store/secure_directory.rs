@@ -621,7 +621,9 @@ fn link_count(_: &File) -> io::Result<u64> {
 
 #[cfg(not(windows))]
 fn sync_directory(directory: &Dir, _: &Path) -> io::Result<()> {
-    directory.try_clone()?.into_std_file().sync_all()
+    // A Dir may hold an O_PATH handle, which cannot be synced. Open a readable
+    // handle relative to the retained capability, without resolving its path.
+    directory.open(".")?.sync_all()
 }
 
 #[cfg(windows)]
@@ -689,3 +691,7 @@ fn sync_directory(directory: &Dir, path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "secure_directory_test.rs"]
+mod secure_directory_test;

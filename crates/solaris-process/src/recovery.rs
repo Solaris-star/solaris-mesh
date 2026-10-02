@@ -339,6 +339,7 @@ impl Drop for ProcessRecoveryTestGuard {
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn retry_process_recoveries_by_kind(kind: ProcessRecoveryKind) -> io::Result<()> {
     let recoveries = pending_process_recoveries()
         .into_iter()

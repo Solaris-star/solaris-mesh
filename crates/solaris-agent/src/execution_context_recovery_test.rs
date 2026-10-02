@@ -677,7 +677,8 @@ fn effect_output_is_reusable_without_appearing_in_the_ledger() {
 #[test]
 fn sqlite_effect_output_is_written_once_beside_the_workspace_ledger() {
     let workspace = tempfile::tempdir().unwrap();
-    let runtime_root = workspace.path().join(".solaris").join("runtime");
+    let workspace_root = workspace.path().canonicalize().unwrap();
+    let runtime_root = workspace_root.join(".solaris").join("runtime");
     let ledger =
         Arc::new(crate::runtime_ledger::SqliteRuntimeLedger::open(runtime_root.join("ledger.sqlite3")).unwrap());
     let run_id = RunId::new(format!("workspace-output-{}", uuid::Uuid::now_v7()));
@@ -720,7 +721,8 @@ fn sqlite_effect_output_is_written_once_beside_the_workspace_ledger() {
 #[test]
 fn ledger_local_output_store_reads_legacy_global_blob_without_writing_a_new_copy() {
     let workspace = tempfile::tempdir().unwrap();
-    let runtime_root = workspace.path().join(".solaris").join("runtime");
+    let workspace_root = workspace.path().canonicalize().unwrap();
+    let runtime_root = workspace_root.join(".solaris").join("runtime");
     let ledger = crate::runtime_ledger::SqliteRuntimeLedger::open(runtime_root.join("ledger.sqlite3")).unwrap();
     let run_id = RunId::new(format!("legacy-output-{}", uuid::Uuid::now_v7()));
     let legacy_store = EffectOutputStore::for_legacy_run(&run_id);

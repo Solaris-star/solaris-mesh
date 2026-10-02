@@ -17,6 +17,11 @@ members = [
 ]
 exclude = ["third_party/process_security_environment_spec"]
 
+[profile.test]
+# Sandbox tests execute their own binaries through the production size bound.
+# Omit debug symbols so test artifacts stay within that bound.
+debug = 0
+
 [workspace.package]
 version = "0.3.0"
 edition = "2024"

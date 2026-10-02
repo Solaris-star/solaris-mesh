@@ -10,12 +10,16 @@ use tokio::process::{Child, Command};
 use crate::recovery::outcome_unknown_error;
 use crate::sandbox::trusted_sandbox_helper;
 
+#[path = "unix_guardian_transport.rs"]
+mod transport;
+use transport::{
+    IO_TIMEOUT as HANDSHAKE_TIMEOUT, MAX_PACKET_BYTES as MAX_PLAN_BYTES, PacketReader, send_packet, set_nonblocking,
+};
+
 const GUARDIAN_ARGUMENT: &str = "--process-guardian-v2";
 const CONTROL_ARGUMENT: &str = "--control-fd";
 const PROTOCOL_VERSION: u16 = 2;
 const REQUIRE_VERIFIED_DRAIN: u8 = 1;
-const MAX_PLAN_BYTES: usize = 256 * 1024;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const READY: u8 = b'R';
 const PLAN: u8 = b'P';
@@ -43,6 +47,7 @@ struct GuardianReleaseFixture {
 
 pub(crate) struct GuardianControl {
     control: Option<AsyncFd<OwnedFd>>,
+    reader: PacketReader,
     #[cfg(feature = "sandbox-test-fixtures")]
     release_fixture: Option<GuardianReleaseFixture>,
     released: bool,
@@ -105,12 +110,14 @@ impl GuardianLaunch {
         if unsafe { libc::getpgid(child_id) } != child_id {
             return Err(io::Error::other("guardian did not enter its dedicated process group"));
         }
-        expect_packet(self.control.as_raw_fd(), READY, HANDSHAKE_TIMEOUT)?;
+        let mut reader = PacketReader::new();
+        expect_packet(&mut reader, self.control.as_raw_fd(), READY, HANDSHAKE_TIMEOUT)?;
         send_packet(self.control.as_raw_fd(), &self.plan)?;
-        expect_packet(self.control.as_raw_fd(), PLAN_ACCEPTED, HANDSHAKE_TIMEOUT)?;
+        expect_packet(&mut reader, self.control.as_raw_fd(), PLAN_ACCEPTED, HANDSHAKE_TIMEOUT)?;
         set_nonblocking(self.control.as_raw_fd())?;
         Ok(GuardianControl {
             control: Some(AsyncFd::new(self.control)?),
+            reader,
             #[cfg(feature = "sandbox-test-fixtures")]
             release_fixture: self.release_fixture,
             released: false,
@@ -137,7 +144,7 @@ impl GuardianControl {
             self.invalidate_control();
             return Err(outcome_unknown_error(error));
         }
-        let response = match recv_one_with_timeout(descriptor, HANDSHAKE_TIMEOUT) {
+        let response = match recv_one_with_timeout(&mut self.reader, descriptor, HANDSHAKE_TIMEOUT) {
             Ok(response) => response,
             Err(error) => {
                 self.invalidate_control();
@@ -214,7 +221,16 @@ impl GuardianControl {
                     "guardian control channel was lost after target release",
                 )));
             };
-            let mut readiness = match control.readable().await {
+            let readable = async {
+                if let Some(deadline) = self.reader.pending_deadline() {
+                    tokio::time::timeout_at(deadline.into(), control.readable())
+                        .await
+                        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guardian frame timed out"))?
+                } else {
+                    control.readable().await
+                }
+            };
+            let mut readiness = match readable.await {
                 Ok(readiness) => readiness,
                 Err(error) => {
                     self.invalidate_control();
@@ -267,7 +283,12 @@ impl GuardianControl {
         }
         if !self.finalized {
             let descriptor = self.control_descriptor()?;
-            send_packet(descriptor, &[FINALIZE])?;
+            if let Err(error) = send_packet(descriptor, &[FINALIZE]) {
+                // A stream write may have emitted only part of a frame. Never
+                // retry it on this channel; EOF also requests guardian cleanup.
+                self.invalidate_control();
+                return Err(error);
+            }
             self.finalized = true;
         }
         Ok(())
@@ -278,21 +299,21 @@ impl GuardianControl {
             return Ok(());
         };
         loop {
-            match recv_packet(descriptor, libc::MSG_DONTWAIT) {
-                Ok(packet) if packet.as_slice() == [TARGET_EXITED] => self.target_exited = true,
-                Ok(packet) if packet.as_slice() == [DRAINED] => self.drained = true,
-                Ok(packet) if packet.as_slice() == [EXEC_ERROR] => {
+            match self.reader.poll_packet(descriptor, Duration::ZERO) {
+                Ok(Some(packet)) if packet.as_slice() == [TARGET_EXITED] => self.target_exited = true,
+                Ok(Some(packet)) if packet.as_slice() == [DRAINED] => self.drained = true,
+                Ok(Some(packet)) if packet.as_slice() == [EXEC_ERROR] => {
                     self.failed = true;
                     self.invalidate_control();
                     return Err(outcome_unknown_error(io::Error::other(
                         "guardian reported target execution failure after release",
                     )));
                 }
-                Ok(_) => {
+                Ok(Some(_)) => {
                     self.invalidate_control();
                     return Err(outcome_unknown_error(invalid_input()));
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Ok(None) => return Ok(()),
                 Err(error) => {
                     self.invalidate_control();
                     return Err(outcome_unknown_error(error));
@@ -346,7 +367,9 @@ fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut descriptors = [-1; 2];
     #[cfg(target_os = "linux")]
     let socket_kind = libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let socket_kind = libc::SOCK_STREAM;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let socket_kind = libc::SOCK_SEQPACKET;
     let result = unsafe { libc::socketpair(libc::AF_UNIX, socket_kind, 0, descriptors.as_mut_ptr()) };
     if result == -1 {
@@ -360,76 +383,41 @@ fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     };
     set_cloexec(pair.0.as_raw_fd())?;
     set_cloexec(pair.1.as_raw_fd())?;
+    set_nonblocking(pair.0.as_raw_fd())?;
+    set_nonblocking(pair.1.as_raw_fd())?;
+    #[cfg(target_os = "macos")]
+    for descriptor in [pair.0.as_raw_fd(), pair.1.as_raw_fd()] {
+        let enabled: libc::c_int = 1;
+        if unsafe {
+            libc::setsockopt(
+                descriptor,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&enabled as *const libc::c_int).cast(),
+                std::mem::size_of_val(&enabled) as libc::socklen_t,
+            )
+        } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
     Ok(pair)
 }
 
-fn expect_packet(descriptor: RawFd, expected: u8, timeout: Duration) -> io::Result<()> {
-    if recv_one_with_timeout(descriptor, timeout)? == expected {
+fn expect_packet(reader: &mut PacketReader, descriptor: RawFd, expected: u8, timeout: Duration) -> io::Result<()> {
+    if recv_one_with_timeout(reader, descriptor, timeout)? == expected {
         Ok(())
     } else {
         Err(invalid_input())
     }
 }
 
-fn recv_one_with_timeout(descriptor: RawFd, timeout: Duration) -> io::Result<u8> {
-    let timeout = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-    let mut poll = libc::pollfd {
-        fd: descriptor,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    loop {
-        let result = unsafe { libc::poll(&mut poll, 1, timeout) };
-        if result == 1 {
-            let packet = recv_packet(descriptor, 0)?;
-            return if packet.len() == 1 {
-                Ok(packet[0])
-            } else {
-                Err(invalid_input())
-            };
-        }
-        if result == 0 {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "guardian handshake timed out"));
-        }
-        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return Err(io::Error::last_os_error());
-        }
-    }
-}
-
-fn recv_packet(descriptor: RawFd, flags: libc::c_int) -> io::Result<Vec<u8>> {
-    let mut packet = vec![0; MAX_PLAN_BYTES];
-    loop {
-        let read = unsafe { libc::recv(descriptor, packet.as_mut_ptr().cast(), packet.len(), flags) };
-        if read > 0 {
-            packet.truncate(usize::try_from(read).map_err(|_| invalid_input())?);
-            return Ok(packet);
-        }
-        if read == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        return Err(if read == -1 {
-            io::Error::last_os_error()
-        } else {
-            io::Error::new(io::ErrorKind::BrokenPipe, "guardian control channel closed")
-        });
-    }
-}
-
-fn send_packet(descriptor: RawFd, packet: &[u8]) -> io::Result<()> {
-    loop {
-        let written = unsafe { libc::send(descriptor, packet.as_ptr().cast(), packet.len(), 0) };
-        if written == packet.len() as isize {
-            return Ok(());
-        }
-        if written == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        return Err(if written == -1 {
-            io::Error::last_os_error()
-        } else {
-            io::Error::new(io::ErrorKind::WriteZero, "guardian packet write was incomplete")
-        });
+fn recv_one_with_timeout(reader: &mut PacketReader, descriptor: RawFd, timeout: Duration) -> io::Result<u8> {
+    let packet = reader.recv_packet(descriptor, timeout)?;
+    if packet.len() == 1 {
+        Ok(packet[0])
+    } else {
+        Err(invalid_input())
     }
 }
 
@@ -453,15 +441,6 @@ fn clear_cloexec(descriptor: RawFd) -> io::Result<()> {
 fn set_cloexec(descriptor: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
     if flags == -1 || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn set_nonblocking(descriptor: RawFd) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-    if flags == -1 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())

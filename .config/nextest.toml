@@ -27,7 +27,14 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 test-threads = "num-cpus"
 
 [profile.ci.junit]
-path = "target/nextest/ci/junit.xml"
+path = "junit.xml"
+
+# This workflow meets its 30-second completion bound in isolated Windows runs.
+# Reserve the scheduler pool so unrelated tests cannot delay its worker checks.
+[[profile.ci.overrides]]
+platform = 'cfg(windows)'
+filter = 'package(=solaris-agent) & test(=workflow_executor::tests::workflow_executor_v2_supervisor_test::configured_supervisor_bounds_independent_worker_concurrency)'
+threads-required = "num-test-threads"
 
 # ── E2E profile ─────────────────────────────────────────────────────────────
 # Run with: cargo nextest run --profile e2e --test e2e

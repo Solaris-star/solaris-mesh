@@ -14,8 +14,16 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn powershell_command() -> Command {
+    let mut command = Command::new("powershell.exe");
+    // CI reaches Windows PowerShell through Rust, so PowerShell 7 does not
+    // filter its module paths. Let Windows PowerShell rebuild its own defaults.
+    command.env_remove("PSModulePath");
+    command
+}
+
 fn write_digest_manifest(path: &Path) {
-    let digest = Command::new("powershell.exe")
+    let digest = powershell_command()
         .args(["-NoProfile", "-Command"])
         .arg(format!(
             "(Get-FileHash -LiteralPath '{}' -Algorithm SHA256).Hash.ToLowerInvariant()",
@@ -23,7 +31,13 @@ fn write_digest_manifest(path: &Path) {
         ))
         .output()
         .unwrap();
-    assert!(digest.status.success());
+    assert!(
+        digest.status.success(),
+        "Get-FileHash failed for {} ({}): {}",
+        path.display(),
+        digest.status,
+        String::from_utf8_lossy(&digest.stderr)
+    );
     std::fs::write(
         path.with_file_name(format!("{}.sha256", path.file_name().unwrap().to_string_lossy())),
         format!("sha256:{}\n", String::from_utf8(digest.stdout).unwrap().trim()),
@@ -42,7 +56,7 @@ fn package_architecture() -> &'static str {
 }
 
 fn remove_test_package(package_name: &str) {
-    let _ = Command::new("powershell.exe")
+    let _ = powershell_command()
         .args(["-NoProfile", "-Command"])
         .arg(format!(
             "@(Get-AppxPackage -Name '{}' -ErrorAction SilentlyContinue) | ForEach-Object {{ Remove-AppxPackage -Package $_.PackageFullName -ErrorAction SilentlyContinue }}",
@@ -76,7 +90,7 @@ fn populate_release_source(root: &Path, source: &Path, binary: &[u8], helper: &[
     std::fs::copy(std::env::current_exe().unwrap(), &proxy_path).unwrap();
     write_digest_manifest(&proxy_path);
     let proxy_package = source.join("solaris-windows-network-proxy.msix");
-    let package = Command::new("powershell.exe")
+    let package = powershell_command()
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(root.join("crates/solaris-process/windows-network-proxy/build-unsigned-package.ps1"))
         .arg("-BinaryPath")
@@ -128,7 +142,7 @@ fn assert_installed_payload(path: &Path) {
 
 fn assert_registration_or_platform_blocker(destination: &Path, package_name: &str) {
     let identity_path = destination.join("solaris-windows-network-proxy.identity.json");
-    let query = Command::new("powershell.exe")
+    let query = powershell_command()
         .args(["-NoProfile", "-Command"])
         .arg(format!(
             "$p=@(Get-AppxPackage -Name '{}' -ErrorAction SilentlyContinue)|Sort-Object Version -Descending|Select-Object -First 1; if($p){{ $p.PackageFamilyName }}",
@@ -163,7 +177,7 @@ fn windows_installer_copies_the_real_manifest_to_the_requested_layout() {
     let _cleanup = PackageCleanup::new(package_name.clone());
     populate_release_source(&root, source.path(), b"binary", b"helper", &package_name);
 
-    let status = Command::new("powershell.exe")
+    let status = powershell_command()
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(root.join("packaging/windows/install-solaris.ps1"))
         .arg("-SourceDirectory")
@@ -201,7 +215,7 @@ fn windows_release_zip_and_entry_installer_preserve_the_real_manifest() {
     );
 
     let archive = archive_root.path().join("solaris-release.zip");
-    let create = Command::new("powershell.exe")
+    let create = powershell_command()
         .args(["-NoProfile", "-Command"])
         .arg(format!(
             "Compress-Archive -Path '{}\\*' -DestinationPath '{}' -Force",
@@ -212,7 +226,7 @@ fn windows_release_zip_and_entry_installer_preserve_the_real_manifest() {
         .unwrap();
     assert!(create.success());
     assert!(archive.is_file());
-    let expand = Command::new("powershell.exe")
+    let expand = powershell_command()
         .args(["-NoProfile", "-Command"])
         .arg(format!(
             "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
@@ -232,7 +246,7 @@ fn windows_release_zip_and_entry_installer_preserve_the_real_manifest() {
     assert_eq!(adapter["cliCommand"], "solaris");
     assert_eq!(adapter["acpArgs"], serde_json::json!(["acp"]));
 
-    let status = Command::new("powershell.exe")
+    let status = powershell_command()
         .args(["-NoProfile", "-Command"])
         .arg(format!(
             "& \"{}\" -InstallDirectory \"{}\" -NetworkProxyPackageName '{}'",

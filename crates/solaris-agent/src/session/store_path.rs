@@ -1,7 +1,10 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
-use std::io::{self, ErrorKind, Read};
+#[cfg(windows)]
+use std::io;
+use std::io::{ErrorKind, Read};
+#[cfg(windows)]
 use std::mem;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;

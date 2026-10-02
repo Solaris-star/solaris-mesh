@@ -18,6 +18,7 @@ mod conditional_supplemental_tests {
             description: String::new(),
             has_user_specified_description: false,
             allowed_tools: vec![],
+            network: Default::default(),
             argument_hint: None,
             argument_names: vec![],
             when_to_use: None,

@@ -23,6 +23,8 @@ const SYMLINK_KEY: &str = "SOLARIS_MACOS_SANDBOX_EXTERNAL_SYMLINK";
 const PROTECTED_SECRET_KEY: &str = "SOLARIS_MACOS_SANDBOX_PROTECTED_SECRET";
 const LOOPBACK_KEY: &str = "SOLARIS_MACOS_SANDBOX_LOOPBACK";
 const ESCAPE_MARKER_KEY: &str = "SOLARIS_MACOS_SANDBOX_ESCAPE_MARKER";
+const HOST_DEATH_WORKSPACE_KEY: &str = "SOLARIS_MACOS_GUARDIAN_HOST_DEATH_WORKSPACE";
+const HOST_DEATH_PIDS_KEY: &str = "SOLARIS_MACOS_GUARDIAN_HOST_DEATH_PIDS";
 
 #[test]
 fn platform_probe_reports_full_only_after_real_seatbelt_checks() {
@@ -230,7 +232,7 @@ fn workspace_path_replacement_is_rejected_before_target_exec() {
     std::fs::rename(&workspace, &retained).unwrap();
     std::fs::create_dir(&workspace).unwrap();
 
-    let error = command.spawn().expect_err("replaced workspace path must be rejected");
+    let error = command.spawn().err().expect("replaced workspace path must be rejected");
 
     let report = sandbox_report(&error).expect("expected a structured workspace binding report");
     assert_eq!(report.enforcement(), SandboxEnforcement::Unavailable);
@@ -253,7 +255,7 @@ fn external_hardlink_is_rejected_before_target_exec() {
         .env(TARGET_MARKER_KEY, &marker)
         .launch_policy(ProcessLaunchPolicy::workspace_sandbox(workspace.path(), []));
 
-    let error = command.spawn().expect_err("external hardlink must be rejected");
+    let error = command.spawn().err().expect("external hardlink must be rejected");
 
     assert_eq!(sandbox_error(&error), Some(&SandboxError::ExternalHardlink));
     assert!(!marker.exists());
@@ -275,7 +277,7 @@ fn workspace_fifo_is_rejected_before_target_exec() {
         .env(TARGET_MARKER_KEY, &marker)
         .launch_policy(ProcessLaunchPolicy::workspace_sandbox(workspace.path(), []));
 
-    let error = command.spawn().expect_err("workspace FIFO must be rejected");
+    let error = command.spawn().err().expect("workspace FIFO must be rejected");
 
     assert_eq!(sandbox_error(&error), Some(&SandboxError::HostSocketExposed));
     assert!(!marker.exists());
@@ -354,6 +356,123 @@ async fn descendants_cannot_change_session_or_survive_managed_wait() {
     assert!(!marker.exists());
 }
 
+#[test]
+fn sandbox_guardian_host_death_target_probe() {
+    let Some(marker) = std::env::var_os(HOST_DEATH_PIDS_KEY) else {
+        return;
+    };
+    let descendant = unsafe { libc::fork() };
+    assert_ne!(descendant, -1);
+    if descendant == 0 {
+        // Only async-signal-safe operations after fork. Both processes remain
+        // uncooperative until the orphaned guardian kills their process group.
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+    let marker = PathBuf::from(marker);
+    let temporary = marker.with_extension("tmp");
+    std::fs::write(&temporary, format!("{} {descendant}", std::process::id())).unwrap();
+    std::fs::rename(temporary, marker).unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[tokio::test]
+async fn sandbox_guardian_host_death_helper() {
+    let Some(workspace) = std::env::var_os(HOST_DEATH_WORKSPACE_KEY) else {
+        return;
+    };
+    let marker = std::env::var_os(HOST_DEATH_PIDS_KEY).unwrap();
+    let mut command = pinned_test_command("sandbox_guardian_host_death_target_probe");
+    command.env(HOST_DEATH_PIDS_KEY, marker);
+    let result = CommandRunner::new_pinned(command)
+        .launch_policy(ProcessLaunchPolicy::workspace_sandbox(PathBuf::from(workspace), []))
+        .run()
+        .await;
+    panic!("target exited before its host was killed: {result:?}");
+}
+
+#[test]
+fn host_death_closes_stream_control_and_kills_sandboxed_descendants() {
+    use std::process::{Child, Command, Stdio};
+    use std::time::Instant;
+
+    struct Cleanup {
+        host: Child,
+        group: Option<libc::pid_t>,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = self.host.kill();
+            let _ = self.host.wait();
+            if let Some(group) = self.group {
+                unsafe { libc::kill(-group, libc::SIGKILL) };
+            }
+        }
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let marker = workspace.path().join("live-processes");
+    let host = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "sandbox_guardian_host_death_helper", "--nocapture"])
+        .env(HOST_DEATH_WORKSPACE_KEY, workspace.path())
+        .env(HOST_DEATH_PIDS_KEY, &marker)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut cleanup = Cleanup { host, group: None };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let pids = loop {
+        if let Ok(value) = std::fs::read_to_string(&marker) {
+            let pids = value
+                .split_whitespace()
+                .map(|value| value.parse::<libc::pid_t>().unwrap())
+                .collect::<Vec<_>>();
+            if pids.len() == 2 {
+                break pids;
+            }
+        }
+        assert!(
+            cleanup.host.try_wait().unwrap().is_none(),
+            "sandbox host exited before target readiness"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "sandboxed target and descendant did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(pids.iter().all(|pid| *pid > 1));
+    let group = unsafe { libc::getpgid(pids[0]) };
+    assert!(group > 1);
+    assert_ne!(group, unsafe { libc::getpgrp() });
+    assert_eq!(unsafe { libc::getpgid(pids[1]) }, group);
+    cleanup.group = Some(group);
+    for pid in &pids {
+        assert_eq!(
+            unsafe { libc::kill(*pid, 0) },
+            0,
+            "probe process must be alive before host death"
+        );
+    }
+
+    cleanup.host.kill().unwrap();
+    cleanup.host.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pids.iter().all(|pid| {
+        (unsafe { libc::kill(*pid, 0) }) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "guardian left a live or unreaped target/descendant after host death"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cleanup.group = None;
+}
+
 #[cfg(feature = "sandbox-test-fixtures")]
 #[test]
 fn malformed_start_handshake_fails_before_target_exec() {
@@ -372,7 +491,8 @@ fn malformed_start_handshake_fails_before_target_exec() {
 
     let error = command
         .spawn()
-        .expect_err("partial helper marker must reject the target");
+        .err()
+        .expect("partial helper marker must reject the target");
 
     let report = sandbox_report(&error).expect("expected a structured handshake report");
     assert_eq!(report.enforcement(), SandboxEnforcement::Unavailable);

@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::io::Result;
+use std::io::{self, Result};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -16,7 +16,9 @@ use crate::recovery::{
     register_process_recovery, retry_process_recovery,
 };
 use crate::runner::PinnedExecutable;
-use crate::sandbox::{PreparedSandbox, SandboxReport};
+#[cfg(any(test, all(debug_assertions, feature = "sandbox-test-fixtures")))]
+use crate::sandbox::SandboxBackend;
+use crate::sandbox::{PreparedSandbox, SandboxReason, SandboxReport};
 use crate::spawn_authorization::ProcessSpawnAuthorization;
 
 #[derive(Debug)]
@@ -195,6 +197,7 @@ impl ManagedChild {
             .map_err(|error| cleanup_after_error(&mut sandbox, ProcessFinalizationStage::Spawn, error))?;
         let verified_drain = sandbox.requires_verified_process_tree_drain();
         if let Err(error) = containment_launch.ensure_final_command(&mut pinned.command, disposition, verified_drain) {
+            report_launch_failure("guardian_prepare", sandbox.report(), &error);
             let error = sandbox.map_containment_error(error);
             return Err(cleanup_after_error(
                 &mut sandbox,
@@ -219,6 +222,7 @@ impl ManagedChild {
             .map_err(|error| cleanup_after_error(&mut sandbox, ProcessFinalizationStage::Spawn, error))?;
         let verified_drain = sandbox.requires_verified_process_tree_drain();
         if let Err(error) = containment_launch.ensure_final_command(&mut command, disposition, verified_drain) {
+            report_launch_failure("guardian_prepare", sandbox.report(), &error);
             let error = sandbox.map_containment_error(error);
             return Err(cleanup_after_error(
                 &mut sandbox,
@@ -257,6 +261,7 @@ impl ManagedChild {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
+                report_launch_failure("process_spawn", sandbox.report(), &error);
                 let error = sandbox.map_spawn_error(error);
                 return Err(cleanup_after_error(
                     &mut sandbox,
@@ -284,6 +289,7 @@ impl ManagedChild {
         let mut containment = match ChildContainment::attach(&mut child, containment_launch) {
             Ok(containment) => containment,
             Err(error) => {
+                report_launch_failure("guardian_attach", sandbox.report(), &error);
                 let error = sandbox.map_containment_error(error);
                 return Err(finish_started_child_failure(
                     child,
@@ -297,6 +303,7 @@ impl ManagedChild {
             }
         };
         if let Err(error) = containment.release_target() {
+            report_launch_failure("guardian_release", sandbox.report(), &error);
             let error = sandbox.map_containment_error(error);
             return Err(finish_started_child_failure(
                 child,
@@ -547,6 +554,34 @@ impl ManagedChild {
     pub async fn shutdown(&mut self) -> Result<()> {
         self.kill().await
     }
+}
+
+fn report_launch_failure(stage: &'static str, report: SandboxReport, error: &io::Error) {
+    if report.reason() == SandboxReason::NotRequested {
+        return;
+    }
+    // Preserve diagnostic categories before sandbox error mapping discards the
+    // underlying errno. Never format the error itself: it may contain paths,
+    // target arguments, environment values, or another sensitive payload.
+    tracing::warn!(
+        stage,
+        backend = ?report.backend(),
+        error_kind = ?error.kind(),
+        os_error = ?error.raw_os_error(),
+        "sandbox process launch failed"
+    );
+    // Native sandbox tests need evidence even without a tracing subscriber.
+    #[cfg(all(debug_assertions, feature = "sandbox-test-fixtures"))]
+    eprintln!("{}", launch_failure_diagnostic(stage, report.backend(), error));
+}
+
+#[cfg(any(test, all(debug_assertions, feature = "sandbox-test-fixtures")))]
+fn launch_failure_diagnostic(stage: &'static str, backend: SandboxBackend, error: &io::Error) -> String {
+    format!(
+        "solaris process launch failed: stage={stage} backend={backend:?} kind={:?} os={:?}",
+        error.kind(),
+        error.raw_os_error()
+    )
 }
 
 fn cleanup_after_error(

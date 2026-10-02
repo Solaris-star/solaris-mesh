@@ -1,3 +1,35 @@
+use std::io;
+
+use super::launch_failure_diagnostic;
+use crate::SandboxBackend;
+
+#[test]
+fn launch_diagnostic_omits_sensitive_error_message() {
+    let error = io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "/private/secret-path --token=sensitive-token environment=secret-value",
+    );
+
+    let diagnostic = launch_failure_diagnostic("guardian_attach", SandboxBackend::MacOsSeatbelt, &error);
+
+    assert_eq!(
+        diagnostic,
+        "solaris process launch failed: stage=guardian_attach backend=MacOsSeatbelt kind=InvalidInput os=None"
+    );
+}
+
+#[test]
+fn launch_diagnostic_preserves_stage_and_raw_os_error_before_mapping() {
+    let error = io::Error::from_raw_os_error(13);
+
+    let diagnostic = launch_failure_diagnostic("process_spawn", SandboxBackend::MacOsSeatbelt, &error);
+
+    assert!(diagnostic.contains("stage=process_spawn backend=MacOsSeatbelt"));
+    assert!(diagnostic.contains(&format!("kind={:?}", error.kind())));
+    assert!(diagnostic.ends_with("os=Some(13)"));
+    assert!(!diagnostic.contains(&error.to_string()));
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 mod tests {
     use std::path::{Path, PathBuf};

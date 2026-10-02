@@ -71,6 +71,7 @@ impl ProtectedIdentitySnapshot {
         Ok(Self { identities })
     }
 
+    #[cfg(windows)]
     pub(super) fn verify_workspace(&mut self, protected_roots: &[PathBuf], workspace_root: &Path) -> io::Result<()> {
         scan_roots(protected_roots, &[], ScanPurpose::Protected, |metadata| {
             if metadata.links > 1 {
@@ -169,6 +170,10 @@ fn reserve_identity(identities: &mut HashSet<FileIdentity>) -> io::Result<()> {
 #[derive(Clone, Copy)]
 enum ScanPurpose {
     Protected,
+    #[cfg_attr(
+        not(windows),
+        expect(dead_code, reason = "Path-based workspace scans are only used on Windows")
+    )]
     Workspace,
 }
 
@@ -259,8 +264,7 @@ fn scan_retained_unix_directory(
     excluded_roots: &[PathBuf],
     mut visit_file: impl FnMut(OpenObjectMetadata) -> io::Result<()>,
 ) -> io::Result<()> {
-    use cap_std::fs::{Dir, MetadataExt};
-    use std::os::unix::fs::FileTypeExt;
+    use cap_std::fs::{Dir, FileTypeExt, MetadataExt};
 
     let mut pending = vec![(Dir::from_std_file(root), PathBuf::new())];
     let mut scanned = 0_usize;
