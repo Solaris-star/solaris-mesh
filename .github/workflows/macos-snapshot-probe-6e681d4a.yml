@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   snapshot:
-    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '3' && github.run_attempt == '1'
+    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '4' && github.run_attempt == '1'
     runs-on: macos-latest
     timeout-minutes: 15
     steps:

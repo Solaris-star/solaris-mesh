@@ -132,7 +132,10 @@ impl EffectOutputStore {
 
 pub(crate) fn effect_output_state_root() -> PathBuf {
     #[cfg(test)]
-    return std::env::temp_dir().join("solaris-mesh-test-legacy-effect-outcomes");
+    return std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical test temporary directory")
+        .join("solaris-mesh-test-legacy-effect-outcomes");
 
     #[cfg(not(test))]
     solaris_config::config::app_config_dir()
