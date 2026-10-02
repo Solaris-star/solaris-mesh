@@ -713,12 +713,12 @@ fn push_flags(argv: &mut Vec<OsString>, flags: &[&str]) {
 }
 
 fn push_fd_file(argv: &mut Vec<OsString>, descriptor: i32, destination: &str) {
+    // Set the creation mode before Bubblewrap makes the data mount read-only.
     argv.extend([
+        OsString::from("--perms"),
+        OsString::from("0555"),
         OsString::from("--ro-bind-data"),
         OsString::from(descriptor.to_string()),
-        OsString::from(destination),
-        OsString::from("--chmod"),
-        OsString::from("0555"),
         OsString::from(destination),
     ]);
 }

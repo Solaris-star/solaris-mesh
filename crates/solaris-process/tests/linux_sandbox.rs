@@ -21,6 +21,55 @@ fn platform_probe_reports_full_only_after_a_real_handshake() {
 }
 
 #[tokio::test]
+async fn pinned_executables_are_executable_and_cannot_be_made_writable() {
+    let workspace = tempfile::tempdir().unwrap();
+    let marker = workspace.path().join("pinned-executable-mounts-verified");
+    let mut command = pinned_test_command("pinned_executable_mount_child_probe");
+    command.env("SOLARIS_PINNED_EXECUTABLE_MOUNT_PROBE", &marker);
+
+    let result = CommandRunner::new_pinned(command)
+        .launch_policy(ProcessLaunchPolicy::workspace_sandbox(workspace.path(), []))
+        .run()
+        .await
+        .expect("supported Linux must start the pinned executable with read-only mounts");
+
+    assert_eq!(
+        result.exit_code,
+        Some(0),
+        "sandbox child failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(std::fs::read(marker).unwrap(), b"verified");
+}
+
+#[test]
+fn pinned_executable_mount_child_probe() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(marker) = std::env::var_os("SOLARIS_PINNED_EXECUTABLE_MOUNT_PROBE") else {
+        return;
+    };
+    for path in ["/__solaris/target", "/__solaris/runner"] {
+        let metadata = std::fs::metadata(path).unwrap();
+        assert_eq!(
+            metadata.permissions().mode() & 0o7777,
+            0o555,
+            "incorrect mode for {path}"
+        );
+
+        let error = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect_err("pinned executable mount must remain read-only");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EROFS),
+            "mode change denied for the wrong reason: {path}"
+        );
+        assert!(std::fs::OpenOptions::new().write(true).open(path).is_err());
+    }
+    std::fs::write(marker, b"verified").unwrap();
+}
+
+#[tokio::test]
 async fn workspace_sandbox_allows_workspace_but_denies_external_state() {
     let workspace = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();

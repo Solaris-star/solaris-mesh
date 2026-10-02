@@ -215,6 +215,48 @@ fn strict_profile_contains_every_required_namespace_and_no_try_option() {
 }
 
 #[test]
+fn pinned_executable_modes_are_set_before_each_read_only_data_mount() {
+    let layout = layout("/workspace", Vec::new());
+    for proxy_enabled in [false, true] {
+        let argv = build_bwrap_argv(
+            &layout,
+            Path::new("/workspace"),
+            Path::new("/private-home"),
+            Path::new("/private-tmp"),
+            Path::new("/private-state"),
+            &[],
+            40,
+            41,
+            42,
+            43,
+            &[],
+            proxy_enabled,
+        )
+        .unwrap();
+        let options = argv
+            .iter()
+            .take_while(|value| *value != "--")
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        // Bubblewrap consumes --perms for one operation only. Each executable
+        // must be created executable before its mount becomes read-only.
+        for (descriptor, destination) in [("41", "/__solaris/target"), ("42", "/__solaris/runner")] {
+            assert!(
+                options
+                    .windows(5)
+                    .any(|values| values == ["--perms", "0555", "--ro-bind-data", descriptor, destination]),
+                "missing executable mode before read-only mount of {destination}"
+            );
+        }
+        assert_eq!(options.iter().filter(|value| **value == "--perms").count(), 2);
+        assert_eq!(options.iter().filter(|value| **value == "--ro-bind-data").count(), 2);
+        assert!(!options.iter().any(|value| value == "--chmod"));
+        assert!(!options.iter().any(|value| value == "--bind-data"));
+    }
+}
+
+#[test]
 fn protected_root_is_masked_with_an_empty_read_only_bind() {
     let layout = layout("/workspace", vec![PathBuf::from("/runtime")]);
     let argv = build_bwrap_argv(

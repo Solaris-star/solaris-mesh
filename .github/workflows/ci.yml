@@ -55,6 +55,18 @@ jobs:
         shell: bash
         run: python3 scripts/diagnose-linux-sandbox.py
 
+      - name: Verify Unix guardian framing, interrupted I/O, and cleanup
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          vx cargo test -p solaris-process --all-features --lib --bin solaris-process-sandbox-helper unix_guardian -- --test-threads=1
+          vx cargo test -p solaris-process --all-features --test unix_guardian_protocol -- --test-threads=1
+
+      - name: Verify Windows packaged helper ACL trust
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: vx cargo test -p solaris-process --all-features --lib sandbox::helper::helper_test -- --test-threads=1
+
       - name: Probe Bubblewrap, Landlock, handshake, and cleanup
         if: runner.os == 'Linux'
         shell: bash
@@ -71,6 +83,11 @@ jobs:
         run: |
           test -x /usr/bin/sandbox-exec
           vx cargo test -p solaris-process --all-features --test macos_sandbox -- --test-threads=1
+
+      - name: Verify frozen executable snapshots
+        if: ${{ !cancelled() && runner.os != 'Windows' }}
+        shell: bash
+        run: vx cargo test -p solaris-process --all-features --lib pinned_executable_runs_frozen_snapshot_after_source_overwrite -- --test-threads=1
 
       - name: Check formatting
         run: vx just fmt-check
