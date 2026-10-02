@@ -1,0 +1,32 @@
+name: Windows supervisor probe 2e5b862f
+
+on:
+  push:
+    branches: ["Solaris-star/ci/windows-supervisor-probe-2e5b862f"]
+    paths: [".github/workflows/windows-supervisor-probe-2e5b862f.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  supervisor:
+    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '1' && github.run_attempt == '1'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: loonghao/vx@v0.9.26
+        with:
+          setup: 'true'
+          cache: 'true'
+      - name: Run the unchanged supervisor concurrency test in isolation
+        shell: pwsh
+        run: |
+          foreach ($trial in 1..3) {
+            Write-Host "Supervisor isolated trial $trial"
+            vx cargo test -p solaris-agent --lib workflow_executor::tests::workflow_executor_v2_supervisor_test::configured_supervisor_bounds_independent_worker_concurrency -- --exact --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
