@@ -50,6 +50,11 @@ jobs:
           sudo apt-get install --yes bubblewrap
           bwrap --version
 
+      - name: Diagnose Linux namespace startup without changing host policy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 scripts/diagnose-linux-sandbox.py
+
       - name: Probe Bubblewrap, Landlock, handshake, and cleanup
         if: runner.os == 'Linux'
         shell: bash

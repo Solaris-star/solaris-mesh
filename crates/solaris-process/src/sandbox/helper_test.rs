@@ -1,4 +1,6 @@
 use super::{parse_manifest_digest, pin_packaged_candidate};
+#[cfg(windows)]
+use crate::runner::pin_executable_by_digest;
 use crate::{SandboxError, SandboxReason};
 
 #[cfg(unix)]
@@ -94,6 +96,27 @@ fn packaged_helper_accepts_read_execute_only_windows_dacl() {
     tighten_test_dacl(&helper, "RX");
     tighten_test_dacl(&manifest, "R");
 
+    // Keep trust-policy failures distinguishable from digest/pinning failures.
+    // The public failure remains fail-closed; these diagnostics only run in tests.
+    for path in [&helper, &manifest] {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        super::require_non_writable_package_file(path, &metadata).unwrap_or_else(|error| {
+            let dacl = std::process::Command::new("icacls.exe")
+                .arg(path)
+                .output()
+                .map(|output| {
+                    format!(
+                        "status={} stdout={} stderr={}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                });
+            panic!("package file trust rejected {path:?}: {error:?}; DACL: {dacl:?}");
+        });
+    }
+    pin_executable_by_digest(&helper, &digest)
+        .unwrap_or_else(|error| panic!("read/execute-only helper pinning failed: {error:?}"));
     pin_packaged_candidate(&helper, &manifest, None, &digest).unwrap();
 }
 
