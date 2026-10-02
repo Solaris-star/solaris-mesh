@@ -331,10 +331,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn pinned_executable_runs_frozen_snapshot_after_source_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+
         let directory = tempfile::tempdir().unwrap();
         let shell = std::env::var_os("SHELL").expect("SHELL must identify the platform shell for process tests");
         let source = directory.path().join("approved-shell");
         std::fs::copy(shell, &source).unwrap();
+        // This temporary source must be writable to exercise replacement after
+        // pinning, independently of the system shell's copied permissions.
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(mode | 0o200)).unwrap();
         let approved = inspect_executable(&source).unwrap();
         let pinned = pin_executable(&source, &approved).unwrap();
         let pinned_identity = pinned.identity().clone();

@@ -1,0 +1,27 @@
+name: macOS snapshot probe 6e681d4a
+
+on:
+  push:
+    branches: ["Solaris-star/ci/macos-snapshot-probe-6e681d4a"]
+    paths: [".github/workflows/macos-snapshot-probe-6e681d4a.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    if: github.repository == 'Solaris-star/solaris-mesh' && github.run_number == '1' && github.run_attempt == '1'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: loonghao/vx@v0.9.26
+        with:
+          setup: 'true'
+          cache: 'true'
+      - name: Verify source replacement and frozen executable launch
+        shell: bash
+        run: vx cargo test -p solaris-process --all-features --lib pinned_executable_runs_frozen_snapshot_after_source_overwrite -- --test-threads=1
